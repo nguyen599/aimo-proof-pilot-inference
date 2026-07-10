@@ -645,8 +645,8 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "radix_prefix_cache": "disabled for both paths",
                 "speculative_decoding": (
-                    "DFLASH is mandatory; block size 8 with a 512-token local "
-                    "BF16 draft KV ring"
+                    "DFLASH is mandatory; block size 8 with a local BF16 draft "
+                    "model and a 512-token FP8 draft KV ring"
                 ),
                 "caveat": (
                     "The full-reprefill timing includes scheduler, IPC, and per-request "

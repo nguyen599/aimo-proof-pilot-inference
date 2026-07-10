@@ -52,6 +52,10 @@ the cache.
 
 ## KV-cache reuse experiment
 
+For a diagram-first explanation of the submission notebook's complete
+target-KV, draft-ring, radix-prefix, and DFlash verification flow, see
+[`dflash-kv-cache-architecture.md`](dflash-kv-cache-architecture.md).
+
 `kv_cache_experiment.py` compares normal SGLang generation, which reuses the
 request's KV state while decoding, with an emulated no-reuse path that submits
 one-token requests over the entire growing sequence. Radix prefix caching is
