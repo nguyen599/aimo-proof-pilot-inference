@@ -50,6 +50,58 @@ reasoning parser (`reasoning_content` separated from `content` in the API).
 First boot JIT-compiles triton kernels for sm90 (~2 min); later boots reuse
 the cache.
 
+## KV-cache reuse experiment
+
+For a diagram-first explanation of the submission notebook's complete
+target-KV, draft-ring, radix-prefix, and DFlash verification flow, see
+[`dflash-kv-cache-architecture.md`](dflash-kv-cache-architecture.md).
+
+`kv_cache_experiment.py` compares normal SGLang generation, which reuses the
+request's KV state while decoding, with an emulated no-reuse path that submits
+one-token requests over the entire growing sequence. Radix prefix caching is
+disabled for both paths, so every one-token request performs a full prefill.
+DFlash is mandatory in this experiment: there is no opt-in switch and no
+non-DFlash fallback. It always loads the local BF16 draft, uses block size 8,
+an auto-read 512-token draft ring, Triton draft attention, and the launcher
+environment settings.
+
+Run the default equation-solving experiment on GPU 1 with the patched
+environment:
+
+```bash
+cd /workspace
+/workspace/pp/venv/bin/python kv_cache_experiment.py \
+  --gpu 1 \
+  --json-out eval/results/kv_cache_reuse_h200_dflash.json
+```
+
+The default target KV dtype is production's `fp8_e4m3`. The full-reprefill
+timing includes one SGLang scheduler/IPC round trip and per-request allocation
+overhead per output token, so it is an end-to-end comparison rather than a pure
+attention-kernel benchmark. Because each no-reuse request ends on its one target
+prefill token, that arm does not execute a DFlash draft/verify step; the result
+measures KV-reuse cost in a DFlash-enabled runtime, not symmetric speculative
+throughput.
+The JSON also preserves DFlash acceptance metadata, the effective block-size
+override versus the draft's declared value, warmup data, and streaming chunk
+sizes so the speculative behavior is auditable.
+
+The recorded H200 run is in
+[`kv_cache_reuse_h200_dflash.json`](eval/results/kv_cache_reuse_h200_dflash.json)
+with its [complete console log](eval/results/kv_cache_reuse_h200_dflash.log):
+
+| Arm | Tokens | Elapsed | End-to-end rate | Correct |
+|---|---:|---:|---:|---|
+| With KV reuse + DFlash | 244 | 1.516 s | 160.98 tok/s | yes |
+| Full re-prefill | 244 | 15.763 s | 15.48 tok/s | yes |
+
+Full re-prefill was 10.40x slower. The KV-reuse arm ran 63 DFlash verify
+steps, accepting 180 of 441 proposed draft tokens (40.82% acceptance;
+published mean accept length 3.873). Its 244 tokens arrived in 64 stream
+chunks. As expected, none of the 244 one-token full-reprefill requests
+reported a speculative verify metric. Prefix-cache hits were zero in both
+arms.
+
 ## Measured throughput (2× H200, 512-token generations)
 
 | Concurrency per GPU | Total tok/s | Per stream |
