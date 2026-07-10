@@ -13,13 +13,18 @@ VENV="${VENV:-/workspace/pp/venv}"
 MODEL="${MODEL:-/workspace/models/opd-32b-deploy}"
 PORT="${PORT:-30000}"
 HOST="${HOST:-127.0.0.1}"
+TP="${TP:-1}"                  # tensor parallelism; TP=2 spans both H200s (NVLink)
 CTX="${CTX:-200000}"           # context length
 MEMFRAC="${MEMFRAC:-0.88}"     # weights (61GB) + fp8 KV pool on a 143GB H200
 MAXREQ="${MAXREQ:-48}"         # max concurrent requests (= decode cuda-graph max bs)
 CHUNKED="${CHUNKED:-2048}"     # prefill chunk size (prefill graph buckets derive from it)
 KV_SPLITS="${KV_SPLITS:-32}"   # triton decode kv-splits (long-ctx single-stream occupancy)
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+if [ "$TP" = 2 ]; then
+  export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+else
+  export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+fi
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-9.0a}"   # H200 = sm90
 export FLASHINFER_USE_CUDA_NORM=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -48,12 +53,12 @@ fi
 # capture every decode bs 1..16 (no padding for small batches) + sparse tail to MAXREQ
 CG_BS_DECODE="$(for b in $(seq 1 16) 20 24 28 32 40 48 64 96 128; do if [ "$b" -le "$MAXREQ" ]; then printf '%s ' "$b"; fi; done)"
 
-echo "[serve_opd32b] model=$MODEL gpu=$CUDA_VISIBLE_DEVICES port=$PORT ctx=$CTX memfrac=$MEMFRAC maxreq=$MAXREQ"
+echo "[serve_opd32b] model=$MODEL gpu=$CUDA_VISIBLE_DEVICES tp=$TP port=$PORT ctx=$CTX memfrac=$MEMFRAC maxreq=$MAXREQ"
 
 exec "$VENV/bin/python" -m sglang.launch_server \
   --model-path "$MODEL" \
   --attention-backend triton \
-  --tp 1 --host "$HOST" --port "$PORT" \
+  --tp "$TP" --host "$HOST" --port "$PORT" \
   --mem-fraction-static "$MEMFRAC" \
   --chunked-prefill-size "$CHUNKED" \
   --context-length "$CTX" \

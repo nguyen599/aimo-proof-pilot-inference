@@ -66,3 +66,25 @@ KV cache grows.
 `sample_results_sglang.json` holds the outputs of the 6-problem sample run
 (5/6 proved cleanly; the harmonic-sum problem thinks past the token cap —
 known long-thinking tendency of this OPD checkpoint).
+
+## Tensor parallelism
+
+`TP=2 bash serve_opd32b.sh` spans one server across both H200s (NVLink). The
+patched model TP-shards the per-head attention sinks (20 heads per rank).
+~1.3× single-stream speed and double the KV headroom; use it when per-problem
+compute matters more than problems-in-parallel.
+
+## Agentic eval (eval/)
+
+`eval/problems.csv` — the 6 AIMO Proof Pilot problems (from the markschemes
+PDF, LaTeX-faithful). `eval/run_eval.sh` runs the unmodified proof-pilot
+agentic loop (`run_v2.py` prove→verify→refine→select, prompts byte-identical)
+against the server; the loop code comes from the `proof-pilot-code` bundle
+(not committed, same as the env).
+
+Finding (DIVALL): budget is everything. At 900s/problem the loop degenerates
+to salvage-only (0 refines, all calls force-closed) and answered wrong
+(998002). At 3600s on the TP-2 server the full machinery engaged (33
+candidates, 26 refines, 1.19M tokens) and converged to the correct 998285 —
+a unanimous-verified refinement won 3/5 selector votes. See
+`eval/results/trace_DIVALL_3600_summary.json`.
