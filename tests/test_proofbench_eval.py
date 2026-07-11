@@ -67,6 +67,9 @@ class ProofBenchEvaluationTests(unittest.TestCase):
         self.assertIs(fp32["triton_attention_reduce_in_fp32"], True)
         fp32_head = config["profiles"]["bf16_strict_fp32_lm_head"]["common_argument_overrides"]
         self.assertIs(fp32_head["enable_fp32_lm_head"], True)
+        fp32_full = config["profiles"]["bf16_strict_fp32_full"]["common_argument_overrides"]
+        self.assertIs(fp32_full["triton_attention_reduce_in_fp32"], True)
+        self.assertIs(fp32_full["enable_fp32_lm_head"], True)
 
     def test_invalid_prover_output_raises(self):
         async def run():
