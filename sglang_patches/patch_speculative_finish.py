@@ -19,7 +19,9 @@ from pathlib import Path
 
 
 FINISH_MARKER = "# DFLASH_FINISH_ORDER_FIX: choose the earliest visible boundary."
+FINISH_REPLAY_MARKER = "# DFLASH_FINISH_REPLAY_FIX: replay stock checks one token at a time."
 KV_MARKER = "# DFLASH_FINISH_KV_FIX: rejected/post-stop tail is overallocated, not committed."
+KV_HARDENED_MARKER = "# DFLASH_FINISH_KV_HARDENED: never decommit outside this verify chunk."
 
 SCHEDULE_METHOD_RE = re.compile(
     r"    def update_finish_state\(self, new_accepted_len: int = 1\):\n"
@@ -28,7 +30,7 @@ SCHEDULE_METHOD_RE = re.compile(
     re.DOTALL,
 )
 
-NEW_FINISH_METHOD = '''    def update_finish_state(self, new_accepted_len: int = 1):
+LEGACY_FINISH_METHOD = '''    def update_finish_state(self, new_accepted_len: int = 1):
         if self.finished():
             return
 
@@ -115,8 +117,109 @@ NEW_FINISH_METHOD = '''    def update_finish_state(self, new_accepted_len: int =
 
 '''
 
+NEW_FINISH_METHOD = '''    def update_finish_state(self, new_accepted_len: int = 1):
+        if self.finished():
+            return
+
+        if self.to_finish:
+            self.finished_reason = self.to_finish
+            self.to_finish = None
+            return
+
+        # DFLASH_FINISH_ORDER_FIX: choose the earliest visible boundary.
+        # DFLASH_FINISH_REPLAY_FIX: replay stock checks one token at a time.
+        # Stock SGLang evaluates length, grammar, token, vocabulary, then string
+        # after every generated token. A speculative verify step publishes a
+        # block, so replay that exact order over the new tail. This also finds
+        # the earliest match across differently ordered stop strings/regexes.
+        raw_output_len = len(self.output_ids)
+        output_len_before_step = max(0, raw_output_len - new_accepted_len)
+        raw_tail = self.output_ids[output_len_before_step:]
+        del self.output_ids[output_len_before_step:]
+
+        try:
+            for token_offset, token_id in enumerate(raw_tail, start=1):
+                self.output_ids.append(token_id)
+
+                if len(self.output_ids) >= self.sampling_params.max_new_tokens:
+                    self.finished_reason = FINISH_LENGTH(
+                        length=self.sampling_params.max_new_tokens
+                    )
+                    self.finished_len = self.sampling_params.max_new_tokens
+                    return
+
+                # Grammar state cannot be rolled back per token. DFlash rejects
+                # grammar-constrained requests, while other callers retain the
+                # stock whole-chunk check at the final accepted token.
+                if (
+                    token_offset == len(raw_tail)
+                    and self.grammar is not None
+                    and self.grammar.is_terminated()
+                ):
+                    self.finished_reason = FINISH_MATCHED_TOKEN(
+                        matched=self.output_ids[-1]
+                    )
+                    return
+
+                new_accepted_tokens = self.output_ids[-1:]
+                if self._check_token_based_finish(new_accepted_tokens):
+                    return
+                if self._check_vocab_boundary_finish(new_accepted_tokens):
+                    return
+                if self._check_str_based_finish(1):
+                    return
+        finally:
+            # output_ids is append-only by contract. Keep the raw speculative
+            # tail for accounting; finished_len/output_ids_through_stop controls
+            # what is published.
+            del self.output_ids[output_len_before_step:]
+            self.output_ids.extend(raw_tail)
+
+'''
+
 HELPER_INSERTION_POINT = "logger = logging.getLogger(__name__)\n\n\n"
 KV_HELPER = '''logger = logging.getLogger(__name__)
+
+
+def _trim_dflash_finished_committed_tail(req: Req, new_accepted_len: int) -> int:
+    """Move unpublished DFlash KV positions from committed to overallocated."""
+
+    if req.finished_len is None:
+        return 0
+    discarded = max(0, len(req.output_ids) - int(req.finished_len))
+    if discarded == 0:
+        return 0
+    # DFLASH_FINISH_KV_HARDENED: never decommit outside this verify chunk.
+    if discarded > int(new_accepted_len):
+        raise RuntimeError(
+            "DFLASH finished tail exceeds the current verify chunk: "
+            f"{discarded=}, {new_accepted_len=}"
+        )
+    new_committed_len = req.kv_committed_len - discarded
+    if new_committed_len < 0:
+        raise RuntimeError(
+            "DFLASH finished tail exceeds committed KV length: "
+            f"{discarded=}, {req.kv_committed_len=}"
+        )
+    cache_protected_len = int(getattr(req, "cache_protected_len", 0))
+    if new_committed_len < cache_protected_len:
+        raise RuntimeError(
+            "DFLASH finished tail would decommit protected prefix KV: "
+            f"{new_committed_len=}, {cache_protected_len=}"
+        )
+    kv_allocated_len = int(getattr(req, "kv_allocated_len", new_committed_len))
+    if new_committed_len > kv_allocated_len:
+        raise RuntimeError(
+            "DFLASH committed KV exceeds allocated KV after tail trim: "
+            f"{new_committed_len=}, {kv_allocated_len=}"
+        )
+    req.kv_committed_len = new_committed_len
+    return discarded
+
+
+'''
+
+LEGACY_KV_HELPER = '''logger = logging.getLogger(__name__)
 
 
 def _trim_dflash_finished_committed_tail(req: Req) -> int:
@@ -146,6 +249,15 @@ RESULT_CALL_NEW = '''            req.update_finish_state(new_accepted_len)
 
             if batch.spec_algorithm.is_dflash():
                 # DFLASH_FINISH_KV_FIX: rejected/post-stop tail is overallocated, not committed.
+                _trim_dflash_finished_committed_tail(req, new_accepted_len)
+
+            self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
+'''
+
+LEGACY_RESULT_CALL_NEW = '''            req.update_finish_state(new_accepted_len)
+
+            if batch.spec_algorithm.is_dflash():
+                # DFLASH_FINISH_KV_FIX: rejected/post-stop tail is overallocated, not committed.
                 _trim_dflash_finished_committed_tail(req)
 
             self._handle_finish_state_updated_req(req, batch, result, i, logits_output)
@@ -153,8 +265,16 @@ RESULT_CALL_NEW = '''            req.update_finish_state(new_accepted_len)
 
 
 def patch_schedule_batch_text(text: str) -> str:
-    if FINISH_MARKER in text:
+    if FINISH_REPLAY_MARKER in text:
         return text
+    if FINISH_MARKER in text:
+        patched = text.replace(LEGACY_FINISH_METHOD, NEW_FINISH_METHOD, 1)
+        if patched == text:
+            raise RuntimeError(
+                "Could not upgrade the prior DFlash finish-order patch; "
+                "the patched SGLang source layout changed."
+            )
+        return patched
     patched, count = SCHEDULE_METHOD_RE.subn(NEW_FINISH_METHOD, text, count=1)
     if count != 1:
         raise RuntimeError(
@@ -166,6 +286,18 @@ def patch_schedule_batch_text(text: str) -> str:
 
 def patch_batch_result_text(text: str) -> str:
     patched = text
+    if KV_MARKER in patched and KV_HARDENED_MARKER not in patched:
+        if LEGACY_KV_HELPER not in patched:
+            raise RuntimeError(
+                "Could not upgrade the prior DFlash KV-tail helper; "
+                "the patched SGLang source layout changed."
+            )
+        patched = patched.replace(LEGACY_KV_HELPER, KV_HELPER, 1)
+        if LEGACY_RESULT_CALL_NEW not in patched:
+            raise RuntimeError(
+                "Could not upgrade the prior DFlash KV-tail call site."
+            )
+        patched = patched.replace(LEGACY_RESULT_CALL_NEW, RESULT_CALL_NEW, 1)
     if "_trim_dflash_finished_committed_tail" not in patched:
         if HELPER_INSERTION_POINT not in patched:
             raise RuntimeError("Could not locate batch_result_processor logger.")

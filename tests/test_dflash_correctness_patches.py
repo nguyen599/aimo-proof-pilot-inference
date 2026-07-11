@@ -85,10 +85,13 @@ class SpeculativeFinishRegressionTests(unittest.TestCase):
         *,
         max_new_tokens: int = 5,
         stop: list[str] | None = None,
+        stop_regex: list[str] | None = None,
         eos_ids: set[int] | None = None,
     ):
         tokenizer = _Tokenizer()
-        params = SamplingParams(max_new_tokens=max_new_tokens, stop=stop)
+        params = SamplingParams(
+            max_new_tokens=max_new_tokens, stop=stop, stop_regex=stop_regex
+        )
         params.normalize(tokenizer=tokenizer)
         req = Req(
             rid="probe",
@@ -134,22 +137,127 @@ class SpeculativeFinishRegressionTests(unittest.TestCase):
         self.assertEqual(req.finished_len, 2)
         self.assertEqual(list(req.output_ids_through_stop), [10, 20])
 
+    def test_first_token_boundary_wins_even_when_stop_list_is_reversed(self) -> None:
+        req = self.make_req(
+            [10, 11, 12, 13],
+            max_new_tokens=10,
+            stop=["cd", "ab"],
+        )
+        req.update_finish_state(new_accepted_len=4)
+
+        self.assertEqual(type(req.finished_reason).__name__, "FINISH_MATCHED_STR")
+        self.assertEqual(req.finished_len, 2)
+        self.assertEqual(list(req.output_ids_through_stop), [10, 11])
+
+    def test_earlier_regex_wins_over_later_stop_string(self) -> None:
+        req = self.make_req(
+            [10, 11, 12, 13],
+            max_new_tokens=10,
+            stop=["cd"],
+            stop_regex=["ab"],
+        )
+        req.update_finish_state(new_accepted_len=4)
+
+        self.assertEqual(type(req.finished_reason).__name__, "FINISHED_MATCHED_REGEX")
+        self.assertEqual(req.finished_len, 2)
+
+    def test_existing_output_prefix_is_not_replayed(self) -> None:
+        req = self.make_req(
+            [10, 11, 20, 12, 13],
+            max_new_tokens=10,
+            stop=["STOP"],
+        )
+        req.update_finish_state(new_accepted_len=3)
+
+        self.assertEqual(type(req.finished_reason).__name__, "FINISH_MATCHED_STR")
+        self.assertEqual(req.finished_len, 3)
+        self.assertEqual(list(req.output_ids_through_stop), [10, 11, 20])
+
+    def test_length_wins_when_eos_is_exactly_at_max(self) -> None:
+        req = self.make_req([10, 11, 2], max_new_tokens=3, eos_ids={2})
+        req.update_finish_state(new_accepted_len=3)
+
+        self.assertEqual(type(req.finished_reason).__name__, "FINISH_LENGTH")
+        self.assertEqual(req.finished_len, 3)
+
+    def test_length_wins_when_stop_string_is_exactly_at_max(self) -> None:
+        req = self.make_req([10, 11], max_new_tokens=2, stop=["ab"])
+        req.update_finish_state(new_accepted_len=2)
+
+        self.assertEqual(type(req.finished_reason).__name__, "FINISH_LENGTH")
+        self.assertEqual(req.finished_len, 2)
+
     def test_post_stop_kv_tail_becomes_overallocated(self) -> None:
         req = SimpleNamespace(
             output_ids=array("q", [10, 11, 2, 12, 13, 14, 15]),
             finished_len=3,
             kv_committed_len=108,
+            kv_allocated_len=112,
+            cache_protected_len=100,
         )
-        discarded = _trim_dflash_finished_committed_tail(req)
+        discarded = _trim_dflash_finished_committed_tail(req, new_accepted_len=7)
 
         self.assertEqual(discarded, 4)
         self.assertEqual(req.kv_committed_len, 104)
+
+    def test_kv_trim_restores_canonical_commit_for_every_block_position(self) -> None:
+        prompt_len = 100
+        prior_output_len = 5
+        block_len = 8
+        raw_output_len = prior_output_len + block_len
+        committed_before_trim = prompt_len + raw_output_len - 1
+
+        for stop_position in range(1, block_len + 1):
+            with self.subTest(stop_position=stop_position):
+                req = SimpleNamespace(
+                    output_ids=array("q", range(raw_output_len)),
+                    finished_len=prior_output_len + stop_position,
+                    kv_committed_len=committed_before_trim,
+                    kv_allocated_len=committed_before_trim + 8,
+                    cache_protected_len=64,
+                )
+                discarded = _trim_dflash_finished_committed_tail(
+                    req, new_accepted_len=block_len
+                )
+                expected = prompt_len + req.finished_len - 1
+                self.assertEqual(discarded, block_len - stop_position)
+                self.assertEqual(req.kv_committed_len, expected)
+                self.assertGreaterEqual(
+                    req.kv_committed_len, req.cache_protected_len
+                )
+                self.assertLessEqual(req.kv_committed_len, req.kv_allocated_len)
+
+    def test_kv_trim_refuses_to_decommit_before_current_verify_chunk(self) -> None:
+        req = SimpleNamespace(
+            output_ids=array("q", range(13)),
+            finished_len=2,
+            kv_committed_len=112,
+            kv_allocated_len=120,
+            cache_protected_len=64,
+        )
+        with self.assertRaisesRegex(RuntimeError, "current verify chunk"):
+            _trim_dflash_finished_committed_tail(req, new_accepted_len=8)
+
+    def test_kv_trim_refuses_to_decommit_protected_prefix(self) -> None:
+        req = SimpleNamespace(
+            output_ids=array("q", range(8)),
+            finished_len=4,
+            kv_committed_len=108,
+            kv_allocated_len=112,
+            cache_protected_len=105,
+        )
+        with self.assertRaisesRegex(RuntimeError, "protected prefix"):
+            _trim_dflash_finished_committed_tail(req, new_accepted_len=8)
 
     def test_no_kv_trim_without_a_finished_tail(self) -> None:
         req = SimpleNamespace(
             output_ids=array("q", [10, 11]),
             finished_len=2,
             kv_committed_len=103,
+            kv_allocated_len=104,
+            cache_protected_len=100,
         )
-        self.assertEqual(_trim_dflash_finished_committed_tail(req), 0)
+        self.assertEqual(
+            _trim_dflash_finished_committed_tail(req, new_accepted_len=1), 0
+        )
         self.assertEqual(req.kv_committed_len, 103)
