@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import json
 import sys
 import unittest
@@ -16,6 +17,7 @@ sys.path.insert(0, str(HARNESS))
 from grader import parse_score  # noqa: E402
 from make_batches import build_batches  # noqa: E402
 from pipeline import Engine, solve_problem  # noqa: E402
+from run_full_evaluation import generation_command, load_problem_ids  # noqa: E402
 
 
 class InvalidClient:
@@ -58,6 +60,33 @@ class ProofBenchEvaluationTests(unittest.TestCase):
         self.assertEqual(config["model"]["lm_head_compute_dtype"], "float32")
         self.assertEqual(config["model"]["kv_cache_dtype"], "auto")
         self.assertEqual(config["model"]["speculative_algorithm"], "DFLASH")
+        self.assertEqual(config["schema_version"], 2)
+        grader = config["grader"]
+        self.assertEqual(grader["served_model"], "deepseek-v4-flash")
+        self.assertEqual(grader["reasoning"], "high")
+        self.assertEqual(grader["passes"], 2)
+        self.assertEqual(grader["max_tokens"], 65536)
+        prompt = (REPO / "evaluation/prompts/grader.md").read_bytes()
+        self.assertEqual(hashlib.sha256(prompt).hexdigest(), grader["prompt_sha256"])
+        self.assertEqual(
+            grader["reference_commit"],
+            "bc03a2c71a076990deaad3d712c6889682e12c69",
+        )
+
+    def test_full_orchestrator_uses_all_problems_and_exact_agentic_config(self):
+        config = json.loads(
+            (REPO / "evaluation/configs/opd32b_dflash_bf16.json").read_text()
+        )
+        self.assertEqual(len(load_problem_ids()), 60)
+        command = generation_command(
+            config, "basic", Path("/tmp/basic-01.json"), Path("/tmp/generation")
+        )
+        rendered = " ".join(command)
+        self.assertIn("--base http://127.0.0.1:30000/v1", rendered)
+        self.assertIn("--num-provers 6", rendered)
+        self.assertIn("--verify-k 2", rendered)
+        self.assertIn("--num-refiners 3", rendered)
+        self.assertIn("--num-selectors 4", rendered)
 
     def test_correctness_profile_uses_bf16_kv(self):
         config = json.loads(

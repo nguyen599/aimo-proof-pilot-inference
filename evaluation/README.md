@@ -23,6 +23,7 @@ intentionally not carried here.
 | `configs/opd32b_dflash_bf16.json` | required serving and agentic parameters |
 | `data/proofbench_v2.csv` | 60-problem ProofBench v2 benchmark |
 | `harness/validate_bf16_dflash_server.py` | checks the live SGLang server configuration |
+| `harness/run_full_evaluation.py` | orchestrates all 60 generations and strict DeepSeek grading |
 | `harness/make_batches.py` | creates deterministic five-problem shards |
 | `harness/run_agentic_eval.py` | runs prove/verify/refine/select and saves full traces |
 | `harness/merge_agentic_shards.py` | validates and merges Basic and Advanced shards |
@@ -30,32 +31,36 @@ intentionally not carried here.
 | `harness/grade_proofs.py` | performs strict two-pass DeepSeek grading |
 | `prompts/grader.md` | official paper B.5 grader prompt |
 
-## Execution order
+## Full execution
+
+Start two mandatory BF16 DFlash replicas, one per H200:
 
 ```bash
-python evaluation/harness/validate_bf16_dflash_server.py \
-  --base-url http://127.0.0.1:30000/v1
-
-python evaluation/harness/make_batches.py \
-  --data evaluation/data/proofbench_v2.csv \
-  --subset basic --batch-size 5 --output-dir evaluation/batches
-
-python evaluation/harness/run_agentic_eval.py \
-  --run-dir basic-01 --runs-root evaluation/agentic-runs \
-  --ids-file evaluation/batches/basic-01.json --batch-id basic-01
+CUDA_VISIBLE_DEVICES=0 PORT=30000 bash serve_opd32b.sh
+CUDA_VISIBLE_DEVICES=1 PORT=30001 bash serve_opd32b.sh
 ```
 
-Run all six Basic and six Advanced shards, merge them, then prepare grading input:
+Load the DeepSeek credential and run the complete pipeline:
 
 ```bash
-python evaluation/harness/merge_agentic_shards.py \
-  --basic evaluation/agentic-runs/basic \
-  --advanced evaluation/agentic-runs/advanced \
-  --output evaluation/agentic-runs/opd32b-agentic
+set -a
+source /workspace/.env
+set +a
+/workspace/pp/venv/bin/python evaluation/harness/run_full_evaluation.py \
+  --run-id opd32b-dflash-bf16-full-20260711
+```
 
-python evaluation/harness/agentic_to_responses.py \
-  --stages-dir evaluation/agentic-runs/opd32b-agentic/stages \
-  --data evaluation/data/proofbench_v2.csv --out-prefix opd32b_agentic
+The orchestrator validates both live servers, confirms that the authenticated
+DeepSeek model list contains `deepseek-v4-flash`, creates twelve deterministic
+five-problem shards, runs Basic and Advanced concurrently, requires exactly 60
+complete stage traces, converts the selected final proof for each problem, and
+performs two `high_notool` grader passes per proof. All raw generation traces,
+grader reasoning, grader responses, usage, manifests, and summaries are stored
+below `evaluation/runs/<run-id>/`.
+
+Generation and grading append durable checkpoints. Re-running the identical
+command skips completed generation problems and completed grader calls; it does
+not retry requests within an invocation or substitute a fallback result.
 
 ## Historical six-problem archive
 
