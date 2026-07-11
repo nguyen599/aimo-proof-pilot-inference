@@ -12,21 +12,35 @@ RELATIVE_PATH = Path(
     "layers/quantization/compressed_tensors/schemes/compressed_tensors_wNa16.py"
 )
 BUILD = "            built = hm.build_humming_w4a8(layer, self.group_size, self.symmetric)"
+OLD_MARKER = (
+    BUILD
+    + "\n            if built:\n"
+    + '                logger.info("HUMMING_W4A8_LAYER_READY device=%s group_size=%s", '\
+    + "layer.weight_packed.device, self.group_size)"
+)
 MARKER = (
     BUILD
     + "\n            if built:\n"
     + '                logger.info("HUMMING_W4A8_LAYER_READY device=%s group_size=%s", '\
+    + "layer.weight_packed.device, self.group_size)"
+    + '\n            elif getattr(layer, "_dflash_draft_mlp", False):\n'
+    + '                logger.info("DFLASH_DRAFT_W4A16_LAYER_READY device=%s group_size=%s", '
     + "layer.weight_packed.device, self.group_size)"
 )
 
 
 def patch_source(source: str) -> str:
     if MARKER not in source:
-        if source.count(BUILD) != 1:
+        if OLD_MARKER in source:
+            source = source.replace(OLD_MARKER, MARKER, 1)
+        elif source.count(BUILD) == 1:
+            source = source.replace(BUILD, MARKER, 1)
+        else:
             raise RuntimeError("Expected exactly one Humming build call")
-        source = source.replace(BUILD, MARKER, 1)
     if source.count("HUMMING_W4A8_LAYER_READY") != 1:
         raise RuntimeError("Expected exactly one Humming runtime marker")
+    if source.count("DFLASH_DRAFT_W4A16_LAYER_READY") != 1:
+        raise RuntimeError("Expected exactly one DFlash W4A16 runtime marker")
     return source
 
 

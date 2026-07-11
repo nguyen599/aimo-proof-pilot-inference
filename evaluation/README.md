@@ -20,6 +20,9 @@ intentionally not carried here.
   for every actual token-row count. Startup aborts unless the package, ycchen
   integration helper, fixed-configuration marker, NVRTC library, SM90 preflight,
   and constructed-layer runtime marker all pass.
+- Humming is target-only. The 64-layer target must construct exactly 128 W4A8
+  MLP projections; the eight-layer INT4 draft must construct exactly 16 W4A16
+  MLP projections and retain BF16 activations.
 - Quantized H200 mode uses ycchen's safe `mem_fraction_static=0.85`; `0.88`
   starves the mandatory DFlash draft CUDA graph after over-allocating target KV.
 - Every generation stage must produce valid output. There is no alternate proof,

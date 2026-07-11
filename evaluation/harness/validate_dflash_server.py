@@ -31,6 +31,8 @@ def main() -> None:
     server = get_json(args.url.rstrip("/") + "/get_server_info")
     models = get_json(args.url.rstrip("/") + "/v1/models")
     server_log = args.server_log.read_text()
+    humming_layer_count = server_log.count("HUMMING_W4A8_LAYER_READY")
+    draft_w4a16_layer_count = server_log.count("DFLASH_DRAFT_W4A16_LAYER_READY")
 
     assert target_config["torch_dtype"] == "bfloat16"
     assert draft_config["torch_dtype"] == "bfloat16"
@@ -40,7 +42,8 @@ def main() -> None:
         assert server["kv_cache_dtype"] == "fp8_e4m3"
         assert server["speculative_draft_model_quantization"] == "compressed-tensors"
         assert "HUMMING_W4A8_PREFLIGHT " in server_log
-        assert "HUMMING_W4A8_LAYER_READY " in server_log
+        assert humming_layer_count == 128, humming_layer_count
+        assert draft_w4a16_layer_count == 16, draft_w4a16_layer_count
         assert "target_execution=humming_w4a8" in server_log
     elif model["mode"] == "bf16":
         assert target_config.get("quantization_config") is None
@@ -87,7 +90,8 @@ def main() -> None:
         ).splitlines(),
         "runtime_markers": {
             "humming_preflight": "HUMMING_W4A8_PREFLIGHT " in server_log,
-            "humming_layer_ready": "HUMMING_W4A8_LAYER_READY " in server_log,
+            "humming_target_layer_count": humming_layer_count,
+            "dflash_draft_w4a16_layer_count": draft_w4a16_layer_count,
             "humming_target_execution": "target_execution=humming_w4a8" in server_log,
         },
     }

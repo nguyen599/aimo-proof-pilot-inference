@@ -27,6 +27,11 @@ from patch_humming_sm90_config import (  # noqa: E402
     ORIGINAL as SM90_ORIGINAL,
     patch_source as patch_humming_sm90_source,
 )
+from patch_humming_target_scope import (  # noqa: E402
+    MARKER as TARGET_SCOPE_MARKER,
+    ORIGINAL as TARGET_SCOPE_ORIGINAL,
+    patch_source as patch_humming_target_scope,
+)
 
 
 class InvalidClient:
@@ -161,6 +166,15 @@ class ProofBenchEvaluationTests(unittest.TestCase):
         self.assertEqual(patch_humming_sm90_source(patched), patched)
         with self.assertRaises(RuntimeError):
             patch_humming_sm90_source("no tuning selection here")
+
+    def test_humming_is_scoped_to_target_mlp(self):
+        source = "before\n" + TARGET_SCOPE_ORIGINAL + "\nafter\n"
+        patched = patch_humming_target_scope(source)
+        self.assertIn(TARGET_SCOPE_MARKER, patched)
+        self.assertIn("_dflash_draft_mlp", patched)
+        self.assertEqual(patch_humming_target_scope(patched), patched)
+        with self.assertRaises(RuntimeError):
+            patch_humming_target_scope("no Humming build entry here")
 
     def test_correctness_config_has_only_humming_and_bf16(self):
         config = json.loads(

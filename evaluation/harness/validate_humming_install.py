@@ -25,6 +25,8 @@ def main() -> None:
     helper_source = helper.read_text()
     assert "HUMMING_SM90_FIXED_M256" in helper_source
     assert "shape_m=256" in helper_source
+    assert "HUMMING_TARGET_ONLY" in helper_source
+    assert 'getattr(layer, "_dflash_draft_mlp", False)' in helper_source
     assert args.nvrtc_lib.is_file(), args.nvrtc_lib
     nvrtc_builtins = args.nvrtc_lib.parent / "libnvrtc-builtins.so.13.0"
     assert nvrtc_builtins.is_file(), nvrtc_builtins
@@ -50,6 +52,7 @@ def main() -> None:
                 "heuristics": heuristic.__name__,
                 "humming_module": str(Path(humming.__file__).resolve()),
                 "helper_module": str(Path(helper_module.__file__).resolve()),
+                "humming_scope": "target_only",
                 "sm90_tuning_shape_m": 256,
                 "nvrtc_lib": str(args.nvrtc_lib.resolve()),
                 "nvrtc_builtins": str(nvrtc_builtins.resolve()),
