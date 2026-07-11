@@ -56,7 +56,7 @@ class RunnerConfigurationTests(unittest.TestCase):
 
     def test_result_directory_override_cannot_escape_tests(self) -> None:
         args = argparse.Namespace(
-            results_dir=Path("eval/results/escaped"),
+            results_dir=Path("outside-tests-results/escaped"),
             profile="unused",
             phase="unused",
             tier="unused",

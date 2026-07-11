@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_eval.sh — evaluate opd-32b-deploy on the 6 markscheme problems using the
+# run_legacy_eval.sh — evaluate opd-32b-deploy on the six markscheme problems
 # EXACT agentic loop + prompts from submission-32b-fix4.ipynb.
 #
 # run_v2.py and the whole proof_agent package (prover/verifier/refiner/selector
@@ -14,7 +14,8 @@ set -euo pipefail
 VENV=/workspace/pp/venv
 REPO=/workspace/proof-pilot-code-x
 MODEL=/workspace/models/opd-32b-deploy
-EVAL=/workspace/eval
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+EVAL="$SCRIPT_DIR"
 SPLIT="${SPLIT:-1}"
 
 # notebook LOOP + BUDGET_HIDDEN, verbatim
@@ -38,11 +39,15 @@ if [ "$SPLIT" = 1 ]; then
   # just run on different (identical) server replicas
   head -n 1 "$EVAL/problems.csv" > "$EVAL/problems_a.csv"
   head -n 1 "$EVAL/problems.csv" > "$EVAL/problems_b.csv"
-  "$VENV/bin/python" - <<'PY'
+  "$VENV/bin/python" - "$EVAL" <<'PY'
 import csv
-rows = list(csv.reader(open('/workspace/eval/problems.csv')))[1:]
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+rows = list(csv.reader((root / 'problems.csv').open()))[1:]
 for name, part in (('a', rows[:3]), ('b', rows[3:])):
-    with open(f'/workspace/eval/problems_{name}.csv', 'a', newline='') as f:
+    with (root / f'problems_{name}.csv').open('a', newline='') as f:
         csv.writer(f).writerows(part)
 PY
   run_one "$EVAL/problems_a.csv" a http://127.0.0.1:30000 &
@@ -51,21 +56,26 @@ PY
   PB=$!
   wait $PA $PB
   # merge in original problem order
-  "$VENV/bin/python" - <<'PY'
+  "$VENV/bin/python" - "$EVAL" <<'PY'
 import csv
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
 answers = {}
-for t in ('a', 'b'):
-    for r in csv.DictReader(open(f'/workspace/eval/submission_{t}.csv')):
-        answers[r['id']] = r['answer']
-order = [r['id'] for r in csv.DictReader(open('/workspace/eval/problems.csv'))]
-with open('/workspace/eval/submission.csv', 'w', newline='') as f:
-    w = csv.writer(f); w.writerow(['id', 'answer'])
-    for pid in order:
-        w.writerow([pid, answers[pid]])
-print('merged -> /workspace/eval/submission.csv')
+for tag in ('a', 'b'):
+    for row in csv.DictReader((root / f'submission_{tag}.csv').open()):
+        answers[row['id']] = row['answer']
+order = [row['id'] for row in csv.DictReader((root / 'problems.csv').open())]
+with (root / 'submission.csv').open('w', newline='') as handle:
+    writer = csv.writer(handle)
+    writer.writerow(['id', 'answer'])
+    for problem_id in order:
+        writer.writerow([problem_id, answers[problem_id]])
+print(f'merged -> {root / "submission.csv"}')
 PY
 else
   run_one "$EVAL/problems.csv" all http://127.0.0.1:30000
   cp "$EVAL/submission_all.csv" "$EVAL/submission.csv"
 fi
-echo "[run_eval] done -> $EVAL/submission.csv"
+echo "[run_legacy_eval] done -> $EVAL/submission.csv"

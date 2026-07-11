@@ -97,9 +97,9 @@ The persisted H200 discovery run is
 
 ### 3. Create an isolated evidence directory
 
-The runner accepts only a fresh child of `tests/results/`. It rejects
-`eval/results/`, arbitrary locations, the results root itself, and directories
-containing prior named artifacts. It copies the exact config into the run
+The runner accepts only a fresh child of `tests/results/`. It rejects paths
+outside that root, the results root itself, and directories containing prior
+named artifacts. It copies the exact config into the run
 directory before launching servers.
 
 ### 4. Run static preflight

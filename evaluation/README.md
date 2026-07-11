@@ -56,3 +56,11 @@ python evaluation/harness/merge_agentic_shards.py \
 python evaluation/harness/agentic_to_responses.py \
   --stages-dir evaluation/agentic-runs/opd32b-agentic/stages \
   --data evaluation/data/proofbench_v2.csv --out-prefix opd32b_agentic
+
+## Historical six-problem archive
+
+`legacy-six-problem/` preserves the earlier AIMO Proof Pilot sample runner, its
+six input problems, and the committed DIVALL/ALTORO evidence. It is not part of
+the active 60-problem ProofBench pipeline and does not supply prompts, grading,
+or fallback outputs to that pipeline. Keeping it here removes the ambiguous
+top-level `eval/` versus `evaluation/` split without deleting historical results.

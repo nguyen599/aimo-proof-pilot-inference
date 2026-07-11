@@ -74,6 +74,14 @@ class ProofBenchEvaluationTests(unittest.TestCase):
         self.assertIs(fp32_full["triton_attention_reduce_in_fp32"], True)
         self.assertIs(fp32_full["enable_fp32_lm_head"], True)
 
+    def test_repository_has_one_top_level_evaluation_directory(self):
+        self.assertTrue((REPO / "evaluation").is_dir())
+        self.assertFalse((REPO / "eval").exists())
+        legacy = REPO / "evaluation" / "legacy-six-problem"
+        self.assertTrue((legacy / "README.md").is_file())
+        self.assertTrue((legacy / "run_legacy_eval.sh").is_file())
+        self.assertTrue((legacy / "results" / "trace_DIVALL_3600_summary.json").is_file())
+
     def test_invalid_prover_output_raises(self):
         async def run():
             engine = Engine(

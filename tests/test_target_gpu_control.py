@@ -136,7 +136,7 @@ class TargetGPUControlConfigTests(unittest.TestCase):
 
     def test_results_directory_cannot_escape_tests_results(self):
         args = argparse.Namespace(
-            results_dir=Path("eval/results/not-a-control"),
+            results_dir=Path("outside-tests-results/not-a-control"),
             profile=self.profile_name,
             phase="sync_eager",
         )

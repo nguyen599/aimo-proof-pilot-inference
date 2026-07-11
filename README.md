@@ -130,17 +130,17 @@ patched model TP-shards the per-head attention sinks (20 heads per rank).
 ~1.3× single-stream speed and double the KV headroom; use it when per-problem
 compute matters more than problems-in-parallel.
 
-## Agentic eval (eval/)
+## Historical six-problem agentic evaluation
 
-`eval/problems.csv` — the 6 AIMO Proof Pilot problems (from the markschemes
-PDF, LaTeX-faithful). `eval/run_eval.sh` runs the unmodified proof-pilot
-agentic loop (`run_v2.py` prove→verify→refine→select, prompts byte-identical)
-against the server; the loop code comes from the `proof-pilot-code` bundle
-(not committed, same as the env).
+The active 60-problem ProofBench pipeline and every evaluation artifact now live
+under [`evaluation/`](evaluation/). The older six-problem AIMO Proof Pilot run is
+preserved losslessly under
+[`evaluation/legacy-six-problem/`](evaluation/legacy-six-problem/) rather than
+occupying a second top-level evaluation directory.
 
-Finding (DIVALL): budget is everything. At 900s/problem the loop degenerates
-to salvage-only (0 refines, all calls force-closed) and answered wrong
-(998002). At 3600s on the TP-2 server the full machinery engaged (33
-candidates, 26 refines, 1.19M tokens) and converged to the correct 998285 —
-a unanimous-verified refinement won 3/5 selector votes. See
-`eval/results/trace_DIVALL_3600_summary.json`.
+The legacy runner executes the unmodified proof-pilot agentic loop
+(`run_v2.py` prove→verify→refine→select, prompts byte-identical) against the
+server. Finding (DIVALL): at 900 seconds per problem the loop degenerates to
+salvage-only and answered 998002; at 3,600 seconds on the TP-2 server it produced
+33 candidates and 26 refinements, then converged to the correct 998285. See
+[`trace_DIVALL_3600_summary.json`](evaluation/legacy-six-problem/results/trace_DIVALL_3600_summary.json).
