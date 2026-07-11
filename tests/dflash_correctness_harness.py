@@ -644,12 +644,13 @@ def model_manifest(profile):
 
 
 def argument_parser():
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG); parser.add_argument("--profile"); parser.add_argument("--phase", default="production", choices=("production", "overlap_eager", "sync_eager")); parser.add_argument("--tier", default="quick", choices=("quick", "full")); parser.add_argument("--target-url"); parser.add_argument("--dflash-url"); parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS); parser.add_argument("--suites", default=",".join(SUPPORTED_SUITES)); parser.add_argument("--sampling-count", type=int); parser.add_argument("--permutations", type=int, default=999); parser.add_argument("--request-timeout", type=float, default=3600.0); parser.add_argument("--resume", action="store_true"); parser.add_argument("--overwrite", action="store_true"); return parser
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG); parser.add_argument("--profile"); parser.add_argument("--phase", default="production"); parser.add_argument("--tier", default="quick", choices=("quick", "full")); parser.add_argument("--target-url"); parser.add_argument("--dflash-url"); parser.add_argument("--results", type=Path, default=DEFAULT_RESULTS); parser.add_argument("--suites", default=",".join(SUPPORTED_SUITES)); parser.add_argument("--sampling-count", type=int); parser.add_argument("--permutations", type=int, default=999); parser.add_argument("--request-timeout", type=float, default=3600.0); parser.add_argument("--resume", action="store_true"); parser.add_argument("--overwrite", action="store_true"); return parser
 
 
 def main(argv=None):
     args = argument_parser().parse_args(argv); config = json.loads(args.config.read_text()); profile_name = args.profile or config["default_profile"]
     if profile_name not in config["profiles"]: raise HarnessError(f"unknown profile {profile_name}")
+    if args.phase not in config["phases"]: raise HarnessError(f"unknown phase {args.phase}")
     profile, phase, matrix = config["profiles"][profile_name], config["phases"][args.phase], resolve_matrix(config, args.tier); suites = parse_suite_names(args.suites); sampling_count = int(args.sampling_count if args.sampling_count is not None else matrix["sampling_count"])
     if sampling_count < 2: raise HarnessError("sampling-count must be at least two")
     pair, host = config["server_pair"], config["server_pair"]["host"]; target_url = args.target_url or f"http://{host}:{pair['target_port']}"; dflash_url = args.dflash_url or f"http://{host}:{pair['dflash_port']}"

@@ -14,6 +14,7 @@ from dflash_correctness_harness import (
     RequestTimeoutError,
     ResponseRecord,
     ResultCheckpoint,
+    argument_parser,
     categorical_total_variation,
     compare_records,
     dflash_activity_check,
@@ -28,6 +29,14 @@ from dflash_correctness_harness import (
     sanitized_server_snapshot,
     validate_server_pair,
 )
+
+
+class ArgumentParserTests(unittest.TestCase):
+    def test_phase_names_are_owned_by_test_config(self):
+        args = argument_parser().parse_args(["--phase", "graphs_no_radix"])
+        self.assertEqual(args.phase, "graphs_no_radix")
+        args = argument_parser().parse_args(["--phase", "future_test_phase"])
+        self.assertEqual(args.phase, "future_test_phase")
 
 
 def chunk(ids, reason=None, text=None, index=None, prompt=None, **meta):
