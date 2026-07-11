@@ -4,24 +4,50 @@ import math
 import random
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
+
+from sglang_patches.patch_dflash_sampling import (
+    SEED_MARKER,
+    WORKER_SEED_MARKER,
+    patch_dflash_seeded_sampling_text,
+    patch_dflash_worker_text,
+)
+
+TORCH_IMPORT_ERROR = None
+DFLASH_UTILS_IMPORT_ERROR = None
+DFLASH_WORKER_IMPORT_ERROR = None
+TRITON_ACCEPT_IMPORT_ERROR = None
 
 try:
     import torch
+except ImportError as error:
+    torch = None
+    TORCH_IMPORT_ERROR = error
+
+try:
     from sglang.srt.speculative.dflash_utils import (
         compute_dflash_correct_drafts_and_bonus,
         compute_dflash_sampling_correct_drafts_and_bonus,
         is_dflash_sampling_verify_available,
     )
-    from sglang.srt.speculative.dflash_worker_v2 import DFlashWorkerV2
-    from sglang.srt.speculative.triton_ops.dflash_accept_bonus import (
-        _compute_dflash_accept_bonus_triton_unchecked,
-    )
-except ImportError:
-    torch = None
+except ImportError as error:
+    DFLASH_UTILS_IMPORT_ERROR = error
     compute_dflash_correct_drafts_and_bonus = None
     compute_dflash_sampling_correct_drafts_and_bonus = None
     is_dflash_sampling_verify_available = lambda: False
+
+try:
+    from sglang.srt.speculative.dflash_worker_v2 import DFlashWorkerV2
+except ImportError as error:
+    DFLASH_WORKER_IMPORT_ERROR = error
     DFlashWorkerV2 = None
+
+try:
+    from sglang.srt.speculative.triton_ops.dflash_accept_bonus import (
+        _compute_dflash_accept_bonus_triton_unchecked,
+    )
+except ImportError as error:
+    TRITON_ACCEPT_IMPORT_ERROR = error
     _compute_dflash_accept_bonus_triton_unchecked = None
 
 
@@ -100,6 +126,126 @@ def closed_form_outcome_probabilities(
             prefix_probability * probability
         )
     return outcomes
+
+
+def filtered_probs_reference(
+    logits: list[float], *, temperature: float, top_k: int, top_p: float
+) -> list[float]:
+    scaled = [value / temperature for value in logits]
+    maximum = max(scaled)
+    weights = [math.exp(value - maximum) for value in scaled]
+
+    if top_k < len(weights):
+        keep = set(
+            sorted(
+                range(len(weights)), key=weights.__getitem__, reverse=True
+            )[:top_k]
+        )
+        weights = [
+            weight if index in keep else 0.0
+            for index, weight in enumerate(weights)
+        ]
+
+    total = sum(weights)
+    probs = [weight / total for weight in weights]
+    if top_p < 1.0:
+        ranked = sorted(
+            range(len(probs)), key=probs.__getitem__, reverse=True
+        )
+        cumulative_before = 0.0
+        keep = set()
+        for index in ranked:
+            if cumulative_before <= top_p:
+                keep.add(index)
+            cumulative_before += probs[index]
+        probs = [
+            probability if index in keep else 0.0
+            for index, probability in enumerate(probs)
+        ]
+        total = sum(probs)
+        probs = [probability / total for probability in probs]
+    return probs
+
+
+class SamplingSeedPatchTransformTests(unittest.TestCase):
+    def test_seeded_utils_transform_is_fail_closed_and_idempotent(self) -> None:
+        source = '''from sglang.srt.layers.sampler import apply_custom_logit_processor
+
+def compute_dflash_sampling_correct_drafts_and_bonus(
+    *,
+    candidates: torch.Tensor,
+    next_token_logits: torch.Tensor,
+    sampling_info: Any,
+    max_top_k: Optional[int] = None,
+):
+    device = next_token_logits.device
+
+    if uniform_samples is None:
+        uniform_samples = torch.rand(
+            (bs, draft_token_num), dtype=torch.float32, device=device
+        )
+    else:
+        pass
+
+    if uniform_samples_for_final_sampling is None:
+        uniform_samples_for_final_sampling = torch.rand(
+            (bs,), dtype=torch.float32, device=device
+        )
+    else:
+        pass
+'''
+        patched = patch_dflash_seeded_sampling_text(source)
+        self.assertIn(SEED_MARKER, patched)
+        self.assertIn("verify_positions: Optional[torch.Tensor]", patched)
+        self.assertIn("murmur_hash32", patched)
+        self.assertIn("4294967296.0", patched)
+        self.assertIn("needs_seeded_uniforms", patched)
+        self.assertEqual(patch_dflash_seeded_sampling_text(patched), patched)
+
+        with self.assertRaisesRegex(RuntimeError, "source layout changed"):
+            patch_dflash_seeded_sampling_text("def unrelated(): pass\n")
+
+    def test_worker_transform_passes_absolute_positions_once(self) -> None:
+        source = '''            accept_len, bonus = compute_dflash_sampling_correct_drafts_and_bonus(
+                candidates=candidates,
+                next_token_logits=logits_output.next_token_logits,
+                sampling_info=sampling_info,
+                max_top_k=draft_input.max_top_k,
+            )
+'''
+        patched = patch_dflash_worker_text(source)
+        self.assertIn(WORKER_SEED_MARKER, patched)
+        self.assertIn("verify_positions=positions_2d", patched)
+        self.assertEqual(patch_dflash_worker_text(patched), patched)
+
+
+class ConfiguredRuntimeAvailabilityTests(unittest.TestCase):
+    """The production H200 correctness run must fail, never skip, if incomplete."""
+
+    def test_cuda_runtime_is_available(self) -> None:
+        self.assertIsNone(TORCH_IMPORT_ERROR, repr(TORCH_IMPORT_ERROR))
+        self.assertIsNotNone(torch)
+        self.assertTrue(torch.cuda.is_available(), "CUDA is required by this suite")
+
+    def test_dflash_sampling_verifier_is_available(self) -> None:
+        self.assertIsNone(
+            DFLASH_UTILS_IMPORT_ERROR, repr(DFLASH_UTILS_IMPORT_ERROR)
+        )
+        self.assertIsNotNone(compute_dflash_sampling_correct_drafts_and_bonus)
+        self.assertTrue(
+            is_dflash_sampling_verify_available(),
+            "target-only speculative sampling kernel is required",
+        )
+
+    def test_worker_and_triton_accept_kernel_are_available(self) -> None:
+        self.assertIsNone(
+            DFLASH_WORKER_IMPORT_ERROR, repr(DFLASH_WORKER_IMPORT_ERROR)
+        )
+        self.assertIsNone(
+            TRITON_ACCEPT_IMPORT_ERROR, repr(TRITON_ACCEPT_IMPORT_ERROR)
+        )
+        self.assertIsNotNone(DFlashWorkerV2)
+        self.assertIsNotNone(_compute_dflash_accept_bonus_triton_unchecked)
 
 
 @unittest.skipIf(torch is None, "torch/SGLang runtime is not installed")
@@ -215,16 +361,58 @@ class TritonAcceptBonusTests(unittest.TestCase):
 )
 class SamplingVerificationTests(unittest.TestCase):
     @staticmethod
-    def sampling_info(batch_size: int, device: torch.device):
-        return SimpleNamespace(
-            need_top_k_sampling=False,
-            need_top_p_sampling=False,
-            temperatures=torch.ones((batch_size, 1), device=device),
-            top_ks=torch.full(
+    def sampling_info(
+        batch_size: int,
+        device: torch.device,
+        *,
+        temperatures=None,
+        top_ks=None,
+        top_ps=None,
+        sampling_seed=None,
+    ):
+        if temperatures is None:
+            temperatures = torch.ones((batch_size, 1), device=device)
+        if top_ks is None:
+            top_ks = torch.full(
                 (batch_size,), 1 << 30, dtype=torch.int32, device=device
+            )
+        if top_ps is None:
+            top_ps = torch.ones((batch_size,), device=device)
+        return SimpleNamespace(
+            need_top_k_sampling=bool(
+                torch.any(top_ks < (1 << 30)).item()
             ),
-            top_ps=torch.ones((batch_size,), device=device),
+            need_top_p_sampling=bool(torch.any(top_ps < 1.0).item()),
+            temperatures=temperatures,
+            top_ks=top_ks,
+            top_ps=top_ps,
+            sampling_seed=sampling_seed,
         )
+
+    @staticmethod
+    def seeded_case(batch_size: int, block_size: int, device: torch.device):
+        generator = torch.Generator(device=device).manual_seed(20260711)
+        vocab_size = 11
+        logits = torch.randn(
+            (batch_size, block_size, vocab_size),
+            generator=generator,
+            device=device,
+        )
+        candidates = torch.randint(
+            0,
+            vocab_size,
+            (batch_size, block_size),
+            generator=generator,
+            device=device,
+        )
+        seeds = torch.arange(7000, 7000 + batch_size, device=device)
+        positions = torch.arange(
+            100,
+            100 + batch_size * block_size,
+            dtype=torch.int64,
+            device=device,
+        ).view(batch_size, block_size)
+        return logits, candidates, seeds, positions
 
     def test_randomized_cuda_verifier_matches_scalar_reference(self) -> None:
         device = torch.device("cuda:0")
@@ -313,6 +501,293 @@ class SamplingVerificationTests(unittest.TestCase):
         self.assertEqual(accept.item(), 0)
         self.assertNotEqual(bonus.item(), 0)
 
+    def test_tiny_positive_probability_is_not_changed_by_endpoint_guard(self) -> None:
+        device = torch.device("cuda:0")
+        epsilon = torch.finfo(torch.float32).eps
+        proposal_probability = 0.75 * epsilon
+        probs = torch.tensor(
+            [
+                [proposal_probability, 1.0 - proposal_probability, 0.0],
+                [0.2, 0.3, 0.5],
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        candidates = torch.tensor([[2, 0]], dtype=torch.int64, device=device)
+        accept, _ = compute_dflash_sampling_correct_drafts_and_bonus(
+            candidates=candidates,
+            next_token_logits=probs.log(),
+            sampling_info=self.sampling_info(1, device),
+            threshold_single=1.0,
+            threshold_acc=1.0,
+            uniform_samples=torch.tensor(
+                [[0.5 * epsilon, 0.5]], dtype=torch.float32, device=device
+            ),
+            uniform_samples_for_final_sampling=torch.tensor([0.4], device=device),
+            use_sparse_topk=False,
+        )
+        self.assertEqual(accept.item(), 1)
+
+    def test_seeded_verifier_is_repeatable_and_global_rng_independent(self) -> None:
+        device = torch.device("cuda:0")
+        logits, candidates, seeds, positions = self.seeded_case(64, 8, device)
+        info = self.sampling_info(64, device, sampling_seed=seeds)
+
+        first_raw = compute_dflash_sampling_correct_drafts_and_bonus(
+            candidates=candidates,
+            next_token_logits=logits.reshape(64 * 8, -1),
+            sampling_info=info,
+            verify_positions=positions,
+            threshold_single=1.0,
+            threshold_acc=1.0,
+            use_sparse_topk=False,
+        )
+        first = tuple(tensor.clone() for tensor in first_raw)
+        torch.rand((4096,), device=device)
+        second = compute_dflash_sampling_correct_drafts_and_bonus(
+            candidates=candidates,
+            next_token_logits=logits.reshape(64 * 8, -1),
+            sampling_info=info,
+            verify_positions=positions,
+            threshold_single=1.0,
+            threshold_acc=1.0,
+            use_sparse_topk=False,
+        )
+        self.assertTrue(torch.equal(first[0], second[0]))
+        self.assertTrue(torch.equal(first[1], second[1]))
+
+    def test_seeded_verifier_is_stable_under_batch_reordering(self) -> None:
+        device = torch.device("cuda:0")
+        batch_size, block_size = 48, 8
+        logits, candidates, seeds, positions = self.seeded_case(
+            batch_size, block_size, device
+        )
+        info = self.sampling_info(batch_size, device, sampling_seed=seeds)
+        expected_raw = compute_dflash_sampling_correct_drafts_and_bonus(
+            candidates=candidates,
+            next_token_logits=logits.reshape(batch_size * block_size, -1),
+            sampling_info=info,
+            verify_positions=positions,
+            threshold_single=1.0,
+            threshold_acc=1.0,
+            use_sparse_topk=False,
+        )
+        expected = tuple(tensor.clone() for tensor in expected_raw)
+
+        permutation = torch.randperm(batch_size, device=device)
+        reordered_info = self.sampling_info(
+            batch_size, device, sampling_seed=seeds[permutation]
+        )
+        actual = compute_dflash_sampling_correct_drafts_and_bonus(
+            candidates=candidates[permutation],
+            next_token_logits=logits[permutation].reshape(
+                batch_size * block_size, -1
+            ),
+            sampling_info=reordered_info,
+            verify_positions=positions[permutation],
+            threshold_single=1.0,
+            threshold_acc=1.0,
+            use_sparse_topk=False,
+        )
+        inverse = torch.argsort(permutation)
+        self.assertTrue(torch.equal(expected[0], actual[0][inverse]))
+        self.assertTrue(torch.equal(expected[1], actual[1][inverse]))
+
+    def test_seed_or_absolute_position_changes_stateless_stream(self) -> None:
+        device = torch.device("cuda:0")
+        batch_size, block_size = 256, 2
+        logits = torch.zeros(
+            (batch_size, block_size, 2),
+            dtype=torch.float32,
+            device=device,
+        )
+        candidates = torch.zeros(
+            (batch_size, block_size), dtype=torch.int64, device=device
+        )
+        seeds = torch.arange(
+            batch_size, dtype=torch.int64, device=device
+        ) + 13
+        positions = torch.arange(
+            500,
+            500 + batch_size * block_size,
+            dtype=torch.int64,
+            device=device,
+        ).view(batch_size, block_size)
+
+        def run(run_seeds, run_positions):
+            output = compute_dflash_sampling_correct_drafts_and_bonus(
+                candidates=candidates,
+                next_token_logits=logits.reshape(
+                    batch_size * block_size, 2
+                ),
+                sampling_info=self.sampling_info(
+                    batch_size, device, sampling_seed=run_seeds
+                ),
+                verify_positions=run_positions,
+                threshold_single=1.0,
+                threshold_acc=1.0,
+                use_sparse_topk=False,
+            )
+            return tuple(tensor.clone() for tensor in output)
+
+        baseline = run(seeds, positions)
+        different_seed = run(seeds + 1, positions)
+        different_position = run(seeds, positions + 97)
+        self.assertTrue(
+            torch.any(baseline[0] != different_seed[0])
+            or torch.any(baseline[1] != different_seed[1])
+        )
+        self.assertTrue(
+            torch.any(baseline[0] != different_position[0])
+            or torch.any(baseline[1] != different_position[1])
+        )
+
+    def test_seeded_verifier_requires_absolute_positions(self) -> None:
+        device = torch.device("cuda:0")
+        logits, candidates, seeds, _ = self.seeded_case(2, 2, device)
+        with self.assertRaisesRegex(
+            ValueError, "requires absolute verify_positions"
+        ):
+            compute_dflash_sampling_correct_drafts_and_bonus(
+                candidates=candidates,
+                next_token_logits=logits.reshape(4, -1),
+                sampling_info=self.sampling_info(
+                    2, device, sampling_seed=seeds
+                ),
+                threshold_single=1.0,
+                threshold_acc=1.0,
+                use_sparse_topk=False,
+            )
+
+    def test_fully_injected_uniforms_override_seed_without_positions(self) -> None:
+        device = torch.device("cuda:0")
+        logits, candidates, seeds, _ = self.seeded_case(4, 8, device)
+        accept_uniforms = torch.full((4, 8), 0.41, device=device)
+        final_uniforms = torch.full((4,), 0.73, device=device)
+        expected_raw = compute_dflash_sampling_correct_drafts_and_bonus(
+            candidates=candidates,
+            next_token_logits=logits.reshape(4 * 8, -1),
+            sampling_info=self.sampling_info(4, device),
+            threshold_single=1.0,
+            threshold_acc=1.0,
+            uniform_samples=accept_uniforms.clone(),
+            uniform_samples_for_final_sampling=final_uniforms.clone(),
+            use_sparse_topk=False,
+        )
+        expected = tuple(tensor.clone() for tensor in expected_raw)
+        actual = compute_dflash_sampling_correct_drafts_and_bonus(
+            candidates=candidates,
+            next_token_logits=logits.reshape(4 * 8, -1),
+            sampling_info=self.sampling_info(
+                4, device, sampling_seed=seeds
+            ),
+            threshold_single=1.0,
+            threshold_acc=1.0,
+            uniform_samples=accept_uniforms.clone(),
+            uniform_samples_for_final_sampling=final_uniforms.clone(),
+            use_sparse_topk=False,
+        )
+        self.assertTrue(torch.equal(expected[0], actual[0]))
+        self.assertTrue(torch.equal(expected[1], actual[1]))
+
+    def test_filters_temperature_and_block_sizes_match_reference(self) -> None:
+        device = torch.device("cuda:0")
+        generator = torch.Generator(device=device).manual_seed(8675309)
+        vocab_size = 11
+        modes = ("temperature", "top_p", "top_k")
+        for block_size in (1, 2, 8, 17):
+            batch_size = 4
+            logits = torch.randn(
+                (batch_size, block_size, vocab_size),
+                generator=generator,
+                device=device,
+            )
+            candidates = torch.randint(
+                0,
+                vocab_size,
+                (batch_size, block_size),
+                generator=generator,
+                device=device,
+            )
+            accept_uniforms = torch.full(
+                (batch_size, block_size), 0.37, device=device
+            )
+            final_uniforms = torch.full(
+                (batch_size,), 0.61, device=device
+            )
+            for mode in modes:
+                temperatures = torch.tensor(
+                    [[0.55], [0.8], [1.2], [1.75]], device=device
+                )
+                top_ks = torch.full(
+                    (batch_size,),
+                    1 << 30,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                top_ps = torch.ones(batch_size, device=device)
+                if mode == "top_p":
+                    top_ps = torch.tensor(
+                        [0.5, 0.7, 0.9, 0.95], device=device
+                    )
+                elif mode == "top_k":
+                    top_ks = torch.tensor(
+                        [2, 3, 5, 7], dtype=torch.int32, device=device
+                    )
+
+                info = self.sampling_info(
+                    batch_size,
+                    device,
+                    temperatures=temperatures,
+                    top_ks=top_ks,
+                    top_ps=top_ps,
+                )
+                accept, bonus = (
+                    compute_dflash_sampling_correct_drafts_and_bonus(
+                        candidates=candidates,
+                        next_token_logits=logits.reshape(
+                            batch_size * block_size, vocab_size
+                        ),
+                        sampling_info=info,
+                        max_top_k=int(top_ks.max().item()),
+                        uniform_top_k_value=None,
+                        threshold_single=1.0,
+                        threshold_acc=1.0,
+                        uniform_samples=accept_uniforms.clone(),
+                        uniform_samples_for_final_sampling=(
+                            final_uniforms.clone()
+                        ),
+                        use_sparse_topk=True,
+                    )
+                )
+                logits_cpu = logits.cpu().tolist()
+                candidates_cpu = candidates.cpu().tolist()
+                for row in range(batch_size):
+                    target_probs = [
+                        filtered_probs_reference(
+                            logits_cpu[row][position],
+                            temperature=float(temperatures[row].item()),
+                            top_k=min(
+                                int(top_ks[row].item()), vocab_size
+                            ),
+                            top_p=float(top_ps[row].item()),
+                        )
+                        for position in range(block_size)
+                    ]
+                    expected = sampling_reference(
+                        candidates=candidates_cpu[row],
+                        target_probs=target_probs,
+                        accept_uniforms=(
+                            accept_uniforms[row].cpu().tolist()
+                        ),
+                        final_uniform=float(final_uniforms[row].item()),
+                    )
+                    self.assertEqual(
+                        (accept[row].item(), bonus[row].item()),
+                        expected,
+                        f"{mode=} {block_size=} {row=}",
+                    )
+
     def test_closed_form_joint_outcomes_sum_to_one(self) -> None:
         candidates = [6, 1, 2, 3]
         target_probs = [
@@ -325,6 +800,47 @@ class SamplingVerificationTests(unittest.TestCase):
         self.assertTrue(outcomes)
         self.assertTrue(all(probability >= 0 for probability in outcomes.values()))
         self.assertTrue(math.isclose(sum(outcomes.values()), 1.0, abs_tol=1e-12))
+
+
+@unittest.skipIf(
+    DFlashWorkerV2 is None, "patched DFlash worker is unavailable"
+)
+class WorkerSamplingGuardTests(unittest.TestCase):
+    def test_nonunit_thresholds_fail_closed(self) -> None:
+        worker = object.__new__(DFlashWorkerV2)
+        batch = SimpleNamespace(
+            sampling_info=SimpleNamespace(is_all_greedy=False)
+        )
+        args = SimpleNamespace(
+            speculative_accept_threshold_single=0.9,
+            speculative_accept_threshold_acc=1.0,
+        )
+        with patch(
+            "sglang.srt.speculative.dflash_worker_v2.get_global_server_args",
+            return_value=args,
+        ):
+            with self.assertRaisesRegex(ValueError, "thresholds"):
+                worker._validate_phase1_sampling_support(batch)
+
+    def test_unavailable_sampling_kernel_fails_closed(self) -> None:
+        worker = object.__new__(DFlashWorkerV2)
+        batch = SimpleNamespace(
+            sampling_info=SimpleNamespace(is_all_greedy=False)
+        )
+        args = SimpleNamespace(
+            speculative_accept_threshold_single=1.0,
+            speculative_accept_threshold_acc=1.0,
+        )
+        with patch(
+            "sglang.srt.speculative.dflash_worker_v2.get_global_server_args",
+            return_value=args,
+        ), patch(
+            "sglang.srt.speculative.dflash_worker_v2."
+            "is_dflash_sampling_verify_available",
+            return_value=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "refusing"):
+                worker._validate_phase1_sampling_support(batch)
 
 
 @unittest.skipUnless(
