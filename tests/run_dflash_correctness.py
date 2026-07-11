@@ -661,6 +661,7 @@ def _run_harness(
     dflash_url: str,
     results_dir: Path,
     phase: dict[str, Any],
+    pair: dict[str, Any],
 ) -> tuple[int, list[str]]:
     suites = _harness_suites(phase)
     command = [
@@ -683,6 +684,8 @@ def _run_harness(
         str(results_dir / "dflash_generation_correctness.json"),
         "--suites",
         ",".join(suites),
+        "--request-timeout",
+        str(pair["request_timeout_seconds"]),
     ]
     log_path = results_dir / "harness.log"
     with log_path.open("w", encoding="utf-8", buffering=1) as log_handle:
@@ -839,7 +842,7 @@ def _run(args: argparse.Namespace, config: dict[str, Any]) -> int:
         run_record["status"] = "running_harness"
         _json_dump(results_dir / "run.json", run_record)
         harness_returncode, harness_command = _run_harness(
-            profile, args, target_url, dflash_url, results_dir, phase
+            profile, args, target_url, dflash_url, results_dir, phase, pair
         )
         run_record["harness_command"] = harness_command
         run_record["harness_returncode"] = harness_returncode

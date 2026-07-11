@@ -15,6 +15,7 @@ from dflash_correctness_harness import (
     categorical_total_variation,
     compare_records,
     dflash_activity_check,
+    deterministic_token_fill,
     first_token_mismatch,
     parse_sse_lines,
     parse_suite_names,
@@ -158,6 +159,14 @@ class DistributionTests(unittest.TestCase):
 
 
 class ConfigAndCheckpointTests(unittest.TestCase):
+    def test_synthetic_fill_is_deterministic_and_nonperiodic(self):
+        corpus = list(range(10, 40))
+        first = deterministic_token_fill(corpus, 512, variant=7)
+        self.assertEqual(first, deterministic_token_fill(corpus, 512, variant=7))
+        self.assertNotEqual(first, deterministic_token_fill(corpus, 512, variant=8))
+        self.assertNotEqual(first[:128], first[128:256])
+        self.assertTrue(set(first).issubset(corpus))
+
     def test_full_matrix_extends_quick(self):
         config_path = Path(__file__).parent / "configs" / "dflash_generation_h200.json"
         config = json.loads(config_path.read_text())

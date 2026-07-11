@@ -22,6 +22,7 @@ class RunnerConfigurationTests(unittest.TestCase):
         cls.config = json.loads(CONFIG_PATH.read_text())
         cls.profile = cls.config["profiles"][cls.config["default_profile"]]
         cls.pair = cls.config["server_pair"]
+        assert cls.pair["request_timeout_seconds"] == 300
 
     def test_commands_keep_dflash_out_of_target_server(self) -> None:
         phase = self.config["phases"]["production"]

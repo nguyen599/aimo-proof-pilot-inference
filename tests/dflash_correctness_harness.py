@@ -61,6 +61,19 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def deterministic_token_fill(
+    corpus: Sequence[int], length: int, variant: int = 0
+) -> list[int]:
+    """Build a reproducible, nonperiodic token sequence from safe corpus IDs."""
+
+    if length < 0:
+        raise HarnessError("negative token length")
+    if not corpus and length:
+        raise HarnessError("empty token corpus")
+    rng = random.Random((int(variant) << 32) ^ int(length) ^ 0xDFA5124096)
+    return [int(corpus[rng.randrange(len(corpus))]) for _ in range(length)]
+
+
 def resolve_matrix(config: Mapping[str, Any], tier: str) -> dict[str, Any]:
     matrices = config.get("matrix", {})
     if tier not in matrices:
@@ -301,7 +314,7 @@ class ResultCheckpoint:
         else:
             if path.exists() and not overwrite: raise HarnessError(f"result exists: {path}; use --resume or --overwrite")
             if overwrite: self.journal_path.unlink(missing_ok=True)
-            self.data = {**metadata, "schema_version": SCHEMA_VERSION, "started_at": utc_now(), "finished_at": None, "cases": [], "summary": {}}
+            self.data = {**metadata, "schema_version": SCHEMA_VERSION, "started_at": utc_now(), "finished_at": None, "in_progress": None, "cases": [], "summary": {}}
             self._write()
         self.completed_ids = {case["id"] for case in self.data.get("cases", [])}
     def _summary(self):
@@ -337,9 +350,7 @@ class TokenFactory:
         if getattr(self.tokenizer, "eos_token_id", None) is not None: self.eos_token_ids.add(int(self.tokenizer.eos_token_id))
         self.eos_token_ids.update(int(value) for value in (getattr(self.tokenizer, "additional_special_tokens_ids", []) or []))
     def filler_ids(self, length: int, variant=0):
-        if length < 0: raise HarnessError("negative token length")
-        offset = variant % len(self.filler); cycle = self.filler[offset:] + self.filler[:offset]
-        return (cycle * ((length + len(cycle) - 1) // len(cycle)))[:length]
+        return deterministic_token_fill(self.filler, length, variant)
     def exact(self, length: int, variant=0):
         if length < 1: raise HarnessError("prompt length must be positive")
         prefix = [int(self.bos)] if self.bos is not None else []
@@ -417,12 +428,16 @@ class DifferentialHarness:
             a, b = pool.submit(left), pool.submit(right); return a.result(), b.result()
     def execute(self, case_id, suite, operation):
         if case_id in self.checkpoint.completed_ids: return next(c for c in self.checkpoint.data["cases"] if c["id"] == case_id)
+        self.checkpoint.data["in_progress"] = {"id": case_id, "suite": suite, "started_at": utc_now()}
+        self.checkpoint._write()
         started = time.monotonic()
         try:
             result = dict(operation()); result.setdefault("status", "pass" if result.get("ok") else "fail")
         except Exception as exc:
             result = {"ok": False, "status": "error", "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}}
-        result.update(id=case_id, suite=suite, duration_seconds=time.monotonic() - started); self.checkpoint.append(result)
+        result.update(id=case_id, suite=suite, duration_seconds=time.monotonic() - started)
+        self.checkpoint.data["in_progress"] = None
+        self.checkpoint.append(result)
         print(f"[{result['status'].upper():5}] {case_id} ({result['duration_seconds']:.3f}s)", flush=True); return result
     def pair_result(self, ids, params, rid, expected_ids=None, expected_finish=None, require_finish=False):
         tp, dp = self.payload(ids, params, "target-" + rid), self.payload(ids, params, "dflash-" + rid)
