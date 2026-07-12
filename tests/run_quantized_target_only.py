@@ -15,21 +15,20 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
-import time
 import traceback
 from typing import Any, Mapping, Sequence
-import urllib.request
 
 try:
     from . import run_dflash_correctness as launch
+    from . import serving_workload as workload
 except ImportError:  # pragma: no cover - script entry point
     import run_dflash_correctness as launch
+    import serving_workload as workload
 
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -45,30 +44,7 @@ DFLASH_REFERENCE = {
     "batch_output_tokens_per_s": 484.6518508208785,
     "batch_mean_accept_length": 3.802431610942249,
 }
-EQUATION_REQUEST = {
-    "messages": [
-        {
-            "role": "system",
-            "content": (
-                "You are a careful mathematical problem solver. Show a concise "
-                "derivation and verify the final answer."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Solve the system of equations for x, y, and z: "
-                "x + y + z = 6; 2x - y + z = 3; x + 2y - z = 2. "
-                "Show your work and substitute the result back into all three equations."
-            ),
-        },
-    ],
-    "max_tokens": 1024,
-    "temperature": 1.0,
-    "top_p": 0.95,
-    "seed": 20260711,
-    "stream": False,
-}
+EQUATION_REQUEST = workload.EQUATION_REQUEST
 
 
 class ExperimentError(RuntimeError):
@@ -223,105 +199,39 @@ def _results_dir(args: argparse.Namespace) -> Path:
     return path
 
 
-def post_json(url: str, payload: Mapping[str, Any], timeout: float) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        value = json.load(response)
-    if not isinstance(value, dict):
-        raise ExperimentError("chat completion response is not an object")
-    return value
-
-
-def _equation_answer_text(response: Mapping[str, Any]) -> str:
-    message = response["choices"][0]["message"]
-    return "\n".join(
-        str(message.get(key) or "") for key in ("reasoning_content", "content")
-    )
-
-
-def equation_is_correct(response: Mapping[str, Any]) -> bool:
-    compact = re.sub(r"\s+", "", _equation_answer_text(response).lower())
-    patterns = (
-        r"x(?:=|\\?boxed\{)1",
-        r"y(?:=|\\?boxed\{)2",
-        r"z(?:=|\\?boxed\{)3",
-    )
-    return all(re.search(pattern, compact) for pattern in patterns)
+equation_is_correct = workload.equation_is_correct
 
 
 def run_equation(base_url: str, model: str, results_dir: Path) -> dict[str, Any]:
-    payload = {"model": model, **EQUATION_REQUEST}
-    launch._json_dump(results_dir / "equation_request.json", payload)
-    started = time.monotonic()
-    response = post_json(f"{base_url}/v1/chat/completions", payload, timeout=300)
-    elapsed = time.monotonic() - started
-    launch._json_dump(results_dir / "equation_response.json", response)
-    completion_tokens = int(response["usage"]["completion_tokens"])
-    correct = equation_is_correct(response)
-    if not correct:
-        raise ExperimentError("three-equation response did not contain x=1, y=2, z=3")
-    return {
-        "correct": correct,
-        "wall_time_s": elapsed,
-        "prompt_tokens": int(response["usage"]["prompt_tokens"]),
-        "completion_tokens": completion_tokens,
-        "completion_tokens_per_s": completion_tokens / elapsed,
-        "finish_reason": response["choices"][0]["finish_reason"],
-    }
+    return workload.run_equation(
+        base_url,
+        model,
+        results_dir / "equation_request.json",
+        results_dir / "equation_response.json",
+    )
 
 
 def benchmark_command(base_url: str, profile: Mapping[str, Any], output: Path) -> list[str]:
-    return [
-        str(profile["python"]),
-        "-m",
-        "sglang.bench_serving",
-        "--backend",
-        "sglang",
-        "--base-url",
-        base_url,
-        "--dataset-name",
-        "random",
-        "--model",
-        str(profile["target_model"]),
-        "--tokenizer",
-        str(profile["tokenizer"]),
-        "--num-prompts",
-        "12",
-        "--random-input-len",
-        "512",
-        "--random-output-len",
-        "512",
-        "--random-range-ratio",
-        "1.0",
-        "--max-concurrency",
-        "6",
-        "--seed",
-        "20260711",
-        "--output-file",
-        str(output),
-        "--disable-tqdm",
-    ]
+    return workload.benchmark_command(
+        python=str(profile["python"]),
+        base_url=base_url,
+        model=str(profile["target_model"]),
+        tokenizer=str(profile["tokenizer"]),
+        output_path=output,
+        concurrency=6,
+    )
 
 
 def run_benchmark(base_url: str, profile: Mapping[str, Any], results_dir: Path) -> dict[str, Any]:
-    output = results_dir / "throughput_concurrency6.jsonl"
-    command = benchmark_command(base_url, profile, output)
-    with (results_dir / "throughput_stdout.log").open("w", encoding="utf-8") as log:
-        subprocess.run(command, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
-    lines = [line for line in output.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if len(lines) != 1:
-        raise ExperimentError(f"expected one benchmark JSONL record, found {len(lines)}")
-    record = json.loads(lines[0])
-    if record["completed"] != 12 or record["total_output_tokens"] != 6144:
-        raise ExperimentError(
-            "benchmark did not complete 12 requests and exactly 6144 output tokens"
-        )
-    return record
+    return workload.run_benchmark(
+        python=str(profile["python"]),
+        base_url=base_url,
+        model=str(profile["target_model"]),
+        tokenizer=str(profile["tokenizer"]),
+        output_path=results_dir / "throughput_concurrency6.jsonl",
+        stdout_path=results_dir / "throughput_stdout.log",
+        concurrency=6,
+    )
 
 
 def comparison(equation: Mapping[str, Any], benchmark: Mapping[str, Any]) -> dict[str, Any]:
@@ -451,7 +361,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except launch.RunnerInterrupted as exc:
         print(f"interrupted by {signal.Signals(exc.signum).name}", file=sys.stderr)
         return 128 + exc.signum
-    except (ExperimentError, launch.RunnerError, subprocess.CalledProcessError) as exc:
+    except (
+        ExperimentError,
+        workload.WorkloadError,
+        launch.RunnerError,
+        subprocess.CalledProcessError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception:
