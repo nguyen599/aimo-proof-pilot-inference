@@ -1,93 +1,54 @@
-# ProofBench evaluation
+# IMO 2025 evaluation
 
-This directory contains one evaluation path for OPD-32B: mandatory DFlash
-serving followed by the `submission-32b-fix4.ipynb` v2 streaming proof pool.
-The unused single-round prompt sweep, Python-tool evaluator, calibration harness,
-local adapter, and auxiliary benchmark copies from the upstream repository are
-intentionally not carried here.
+This directory contains the repository's single OPD-32B evaluation pipeline. A
+strict YAML file controls serving, generate-verify-refine search, and final
+DeepSeek grading. An explicit JSON manifest controls which IMO 2025 problems
+run.
 
-## Invariants
+Only the problem source changed from the earlier plan. The checked-in inference
+policy remains:
 
-- DFlash is mandatory.
-- `MODEL_MODE=humming_w4a8` is the active mode: GPTQ INT4 target, int4-MLP
-  phase-L draft, BF16 KV, and BF16 LM head. Eligible target MLP
-  projections execute through mandatory Humming W4A8 with SM90 heuristics.
-- `MODEL_MODE=bf16` selects BF16 target, draft, KV cache, and LM head for
-  controlled numerical comparisons.
-- Humming W4A8 is mandatory in `humming_w4a8` mode. H200 is SM90; upstream Humming
-  supports FP8 E4M3 activations on SM89 and newer. The helper uses one
-  numerically verified `Sm90Heuristics` configuration selected at `shape_m=256`
-  for every actual token-row count. Startup aborts unless the package, ycchen
-  integration helper, fixed-configuration marker, NVRTC library, SM90 preflight,
-  and constructed-layer runtime marker all pass.
-- Humming is target-only. The 64-layer target must construct exactly 128 W4A8
-  MLP projections; the eight-layer INT4 draft must construct exactly 16 W4A16
-  MLP projections and retain BF16 activations.
-- Quantized H200 mode uses `mem_fraction_static=0.82`. The notebook's FP8-KV
-  value of 0.85 leaves only 0.40 GiB after graphs with BF16 KV and OOMs during a
-  six-request DFlash prefill; 0.82 reserves the required execution headroom.
-- Every generation stage must produce valid output. There is no alternate proof,
-  request retry, stub grader, or synthetic score.
-- Full stage traces and grader responses are written to disk.
+- BF16 target-only TP2 inference by default;
+- Humming W4A8 target quantization and DFlash as independent opt-in booleans;
+- 128 initial proofs, 64 verifications per proof, top 32 proofs, four
+  refinements per selected proof, eight refinement analyses, and eight rounds;
+- ycchen's byte-identical deployed prover, verifier, and refiner prompts; and
+- 64 DeepSeek V4 Flash grader attempts per final proof with zero-veto
+  aggregation.
+
+The approved debug manifest is `manifests/imo-2025-problem-1.json`. Evaluating
+all six problems requires only a different ID manifest; the code has no
+problem-specific branches.
 
 ## Active files
 
 | Path | Purpose |
 |---|---|
-| `configs/opd32b_dflash_humming_w4a8.json` | active Humming W4A8 serving and agentic parameters |
-| `configs/opd32b_dflash_bf16.json` | BF16 comparison serving and agentic parameters |
-| `data/proofbench_v2.csv` | 60-problem ProofBench v2 benchmark |
-| `HUMMING_MLP_NUMERICAL_DIAGNOSIS.md` | first-principles explanation of `M`, the MLP activation failure, and its DFlash impact |
-| `harness/validate_humming_sm90_gemm.py` | real-weight numerical gate for the fixed H200 SM90 configuration |
-| `harness/validate_dflash_server.py` | checks the live SGLang server against the selected config |
-| `harness/run_full_evaluation.py` | orchestrates all 60 generations and strict DeepSeek grading |
-| `harness/make_batches.py` | creates deterministic five-problem shards |
-| `harness/run_notebook_v2_eval.py` | runs the hash-pinned notebook scheduler and saves full traces |
-| `harness/run_agentic_eval.py` | archived fixed-stage evaluator used by the stopped diagnostic run |
-| `harness/merge_agentic_shards.py` | validates and merges Basic and Advanced shards |
-| `harness/agentic_to_responses.py` | converts traces to grader input records |
-| `harness/grade_proofs.py` | performs strict two-pass DeepSeek grading |
-| `prompts/grader.md` | official paper B.5 grader prompt |
+| `configs/nemotron_cascade2.yaml` | the only serving, search, and grading config |
+| `manifests/imo-2025-problem-1.json` | exact debug input: problem 1 only |
+| `data/imo_2025.parquet` | MathArena's six IMO 2025 problems |
+| `prompts/ycchen_math_3r/` | byte-identical deployed proof prompts |
+| `prompts/grader.md` | existing pinned DeepSeek grader prompt |
+| `harness/launch_server.py` | launches the YAML-selected tensor-parallel SGLang mode |
+| `harness/validate_server.py` | rejects a live server that differs from YAML |
+| `harness/proof_search.py` | resumable cumulative proof-pool engine |
+| `harness/grade_proofs.py` | resumable 64-attempt zero-veto grader |
+| `harness/run_full_evaluation.py` | preflight, search, audits, grading, report |
 
-## Full execution
+## Debug execution
 
-Start two mandatory Humming W4A8 DFlash replicas, one per H200:
+The server is a supervisor service named `opd32b-eval`; its canonical log is
+`/var/log/portal/opd32b-eval.log`. Once the server is ready:
 
 ```bash
-MODEL_MODE=humming_w4a8 CUDA_VISIBLE_DEVICES=0 PORT=30000 bash serve_opd32b.sh
-MODEL_MODE=humming_w4a8 CUDA_VISIBLE_DEVICES=1 PORT=30001 bash serve_opd32b.sh
-```
-
-Load the DeepSeek credential and run the complete pipeline:
-
-```bash
-set -a
-source /workspace/.env
-set +a
 /workspace/pp/venv/bin/python evaluation/harness/run_full_evaluation.py \
-  --config evaluation/configs/opd32b_dflash_humming_w4a8.json \
-  --run-id opd32b-dflash-humming-w4a8-full-20260711
+  --config evaluation/configs/nemotron_cascade2.yaml \
+  --ids-file evaluation/manifests/imo-2025-problem-1.json \
+  --run-id imo-2025-problem-1-debug
 ```
 
-The servers use the notebook ceiling of 48 running requests while each streaming
-client admits 12 total calls, caps prove/refine at 6, and prioritizes verifiers.
-The orchestrator validates both live servers against the immutable Humming W4A8
-config, confirms that the authenticated
-DeepSeek model list contains `deepseek-v4-flash`, creates twelve deterministic
-five-problem shards, runs Basic and Advanced concurrently, requires exactly 60
-complete stage traces, converts the selected final proof for each problem, and
-performs two `high_notool` grader passes per proof. All raw generation traces,
-grader reasoning, grader responses, usage, manifests, and summaries are stored
-below `evaluation/runs/<run-id>/`.
+The runner requires `DEEPSEEK_API_KEY` in the process environment. Every run is
+stored below `evaluation/runs/<run-id>/` with pinned inputs, prompt/model hashes,
+raw generation calls, raw grader calls, round summaries, and `RESULT.md`.
 
-Generation and grading append durable checkpoints. Re-running the identical
-command skips completed generation problems and completed grader calls. A
-notebook fallback final source or any recorded call error terminates the run.
-
-## Historical six-problem archive
-
-`legacy-six-problem/` preserves the earlier AIMO Proof Pilot sample runner, its
-six input problems, and the committed DIVALL/ALTORO evidence. It is not part of
-the active 60-problem ProofBench pipeline and does not supply prompts, grading,
-or fallback outputs to that pipeline. Keeping it here removes the ambiguous
-top-level `eval/` versus `evaluation/` split without deleting historical results.
+See `EVALUATION_DESIGN.md` for the exact unchanged search algorithm.
