@@ -111,9 +111,9 @@ class DFlashWorkerV2(BaseSpecWorker):
         draft_server_args = deepcopy(server_args)
         draft_server_args.skip_tokenizer_init = True
         draft_backend = draft_server_args.speculative_draft_attention_backend
-        if draft_backend != "fa3":
+        if draft_backend != "fa4":
             raise ValueError(
-                "DFLASH draft attention backend must be fa3, "
+                "DFLASH draft attention backend must be fa4, "
                 f"got {draft_backend!r}"
             )
         # Make the draft worker backend explicit and self-contained.

@@ -89,7 +89,8 @@ def main() -> None:
 
     command = [
         str(venv / "bin/python"), "-m", "sglang.launch_server",
-        "--model-path", str(model.target), "--attention-backend", "fa3",
+        "--model-path", str(model.target), "--attention-backend", "fa4",
+        "--page-size", "128",
         "--tp", str(model.tensor_parallel_size), "--dp", str(model.data_parallel_size),
         "--load-balance-method", "round_robin", "--host", str(server["host"]),
         "--port", str(server["port"]), "--mem-fraction-static", str(server["mem_fraction_static"]),
@@ -103,7 +104,7 @@ def main() -> None:
         "--cuda-graph-backend-prefill", str(server["prefill_cuda_graph_backend"]),
         "--cuda-graph-bs-prefill", "256", "1024", str(server["chunked_prefill_size"]),
         "--enable-cache-report", "--enable-metrics", "--random-seed", str(config["search"]["seed"]),
-        "--enable-deterministic-inference", "--reasoning-parser", "deepseek-r1",
+        "--reasoning-parser", "deepseek-r1",
     ]
     if model.dflash:
         env["SGLANG_DFLASH_DRAFT_RING"] = "1"
@@ -114,7 +115,7 @@ def main() -> None:
                 "--speculative-dflash-block-size", str(server["dflash_block_size"]),
                 "--speculative-num-draft-tokens", str(server["dflash_num_draft_tokens"]),
                 "--speculative-draft-window-size", str(server["dflash_window_size"]),
-                "--speculative-draft-attention-backend", "fa3",
+                "--speculative-draft-attention-backend", "fa4",
             ]
         )
         if model.quantized:

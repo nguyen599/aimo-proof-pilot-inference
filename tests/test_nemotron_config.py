@@ -32,7 +32,7 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(search["request_timeout_seconds"], 86400)
         server = self.config["server"]
         self.assertEqual(server["max_running_requests"], 32)
-        self.assertEqual(server["mem_fraction_static"], 0.84)
+        self.assertEqual(server["mem_fraction_static"], 0.82)
         self.assertNotIn("triton_attention_num_kv_splits", server)
 
     def test_default_is_bf16_target_only_tp2_dp1(self):
@@ -102,10 +102,14 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertNotIn("MODEL_MODE", launcher)
         self.assertNotIn("DFLASH=", launcher)
 
-    def test_launcher_requires_fa3_for_target_and_draft(self):
+    def test_launcher_requires_fa4_for_target_and_draft(self):
         launcher = (HARNESS / "launch_server.py").read_text()
-        self.assertIn('"--attention-backend", "fa3"', launcher)
-        self.assertIn('"--speculative-draft-attention-backend", "fa3"', launcher)
+        self.assertIn('"--attention-backend", "fa4"', launcher)
+        self.assertIn('"--speculative-draft-attention-backend", "fa4"', launcher)
+        self.assertIn('"--page-size", "128"', launcher)
+        self.assertNotIn("--enable-deterministic-inference", launcher)
+        self.assertNotIn('"--attention-backend", "fa3"', launcher)
+        self.assertNotIn('"--speculative-draft-attention-backend", "fa3"', launcher)
         self.assertNotIn('"--attention-backend", "triton"', launcher)
         self.assertNotIn('"--speculative-draft-attention-backend", "triton"', launcher)
         self.assertNotIn("--triton-attention-num-kv-splits", launcher)
