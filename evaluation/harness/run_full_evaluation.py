@@ -177,6 +177,7 @@ async def evaluate(config_path: Path, ids_file: Path, run_id: str) -> Path:
             "draft": str(model.draft) if model.draft else None,
             "draft_config_sha256": sha256(draft_config) if draft_config else None,
             "tensor_parallel_size": model.tensor_parallel_size,
+            "data_parallel_size": model.data_parallel_size,
             "quantized": model.quantized,
             "dflash": model.dflash,
             "kv_cache_dtype": model.kv_cache_dtype,

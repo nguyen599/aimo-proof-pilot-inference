@@ -34,10 +34,11 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(server["max_running_requests"], 32)
         self.assertEqual(server["mem_fraction_static"], 0.84)
 
-    def test_default_is_bf16_target_only_tp2(self):
+    def test_default_is_bf16_target_only_tp2_dp1(self):
         model = active_model(self.config)
         self.assertEqual(model.mode, "bf16")
         self.assertEqual(model.tensor_parallel_size, 2)
+        self.assertEqual(model.data_parallel_size, 1)
         self.assertFalse(model.quantized)
         self.assertFalse(model.dflash)
         self.assertIsNone(model.draft)
@@ -72,6 +73,17 @@ class NemotronConfigTests(unittest.TestCase):
             )
             model = active_model(load_config(path))
         self.assertEqual(model.tensor_parallel_size, 4)
+
+    def test_dp_width_is_not_artificially_capped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(
+                self.path.read_text().replace(
+                    "data_parallel_size: 1", "data_parallel_size: 4"
+                )
+            )
+            model = active_model(load_config(path))
+        self.assertEqual(model.data_parallel_size, 4)
 
     def test_decode_graphs_cover_configured_ceiling(self):
         maximum = self.config["server"]["max_running_requests"]

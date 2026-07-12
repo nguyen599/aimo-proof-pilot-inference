@@ -39,6 +39,7 @@ def main() -> None:
 
     assert target_config["torch_dtype"] == "bfloat16"
     assert server["tp_size"] == model.tensor_parallel_size
+    assert server["dp_size"] == model.data_parallel_size
     assert server["kv_cache_dtype"] == model.kv_cache_dtype == "auto"
     assert server["enable_fp32_lm_head"] is False
     assert server["context_length"] == expected["context_length"]
@@ -57,7 +58,7 @@ def main() -> None:
     if model.quantized:
         assert target_config["quantization_config"]["quant_method"] == "compressed-tensors"
         assert "HUMMING_W4A8_PREFLIGHT " in server_log
-        assert humming_layers == 128 * model.tensor_parallel_size, humming_layers
+        assert humming_layers == 128 * model.tensor_parallel_size * model.data_parallel_size, humming_layers
         assert "target_execution=humming_w4a8" in server_log
     else:
         assert target_config.get("quantization_config") is None
@@ -76,7 +77,7 @@ def main() -> None:
         if model.quantized:
             assert draft_config["quantization_config"]["quant_method"] == "compressed-tensors"
             assert server["speculative_draft_model_quantization"] == "compressed-tensors"
-            assert draft_w4a16_layers == 16 * model.tensor_parallel_size
+            assert draft_w4a16_layers == 16 * model.tensor_parallel_size * model.data_parallel_size
         else:
             assert draft_config.get("quantization_config") is None
             assert server["speculative_draft_model_quantization"] is None
@@ -97,6 +98,7 @@ def main() -> None:
             "target": str(model.target),
             "draft": str(model.draft) if model.draft else None,
             "tensor_parallel_size": model.tensor_parallel_size,
+            "data_parallel_size": model.data_parallel_size,
             "quantized": model.quantized,
             "dflash": model.dflash,
         },

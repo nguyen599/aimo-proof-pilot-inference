@@ -11,7 +11,9 @@ import yaml
 
 ROOT_KEYS = {"schema_version", "models", "model", "server", "search", "grader"}
 MODEL_PATH_KEYS = {"bf16_target", "quantized_target", "bf16_draft", "quantized_draft"}
-MODEL_KEYS = {"tensor_parallel_size", "quantized", "dflash", "kv_cache_dtype"}
+MODEL_KEYS = {
+    "tensor_parallel_size", "data_parallel_size", "quantized", "dflash", "kv_cache_dtype",
+}
 SERVER_KEYS = {
     "host", "port", "context_length", "mem_fraction_static", "max_running_requests",
     "swa_full_tokens_ratio", "chunked_prefill_size", "stream_interval",
@@ -36,6 +38,7 @@ class ActiveModel:
     target: Path
     draft: Path | None
     tensor_parallel_size: int
+    data_parallel_size: int
     kv_cache_dtype: str
     quantized: bool
     dflash: bool
@@ -61,8 +64,8 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("evaluation config must be a YAML mapping")
     _exact_keys(config, ROOT_KEYS, "root")
-    if config["schema_version"] != 5:
-        raise ValueError("schema_version must be 5")
+    if config["schema_version"] != 6:
+        raise ValueError("schema_version must be 6")
     for section, keys in (
         ("models", MODEL_PATH_KEYS), ("model", MODEL_KEYS), ("server", SERVER_KEYS),
         ("search", SEARCH_KEYS), ("grader", GRADER_KEYS),
@@ -77,6 +80,7 @@ def load_config(path: Path) -> dict[str, Any]:
             raise ValueError(f"models.{key} must be an absolute path")
     model = config["model"]
     _positive_int(model["tensor_parallel_size"], "model.tensor_parallel_size")
+    _positive_int(model["data_parallel_size"], "model.data_parallel_size")
     if type(model["quantized"]) is not bool or type(model["dflash"]) is not bool:
         raise ValueError("model.quantized and model.dflash must be booleans")
     if model["kv_cache_dtype"] != "auto":
@@ -138,5 +142,6 @@ def active_model(config: dict[str, Any]) -> ActiveModel:
     return ActiveModel(
         mode="humming_w4a8" if quantized else "bf16", target=target, draft=draft,
         tensor_parallel_size=model["tensor_parallel_size"],
+        data_parallel_size=model["data_parallel_size"],
         kv_cache_dtype=model["kv_cache_dtype"], quantized=quantized, dflash=dflash,
     )

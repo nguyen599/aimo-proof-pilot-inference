@@ -33,10 +33,14 @@ def main() -> None:
     server = config["server"]
     venv = Path(os.environ.get("VENV", "/workspace/pp/venv"))
     env = os.environ.copy()
-    default_gpus = ",".join(map(str, range(model.tensor_parallel_size)))
+    gpu_count = model.tensor_parallel_size * model.data_parallel_size
+    default_gpus = ",".join(map(str, range(gpu_count)))
     env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", default_gpus)
-    if len(env["CUDA_VISIBLE_DEVICES"].split(",")) != model.tensor_parallel_size:
-        raise RuntimeError("CUDA_VISIBLE_DEVICES count must equal model.tensor_parallel_size")
+    if len(env["CUDA_VISIBLE_DEVICES"].split(",")) != gpu_count:
+        raise RuntimeError(
+            "CUDA_VISIBLE_DEVICES count must equal "
+            "model.tensor_parallel_size * model.data_parallel_size"
+        )
 
     env["FLASHINFER_CUDA_ARCH_LIST"] = env.get("FLASHINFER_CUDA_ARCH_LIST", "9.0a")
     env["FLASHINFER_USE_CUDA_NORM"] = "1"
@@ -90,7 +94,8 @@ def main() -> None:
     command = [
         str(venv / "bin/python"), "-m", "sglang.launch_server",
         "--model-path", str(model.target), "--attention-backend", "triton",
-        "--tp", str(model.tensor_parallel_size), "--host", str(server["host"]),
+        "--tp", str(model.tensor_parallel_size), "--dp", str(model.data_parallel_size),
+        "--load-balance-method", "round_robin", "--host", str(server["host"]),
         "--port", str(server["port"]), "--mem-fraction-static", str(server["mem_fraction_static"]),
         "--chunked-prefill-size", str(server["chunked_prefill_size"]),
         "--context-length", str(server["context_length"]), "--kv-cache-dtype", model.kv_cache_dtype,
@@ -121,7 +126,8 @@ def main() -> None:
             command.extend(["--speculative-draft-model-quantization", "compressed-tensors"])
 
     print(
-        f"[serve_opd32b] mode={model.mode} dflash={str(model.dflash).lower()} tp={model.tensor_parallel_size} "
+        f"[serve_opd32b] mode={model.mode} dflash={str(model.dflash).lower()} "
+        f"tp={model.tensor_parallel_size} dp={model.data_parallel_size} "
         f"model={model.target} draft={model.draft} kv={model.kv_cache_dtype} "
         f"port={server['port']} ctx={server['context_length']}", flush=True,
     )
