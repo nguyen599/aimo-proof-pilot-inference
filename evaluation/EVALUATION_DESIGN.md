@@ -51,12 +51,12 @@ For each requested problem:
 6. For every selected parent, place eight informative verifier reviews into one
    ycchen XML candidate bundle and generate four independent refinements.
 7. Verify all 32 new proofs 16 times, add them to the cumulative pool, rerank,
-   and continue for at most eight rounds.
+   and continue for at most four rounds.
 8. Return the highest-ranked proof. There is no selector-model call or proof
    fallback.
 
-Each full round makes 32 generation calls and 512 verifier calls. Eight rounds
-make at most 4,352 local calls per problem. Early stop
+Each full round makes 32 generation calls and 512 verifier calls. Four rounds
+make at most 2,176 local calls per problem. Early stop
 can reduce the count without changing the algorithm.
 
 All independent continuations are admitted together, bounded only by the YAML

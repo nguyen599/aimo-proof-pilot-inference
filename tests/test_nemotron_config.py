@@ -27,7 +27,11 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(search["top_proofs"], 8)
         self.assertEqual(search["refinements_per_proof"], 4)
         self.assertEqual(search["analyses_per_refinement"], 8)
-        self.assertEqual(search["max_rounds"], 8)
+        self.assertEqual(search["max_rounds"], 4)
+        self.assertEqual(search["concurrency"], 32)
+        server = self.config["server"]
+        self.assertEqual(server["max_running_requests"], 32)
+        self.assertEqual(server["mem_fraction_static"], 0.84)
 
     def test_default_is_bf16_target_only_tp2(self):
         model = active_model(self.config)
@@ -69,9 +73,12 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(model.tensor_parallel_size, 4)
 
     def test_decode_graphs_cover_configured_ceiling(self):
-        batches = decode_graph_batches(48)
+        maximum = self.config["server"]["max_running_requests"]
+        self.assertEqual(maximum, 32)
+        batches = decode_graph_batches(maximum)
         self.assertEqual(batches[:16], list(range(1, 17)))
-        self.assertEqual(batches[-1], 48)
+        self.assertEqual(batches[-1], 32)
+        self.assertNotIn(40, batches)
         self.assertNotIn(64, batches)
 
     def test_launcher_has_one_config_interface(self):

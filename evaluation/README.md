@@ -11,7 +11,7 @@ policy remains:
 - BF16 target-only TP2 inference by default;
 - Humming W4A8 target quantization and DFlash as independent opt-in booleans;
 - 32 initial proofs, 16 verifications per proof, top 8 proofs, four
-  refinements per selected proof, eight refinement analyses, and eight rounds;
+  refinements per selected proof, eight refinement analyses, and four rounds;
 - ycchen's byte-identical deployed prover, verifier, and refiner prompts; and
 - 64 GPT-5.6 Sol Responses grader attempts on the full integer 0-7 scale per
   final proof, using strict `findings`, `grade`, `reasoning` JSON and zero-veto
