@@ -19,21 +19,14 @@ class NemotronConfigTests(unittest.TestCase):
         cls.path = REPO / "evaluation/configs/nemotron_cascade2.yaml"
         cls.config = load_config(cls.path)
 
-    def test_checked_in_config_is_the_one_count_dry_run(self):
+    def test_checked_in_config_is_full_uniform_policy(self):
         search = self.config["search"]
-        for key in (
-            "proofs_per_round",
-            "verifications_per_proof",
-            "top_proofs",
-            "refinements_per_proof",
-            "analyses_per_refinement",
-            "max_rounds",
-            "concurrency",
-        ):
-            self.assertEqual(search[key], 1, key)
-        self.assertEqual(self.config["server"]["max_running_requests"], 1)
-        self.assertEqual(self.config["grader"]["attempts_per_proof"], 1)
-        self.assertEqual(self.config["grader"]["concurrency"], 1)
+        self.assertEqual(search["proofs_per_round"], 128)
+        self.assertEqual(search["verifications_per_proof"], 64)
+        self.assertEqual(search["top_proofs"], 32)
+        self.assertEqual(search["refinements_per_proof"], 4)
+        self.assertEqual(search["analyses_per_refinement"], 8)
+        self.assertEqual(search["max_rounds"], 8)
 
     def test_default_is_bf16_target_only_tp2(self):
         model = active_model(self.config)
@@ -63,11 +56,11 @@ class NemotronConfigTests(unittest.TestCase):
                 self.assertEqual(model.target.name, paths[1])
                 self.assertEqual(model.draft.name if model.draft else None, paths[2])
 
-    def test_decode_graphs_match_the_dry_run_server_ceiling(self):
-        self.assertEqual(
-            decode_graph_batches(self.config["server"]["max_running_requests"]),
-            [1],
-        )
+    def test_decode_graphs_cover_configured_ceiling(self):
+        batches = decode_graph_batches(48)
+        self.assertEqual(batches[:16], list(range(1, 17)))
+        self.assertEqual(batches[-1], 48)
+        self.assertNotIn(64, batches)
 
     def test_launcher_has_one_config_interface(self):
         launcher = (REPO / "serve_opd32b.sh").read_text()

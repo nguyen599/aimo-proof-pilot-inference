@@ -10,10 +10,10 @@ policy remains:
 
 - BF16 target-only TP2 inference by default;
 - Humming W4A8 target quantization and DFlash as independent opt-in booleans;
-- one initial proof, one verification per proof, top one proof, one
-  refinement per selected proof, one refinement analysis, and one round;
+- 128 initial proofs, 64 verifications per proof, top 32 proofs, four
+  refinements per selected proof, eight refinement analyses, and eight rounds;
 - ycchen's byte-identical deployed prover, verifier, and refiner prompts; and
-- one DeepSeek V4 Flash grader attempt per final proof with zero-veto
+- 64 DeepSeek V4 Flash grader attempts per final proof with zero-veto
   aggregation.
 
 The approved debug manifest is `manifests/imo-2025-problem-1.json`. Evaluating
@@ -32,7 +32,7 @@ problem-specific branches.
 | `harness/launch_server.py` | launches the YAML-selected TP2 SGLang mode |
 | `harness/validate_server.py` | rejects a live server that differs from YAML |
 | `harness/proof_search.py` | resumable cumulative proof-pool engine |
-| `harness/grade_proofs.py` | resumable configured-attempt zero-veto grader |
+| `harness/grade_proofs.py` | resumable 64-attempt zero-veto grader |
 | `harness/run_full_evaluation.py` | preflight, search, audits, grading, report |
 
 ## Debug execution

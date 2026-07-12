@@ -41,19 +41,27 @@ field. No MathArena-specific generation prompt or algorithm is used.
 
 For each requested problem:
 
-1. Generate one initial proof using stable, distinct request seeds.
+1. Generate 128 initial proofs using stable, distinct request seeds.
 2. Parse each natural-stop response using ycchen's XML contract.
-3. Verify every new proof once using ycchen's verifier prompt,
+3. Verify every new proof independently 64 times using ycchen's verifier prompt,
    including the proof's self-evaluation.
 4. Rank the cumulative verified pool by mean verifier score, self-score, and a
    stable seeded tie-breaker.
-5. If another round is configured and the best mean has not crossed the stop threshold, select the cumulative top proof.
-6. Put one verifier review into ycchen's XML candidate bundle, generate one refinement, verify it once, add it to the pool, and rerank.
-7. Return the highest-ranked proof after the configured rounds. There is no selector-model call or proof fallback.
+5. Unless the best mean exceeds `0.99999`, take the cumulative top 32 proofs.
+6. For every selected parent, place eight informative verifier reviews into one
+   ycchen XML candidate bundle and generate four independent refinements.
+7. Verify all 128 new proofs 64 times, add them to the cumulative pool, rerank,
+   and continue for at most eight rounds.
+8. Return the highest-ranked proof. There is no selector-model call or proof
+   fallback.
 
-With the checked-in dry-run values, the single round makes one generation call
-and one verifier call. Refinement fields are set to one but become active only
-when `max_rounds` is at least two.
+Each full round makes 128 generation calls and 8,192 verifier calls. Eight
+rounds make at most 66,560 local calls for the problem-1 debug run. Early stop
+can reduce the count without changing the algorithm.
+
+The first request for each identical prompt group completes before the remaining
+requests are admitted, establishing the shared radix-cache prefix for later
+independent continuations.
 
 ## Persistence
 
@@ -70,9 +78,9 @@ are no request retries, prompt fallbacks, model fallbacks, or synthetic scores.
 ## Final grading
 
 The existing policy remains unchanged: one selected proof is sent to
-`deepseek-v4-flash` once with high reasoning and SDK retries disabled. If
+`deepseek-v4-flash` 64 times with high reasoning and SDK retries disabled. If
 any score is zero, that problem receives zero; otherwise its score is the mean
-of the configured attempts. This is our zero-veto protocol, not MathArena's leaderboard
+of all 64 attempts. This is our zero-veto protocol, not MathArena's leaderboard
 judge ensemble.
 
 ## Artifacts

@@ -13,7 +13,7 @@ The harness exposes one production path:
 5. `proof_search.py` generates, verifies, ranks, refines, and checkpoints every
    call and proof. Its budgets are read directly from YAML.
 6. `grade_proofs.py` grades the one selected proof per problem for the configured
-   number of attempts and applies zero-veto aggregation.
+   64 attempts and applies zero-veto aggregation.
 7. `run_full_evaluation.py` pins inputs, performs the audits, and writes the final
    machine-readable and Markdown reports.
 
