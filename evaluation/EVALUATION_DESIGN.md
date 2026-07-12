@@ -41,22 +41,22 @@ field. No MathArena-specific generation prompt or algorithm is used.
 
 For each requested problem:
 
-1. Generate 128 initial proofs using stable, distinct request seeds.
+1. Generate 32 initial proofs using stable, distinct request seeds.
 2. Parse each natural-stop response using ycchen's XML contract.
-3. Verify every new proof independently 64 times using ycchen's verifier prompt,
+3. Verify every new proof independently 16 times using ycchen's verifier prompt,
    including the proof's self-evaluation.
 4. Rank the cumulative verified pool by mean verifier score, self-score, and a
    stable seeded tie-breaker.
-5. Unless the best mean exceeds `0.99999`, take the cumulative top 32 proofs.
+5. Unless the best mean exceeds `0.99999`, take the cumulative top 8 proofs.
 6. For every selected parent, place eight informative verifier reviews into one
    ycchen XML candidate bundle and generate four independent refinements.
-7. Verify all 128 new proofs 64 times, add them to the cumulative pool, rerank,
+7. Verify all 32 new proofs 16 times, add them to the cumulative pool, rerank,
    and continue for at most eight rounds.
 8. Return the highest-ranked proof. There is no selector-model call or proof
    fallback.
 
-Each full round makes 128 generation calls and 8,192 verifier calls. Eight
-rounds make at most 66,560 local calls for the problem-1 debug run. Early stop
+Each full round makes 32 generation calls and 512 verifier calls. Eight rounds
+make at most 4,352 local calls per problem. Early stop
 can reduce the count without changing the algorithm.
 
 The first request for each identical prompt group completes before the remaining

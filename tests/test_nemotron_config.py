@@ -22,9 +22,9 @@ class NemotronConfigTests(unittest.TestCase):
 
     def test_checked_in_config_is_full_uniform_policy(self):
         search = self.config["search"]
-        self.assertEqual(search["proofs_per_round"], 128)
-        self.assertEqual(search["verifications_per_proof"], 64)
-        self.assertEqual(search["top_proofs"], 32)
+        self.assertEqual(search["proofs_per_round"], 32)
+        self.assertEqual(search["verifications_per_proof"], 16)
+        self.assertEqual(search["top_proofs"], 8)
         self.assertEqual(search["refinements_per_proof"], 4)
         self.assertEqual(search["analyses_per_refinement"], 8)
         self.assertEqual(search["max_rounds"], 8)
