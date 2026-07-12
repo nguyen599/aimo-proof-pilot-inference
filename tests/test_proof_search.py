@@ -24,9 +24,11 @@ class ScriptedClient:
     def __init__(self, *, stop_after_first_round: bool = False):
         self.stop_after_first_round = stop_after_first_round
         self.calls: list[str] = []
+        self.kwargs: list[dict] = []
 
     async def chat_raw(self, messages, *, request_id, **kwargs):
         self.calls.append(request_id)
+        self.kwargs.append(kwargs)
         if "/verify/" in request_id:
             score = 1 if self.stop_after_first_round or "round-02" in request_id else 0.5
             content = (
@@ -63,6 +65,7 @@ class GatedClient(ScriptedClient):
 
     async def chat_raw(self, messages, *, request_id, **kwargs):
         self.calls.append(request_id)
+        self.kwargs.append(kwargs)
         if len(self.calls) == self.expected_calls:
             self.all_started.set()
         await self.release.wait()
@@ -186,6 +189,12 @@ class ProofSearchTests(unittest.TestCase):
                 self.assertEqual(final["calls_completed"], 12)
                 self.assertTrue(final["selected_proof_id"].startswith("r02-"))
                 self.assertEqual(len(client.calls), len(set(client.calls)))
+                self.assertTrue(
+                    all(
+                        kwargs["max_completion_tokens"] == 128
+                        for kwargs in client.kwargs
+                    )
+                )
 
         asyncio.run(run())
 

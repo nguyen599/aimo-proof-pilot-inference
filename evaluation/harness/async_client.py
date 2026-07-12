@@ -70,18 +70,12 @@ class AsyncChatClient:
         self,
         messages: list[dict],
         *,
-        context_length: int,
+        max_completion_tokens: int,
         temperature: float,
         top_p: float,
         seed: int,
         request_id: str,
     ) -> dict:
-        prompt_tokens = await self.token_count(messages)
-        max_completion_tokens = context_length - prompt_tokens
-        if max_completion_tokens <= 0:
-            raise RuntimeError(
-                f"prompt exceeds context: prompt={prompt_tokens}, context={context_length}"
-            )
         payload = {
             "model": self.model,
             "messages": messages,

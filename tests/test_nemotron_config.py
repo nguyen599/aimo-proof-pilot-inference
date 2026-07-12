@@ -30,6 +30,7 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(search["max_rounds"], 4)
         self.assertEqual(search["concurrency"], 32)
         self.assertEqual(search["request_timeout_seconds"], 86400)
+        self.assertEqual(search["max_completion_tokens"], 65536)
         server = self.config["server"]
         self.assertEqual(server["max_running_requests"], 32)
         self.assertEqual(server["mem_fraction_static"], 0.82)
@@ -85,6 +86,20 @@ class NemotronConfigTests(unittest.TestCase):
             )
             model = active_model(load_config(path))
         self.assertEqual(model.data_parallel_size, 4)
+
+    def test_search_completion_budget_is_not_coupled_to_server_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(
+                self.path.read_text().replace(
+                    "max_completion_tokens: 65536",
+                    "max_completion_tokens: 32768",
+                    1,
+                )
+            )
+            config = load_config(path)
+        self.assertEqual(config["server"]["context_length"], 262144)
+        self.assertEqual(config["search"]["max_completion_tokens"], 32768)
 
     def test_decode_graphs_cover_configured_ceiling(self):
         maximum = self.config["server"]["max_running_requests"]

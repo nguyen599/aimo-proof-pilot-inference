@@ -121,7 +121,7 @@ class CallStore:
         self,
         client: AsyncChatClient,
         semaphore: asyncio.Semaphore,
-        context_length: int,
+        max_completion_tokens: int,
         temperature: float,
         top_p: float,
         spec: CallSpec,
@@ -138,7 +138,7 @@ class CallStore:
             async with semaphore:
                 response = await client.chat_raw(
                     spec.messages,
-                    context_length=context_length,
+                    max_completion_tokens=max_completion_tokens,
                     temperature=temperature,
                     top_p=top_p,
                     seed=spec.seed,

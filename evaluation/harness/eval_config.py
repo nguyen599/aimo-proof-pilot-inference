@@ -123,8 +123,6 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("search.early_stop_threshold must be in (0, 1]")
     if search["temperature"] != 1.0 or search["top_p"] != 0.95:
         raise ValueError("search sampling must be temperature=1.0 and top_p=0.95")
-    if search["max_completion_tokens"] != server["context_length"]:
-        raise ValueError("search.max_completion_tokens must equal server.context_length")
     if type(search["seed"]) is not int or search["seed"] < 0:
         raise ValueError("search.seed must be a non-negative integer")
 

@@ -85,9 +85,10 @@ dataset hash, prompt hashes, and source commit are persisted.
 
 Successful calls are resume checkpoints. A persisted failure is terminal. There
 are no request retries, prompt fallbacks, model fallbacks, or synthetic scores.
-The YAML also sets a strict 24-hour HTTP deadline for each local model response,
-allowing full 262,144-token completions without imposing a shorter hidden client
-deadline.
+The YAML sets a strict 24-hour HTTP deadline for each local model response.
+Every local request sends the configured 65,536-token completion budget
+unchanged; the client performs no prompt-size subtraction, clamp, or context
+preflight, and SGLang alone enforces its 262,144-token server context.
 
 ## Final grading
 
