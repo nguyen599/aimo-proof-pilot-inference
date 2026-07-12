@@ -1,4 +1,4 @@
-"""Record and strictly validate the YAML-selected TP=2 OPD server."""
+"""Record and strictly validate the YAML-selected OPD server."""
 
 from __future__ import annotations
 
@@ -39,7 +39,6 @@ def main() -> None:
 
     assert target_config["torch_dtype"] == "bfloat16"
     assert server["tp_size"] == model.tensor_parallel_size
-    assert model.tensor_parallel_size in {1, 2}
     assert server["kv_cache_dtype"] == model.kv_cache_dtype == "auto"
     assert server["enable_fp32_lm_head"] is False
     assert server["context_length"] == expected["context_length"]

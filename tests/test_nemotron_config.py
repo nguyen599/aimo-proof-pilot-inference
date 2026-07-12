@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -56,11 +57,16 @@ class NemotronConfigTests(unittest.TestCase):
                 self.assertEqual(model.target.name, paths[1])
                 self.assertEqual(model.draft.name if model.draft else None, paths[2])
 
-    def test_tp1_is_supported_without_changing_production_default(self):
-        config = copy.deepcopy(self.config)
-        config["model"]["tensor_parallel_size"] = 1
-        model = active_model(config)
-        self.assertEqual(model.tensor_parallel_size, 1)
+    def test_tp_width_is_not_artificially_capped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(
+                self.path.read_text().replace(
+                    "tensor_parallel_size: 2", "tensor_parallel_size: 4"
+                )
+            )
+            model = active_model(load_config(path))
+        self.assertEqual(model.tensor_parallel_size, 4)
 
     def test_decode_graphs_cover_configured_ceiling(self):
         batches = decode_graph_batches(48)

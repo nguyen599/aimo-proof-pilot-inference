@@ -76,8 +76,7 @@ def load_config(path: Path) -> dict[str, Any]:
         if not isinstance(value, str) or not value.startswith("/"):
             raise ValueError(f"models.{key} must be an absolute path")
     model = config["model"]
-    if model["tensor_parallel_size"] not in {1, 2}:
-        raise ValueError("model.tensor_parallel_size must be 1 or 2")
+    _positive_int(model["tensor_parallel_size"], "model.tensor_parallel_size")
     if type(model["quantized"]) is not bool or type(model["dflash"]) is not bool:
         raise ValueError("model.quantized and model.dflash must be booleans")
     if model["kv_cache_dtype"] != "auto":

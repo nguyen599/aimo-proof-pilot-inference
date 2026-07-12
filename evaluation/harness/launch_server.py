@@ -33,7 +33,8 @@ def main() -> None:
     server = config["server"]
     venv = Path(os.environ.get("VENV", "/workspace/pp/venv"))
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", "0,1")
+    default_gpus = ",".join(map(str, range(model.tensor_parallel_size)))
+    env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", default_gpus)
     if len(env["CUDA_VISIBLE_DEVICES"].split(",")) != model.tensor_parallel_size:
         raise RuntimeError("CUDA_VISIBLE_DEVICES count must equal model.tensor_parallel_size")
 

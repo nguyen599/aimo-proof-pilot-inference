@@ -5,7 +5,7 @@ The harness exposes one production path:
 1. `eval_config.py` loads `nemotron_cascade2.yaml` with exact section keys and
    validates every serving, search, and grader value.
 2. `launch_server.py` selects BF16 or Humming W4A8 target weights and independently
-   enables DFlash, using the YAML-selected TP1 or TP2 SGLang server.
+   enables DFlash, using the YAML-selected tensor-parallel SGLang server.
 3. `validate_server.py` compares the live server, model metadata, runtime markers,
    and GPU state with the YAML before generation.
 4. `run_proof_search.py` loads exactly the IDs in the supplied JSON manifest and

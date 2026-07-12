@@ -29,7 +29,7 @@ problem-specific branches.
 | `data/imo_2025.parquet` | MathArena's six IMO 2025 problems |
 | `prompts/ycchen_math_3r/` | byte-identical deployed proof prompts |
 | `prompts/grader.md` | existing pinned DeepSeek grader prompt |
-| `harness/launch_server.py` | launches the YAML-selected TP1 or TP2 SGLang mode |
+| `harness/launch_server.py` | launches the YAML-selected tensor-parallel SGLang mode |
 | `harness/validate_server.py` | rejects a live server that differs from YAML |
 | `harness/proof_search.py` | resumable cumulative proof-pool engine |
 | `harness/grade_proofs.py` | resumable 64-attempt zero-veto grader |
