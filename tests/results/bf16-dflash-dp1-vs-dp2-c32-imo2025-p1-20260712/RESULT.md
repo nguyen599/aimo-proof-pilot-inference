@@ -102,3 +102,48 @@ The conclusion is operationally clear: for 32 simultaneous 8K proof generations 
 - `dp2-requests.json`: all 32 per-request token, latency, seed, and output-hash records.
 - `dp2-server.log`: complete successful DP2 server log.
 - `dp2-server-attempt1-summary-failed.log`: first successful DP2 inference attempt whose one-off client failed only while aggregating nullable cached-token metadata; excluded from the reported measurement.
+
+## Quantized DP2 comparison
+
+The exact matched quantized run used a Humming W4A8 target, an INT4/W4A16 DFlash draft, and BF16 persistent KV. All request IDs, seeds, prompts, sampling parameters, concurrency, and token ceilings matched the BF16 DP2 run.
+
+| Metric | BF16 DP2 | Quantized DP2 | Quantized / BF16 |
+|---|---:|---:|---:|
+| Aggregate throughput | 624.491 tok/s | **641.826 tok/s** | **1.0278x** |
+| Wall time | 419.773 s | **408.435 s** | **1.0278x faster** |
+| P50 latency | 405.469 s | **388.068 s** | **1.0448x faster** |
+| P95 latency | 417.150 s | **402.898 s** | **1.0354x faster** |
+| Full KV capacity per replica | 573,004 | **1,013,104** | **1.7681x** |
+| SWA KV capacity per replica | 114,601 | **202,620** | **1.7681x** |
+| Logged mean DFlash accept length | 3.169 | 3.227 | 1.018x |
+| KV retractions | 0 | 0 | — |
+| Requests with final content | 0/32 | 0/32 | unchanged |
+
+Quantization saved only **11.34 seconds** on this 262,144-token workload. The throughput gain is **2.78%**, much smaller than the earlier concurrency-6 gain of 21%.
+
+The acceptance trace does not explain the small gain: quantized acceptance was slightly higher, not lower. At batch size 16 per replica, target MLP weight traffic is only one part of total cost. Attention, KV access, DFlash draft execution, target verification, scheduling, and the low-concurrency drain tail consume a larger fraction of wall time. The fixed Humming SM90 kernel therefore cannot translate its cheaper target MLP arithmetic into a large end-to-end gain for this shape.
+
+The major quantization benefit is memory. Each replica gains 440,100 full-attention KV slots and 88,019 SWA slots. With 16 requests per replica, the approximate full-KV pressure point rises from:
+
+$$
+\frac{573{,}004}{16} - 426 = 35{,}386.75
+$$
+
+completion tokens per request to:
+
+$$
+\frac{1{,}013{,}104}{16} - 426 = 62{,}893.
+$$
+
+This matters for long generations because it postpones the retraction and re-prefill behavior observed under BF16 DP1.
+
+If the measured 8K throughput were constant for 22.5 minutes—an optimistic assumption—the aggregate budget would be about 26,346 tokens per BF16 request versus 27,077 per quantized request. Quantization adds only about 731 tokens per request to that time budget. It therefore improves headroom but does not solve the 22.5-minute termination requirement.
+
+All 32 quantized requests again exhausted the 8,192-token ceiling while remaining entirely in the reasoning channel. Quantization changed every sampled output hash, as expected when logits change under stochastic sampling, but did not cause any request to emit final-answer content. Proof quality and natural termination must be evaluated separately.
+
+Additional artifacts:
+
+- `quantized-dp2-result.json`: quantized summary;
+- `quantized-dp2-requests.json`: all per-request records;
+- `quantized-dp2-server.log`: complete server and runtime log;
+- `quantized-comparison.json`: machine-readable BF16/quantized comparison.
