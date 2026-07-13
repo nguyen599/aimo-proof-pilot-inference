@@ -25,7 +25,9 @@ class EvaluationOrchestratorTests(unittest.TestCase):
         self.assertEqual([row["Problem ID"] for row in rows], ["1"])
         self.assertIn("sunny", rows[0]["Problem"])
         self.assertEqual(rows[0]["Points"], 7)
-        self.assertEqual(len(rows[0]["Grading guidelines"].splitlines()), 7)
+        self.assertEqual(len(rows[0]["Grading scheme"].splitlines()), 7)
+        self.assertNotIn("Solution", rows[0])
+        self.assertNotIn("Grading guidelines", rows[0])
 
         second = REPO / "evaluation/manifests/imo-2025-problem-2.json"
         second_rows = load_requested_rows(second)

@@ -31,7 +31,8 @@ SEARCH_KEYS = {
 }
 GRADER_KEYS = {
     "base_url", "model", "api_key_env", "reasoning", "attempts_per_proof",
-    "concurrency", "max_completion_tokens", "zero_veto", "prompt_sha256",
+    "concurrency", "max_completion_tokens", "zero_veto", "prompt_cache_mode",
+    "prompt_cache_ttl", "system_prompt_sha256", "user_prompt_sha256",
 }
 
 
@@ -67,8 +68,8 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("evaluation config must be a YAML mapping")
     _exact_keys(config, ROOT_KEYS, "root")
-    if config["schema_version"] != 10:
-        raise ValueError("schema_version must be 10")
+    if config["schema_version"] != 11:
+        raise ValueError("schema_version must be 11")
     for section, keys in (
         ("models", MODEL_PATH_KEYS), ("model", MODEL_KEYS), ("server", SERVER_KEYS),
         ("search", SEARCH_KEYS), ("grader", GRADER_KEYS),
@@ -170,8 +171,13 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("grader.zero_veto must be true")
     if grader["reasoning"] not in {"high", "max"}:
         raise ValueError("grader.reasoning must be high or max")
-    if len(grader["prompt_sha256"]) != 64:
-        raise ValueError("grader.prompt_sha256 must be a SHA-256 hex digest")
+    if grader["prompt_cache_mode"] != "implicit":
+        raise ValueError("grader.prompt_cache_mode must be implicit")
+    if grader["prompt_cache_ttl"] != "30m":
+        raise ValueError("grader.prompt_cache_ttl must be 30m")
+    for key in ("system_prompt_sha256", "user_prompt_sha256"):
+        if len(grader[key]) != 64:
+            raise ValueError(f"grader.{key} must be a SHA-256 hex digest")
     return config
 
 

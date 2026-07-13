@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from eval_config import active_model, load_config
-from grade_proofs import GRADER_PROMPT, grade_final_proofs
+from grade_proofs import (
+    GRADER_SYSTEM_PROMPT,
+    GRADER_USER_PROMPT,
+    grade_final_proofs,
+)
 from proof_prompts import PROMPT_SOURCE_COMMIT, prompt_hashes
 from run_proof_search import (
     dataset_path,
@@ -152,8 +156,10 @@ async def evaluate(config_path: Path, ids_file: Path, run_id: str) -> Path:
     rows = load_requested_rows(ids_file)
     problem_ids = [row["Problem ID"] for row in rows]
     grader = config["grader"]
-    if sha256(GRADER_PROMPT) != grader["prompt_sha256"]:
-        raise RuntimeError("grader prompt hash differs from the YAML")
+    if sha256(GRADER_SYSTEM_PROMPT) != grader["system_prompt_sha256"]:
+        raise RuntimeError("grader system prompt hash differs from the YAML")
+    if sha256(GRADER_USER_PROMPT) != grader["user_prompt_sha256"]:
+        raise RuntimeError("grader user prompt hash differs from the YAML")
     api_key = os.environ.get(grader["api_key_env"])
     if not api_key:
         raise RuntimeError(f"empty {grader['api_key_env']}")
@@ -174,7 +180,7 @@ async def evaluate(config_path: Path, ids_file: Path, run_id: str) -> Path:
     target_config = model.target / "config.json"
     draft_config = model.draft / "config.json" if model.draft else None
     expected_manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "run_id": run_id,
         "git_commit": git_commit,
         "config_sha256": sha256(pinned_config),
@@ -188,7 +194,10 @@ async def evaluate(config_path: Path, ids_file: Path, run_id: str) -> Path:
         "prompt_source_repository": "https://github.com/ycchen-tw/proof-pilot-codes",
         "prompt_source_commit": PROMPT_SOURCE_COMMIT,
         "proof_prompt_sha256": prompt_hashes(),
-        "grader_prompt_sha256": sha256(GRADER_PROMPT),
+        "grader_prompt_sha256": {
+            "system": sha256(GRADER_SYSTEM_PROMPT),
+            "user": sha256(GRADER_USER_PROMPT),
+        },
         "active_model": {
             "mode": model.mode,
             "target": str(model.target),

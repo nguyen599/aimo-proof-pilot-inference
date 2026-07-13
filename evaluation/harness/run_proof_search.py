@@ -62,11 +62,7 @@ def _imo_2025_rows(data: pd.DataFrame) -> list[dict]:
             {
                 "Problem ID": str(source["problem_idx"]),
                 "Problem": source["problem"],
-                "Solution": (
-                    "The dataset provides these official solution checkpoints "
-                    "instead of a full reference proof:\n" + guidelines
-                ),
-                "Grading guidelines": guidelines,
+                "Grading scheme": guidelines,
                 "Competition": "IMO",
                 "Year": 2025,
                 "Category": "IMO",
@@ -96,8 +92,7 @@ def _aime_2026_rows(data: pd.DataFrame) -> list[dict]:
             {
                 "Problem ID": str(source["problem_idx"]),
                 "Problem": source["problem"],
-                "Solution": f"The official MathArena answer is {answer}.",
-                "Grading guidelines": guidelines,
+                "Grading scheme": guidelines,
                 "Competition": "AIME I",
                 "Year": 2026,
                 "Category": "AIME",
