@@ -39,14 +39,14 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(server["mem_fraction_static"], 0.82)
         self.assertNotIn("triton_attention_num_kv_splits", server)
 
-    def test_default_is_bf16_target_only_tp1_dp8(self):
+    def test_default_is_bf16_dflash_tp1_dp8(self):
         model = active_model(self.config)
         self.assertEqual(model.mode, "bf16")
         self.assertEqual(model.tensor_parallel_size, 1)
         self.assertEqual(model.data_parallel_size, 8)
         self.assertFalse(model.quantized)
-        self.assertFalse(model.dflash)
-        self.assertIsNone(model.draft)
+        self.assertTrue(model.dflash)
+        self.assertEqual(model.draft.name, "dflash-32b-draft-v2test-phaseL")
 
     def test_quantization_and_dflash_are_independent(self):
         expected = {

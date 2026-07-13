@@ -18,19 +18,19 @@ booleans provide four weight/speculation modes:
 
 | Quantized target | DFlash | Mode |
 |:---:|:---:|---|
-| false | false | BF16 target-only default |
+| false | false | BF16 target-only |
 | true | false | Humming W4A8 target-only |
-| false | true | BF16 target with BF16 DFlash draft |
+| false | true | BF16 target with BF16 DFlash draft (default) |
 | true | true | Humming W4A8 target with quantized DFlash draft |
 
 No mode is selected automatically after failure. The live server must exactly
 match YAML or preflight terminates.
 
-The checked-in profile uses FA4, page size 128, nondeterministic inference, and
+The checked-in profile uses FA3, page size 1, deterministic inference, and
 `mem_fraction_static=0.82`. FA4 requires page size 128 and does not support
 deterministic inference; config loading rejects either invalid combination. To
-select the validated FA3 shape, set `attention_backend: fa3`, `page_size: 1`, and
-`deterministic_inference: true`. Page-1 FA3 enables the compact DFlash draft KV
+select the FA4 shape, set `attention_backend: fa4`, `page_size: 128`, and
+`deterministic_inference: false`. Page-1 FA3 enables the compact DFlash draft KV
 ring, while page-128 FA4 uses the full draft KV pool. No backend, page-size, or
 determinism setting changes automatically after failure.
 
