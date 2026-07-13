@@ -114,9 +114,9 @@ class FinalGradingTests(unittest.TestCase):
         self.assertIn(row["Problem"], messages[1]["content"])
         self.assertIn("Proof text.", messages[1]["content"])
         self.assertEqual(len(messages_hash), 64)
-        self.assertEqual(
-            cache_key,
-            f"final-grader:gpt-5.6-sol:1:{messages_hash}",
+        self.assertEqual(len(cache_key), 64)
+        self.assertNotEqual(
+            cache_key, build_grader_request(row, "Proof text.", "other-model")[2]
         )
 
     def test_aggregate_requires_exact_attempt_sequence(self):

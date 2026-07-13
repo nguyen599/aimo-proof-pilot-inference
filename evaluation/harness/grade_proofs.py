@@ -60,9 +60,9 @@ def build_grader_request(
             messages, ensure_ascii=False, separators=(",", ":")
         ).encode()
     ).hexdigest()
-    prompt_cache_key = (
-        f"final-grader:{model}:{row['Problem ID']}:{messages_hash}"
-    )
+    prompt_cache_key = hashlib.sha256(
+        f"{model}\0{messages_hash}".encode()
+    ).hexdigest()
     return messages, messages_hash, prompt_cache_key
 
 
