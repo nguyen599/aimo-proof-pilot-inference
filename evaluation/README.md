@@ -14,6 +14,8 @@ policy remains:
 - 32 initial proof attempts, 16 verifications per admitted proof, cumulative top 8
   proofs, four lowest-rated analyses producing one refinement each, and four rounds;
 - a configurable 65,536-token first segment plus one configurable 16,384-token solution continuation after prover/refiner length truncation;
+- one separately configurable 16,384-token verifier continuation, with malformed
+  verifier outputs logged and skipped and at least four valid votes required;
 - ycchen's byte-identical deployed prover, verifier, and refiner prompts, with hidden thinking excluded from downstream prompts; and
 - 64 GPT-5.6 Sol Responses grader attempts on the full integer 0-7 scale per
   final proof, using strict `findings`, `grade`, `reasoning` JSON and zero-veto

@@ -201,6 +201,116 @@ class AsyncClientTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_thinking_only_verifier_uses_configured_native_continuation(self):
+        async def run():
+            client = AsyncChatClient("http://127.0.0.1:30000/v1", "test-model")
+            tokenizer = FakeTokenizer()
+            client._tokenizer = tokenizer
+            native_calls: list[tuple[str, dict]] = []
+
+            async def post_native(path: str, payload: dict) -> tuple[dict, float]:
+                native_calls.append((path, payload))
+                return (
+                    {
+                        "text": (
+                            "The proof is valid.</evaluation>\n"
+                            "<suggestions>No changes.</suggestions>\n"
+                            "<score>1</score>"
+                        ),
+                        "output_ids": [50, 51],
+                        "meta_info": {
+                            "finish_reason": {"type": "eos_token"},
+                            "prompt_tokens": 65800,
+                            "completion_tokens": 2,
+                        },
+                    },
+                    2.5,
+                )
+
+            client._post_native = post_native
+            try:
+                result = await client.continue_verification_raw(
+                    initial_response(reasoning="unfinished verifier reasoning", content=""),
+                    [{"role": "user", "content": "verify"}],
+                    max_new_tokens=4096,
+                    temperature=1.0,
+                    top_p=0.95,
+                    seed=11,
+                    request_id="round-01/verify/r01-p0000/v000",
+                )
+            finally:
+                await client.aclose()
+
+            self.assertEqual(native_calls[0][0], "/generate")
+            payload = native_calls[0][1]
+            self.assertEqual(payload["sampling_params"]["max_new_tokens"], 4096)
+            self.assertEqual(payload["sampling_params"]["sampling_seed"], 11)
+            self.assertTrue(tokenizer.encoded[0].endswith("</think>\n\n<evaluation>\n"))
+            self.assertNotIn("</thinking>", tokenizer.encoded[0])
+            self.assertTrue(result["message"]["content"].startswith("<evaluation>\n"))
+            self.assertNotIn(
+                "unfinished verifier reasoning", result["message"]["content"]
+            )
+            self.assertEqual(result["requested_verifier_continuation_tokens"], 4096)
+            self.assertEqual(result["logical_max_completion_tokens"], 69632)
+            self.assertEqual(result["physical_request_count"], 2)
+            self.assertTrue(
+                result["segments"][1]["injected_verifier_tag"]
+            )
+
+        asyncio.run(run())
+
+    def test_partial_verification_continues_without_duplicate_evaluation_tag(self):
+        async def run():
+            client = AsyncChatClient("http://127.0.0.1:30000/v1", "test-model")
+            tokenizer = FakeTokenizer()
+            client._tokenizer = tokenizer
+
+            async def post_native(path: str, payload: dict) -> tuple[dict, float]:
+                return (
+                    {
+                        "text": (
+                            " valid.</evaluation>\n"
+                            "<suggestions>None.</suggestions>\n"
+                            "<score>1</score>"
+                        ),
+                        "output_ids": [60],
+                        "meta_info": {"finish_reason": "stop", "prompt_tokens": 100},
+                    },
+                    1.0,
+                )
+
+            client._post_native = post_native
+            try:
+                result = await client.continue_verification_raw(
+                    initial_response(
+                        reasoning="reasoning",
+                        content="<evaluation>The proof appears",
+                    ),
+                    [{"role": "user", "content": "verify"}],
+                    max_new_tokens=1024,
+                    temperature=1.0,
+                    top_p=0.95,
+                    seed=12,
+                    request_id="partial-verifier",
+                )
+            finally:
+                await client.aclose()
+
+            self.assertEqual(
+                tokenizer.encoded[0],
+                "reasoning</think><evaluation>The proof appears",
+            )
+            self.assertEqual(
+                result["message"]["content"].count("<evaluation>"),
+                1,
+            )
+            self.assertFalse(
+                result["segments"][1]["injected_verifier_tag"]
+            )
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

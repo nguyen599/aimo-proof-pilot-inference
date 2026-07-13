@@ -16,6 +16,13 @@ _FORCE_SOLUTION_STEER = (
     "no meta-commentary, and no restatement of the task.\n</think>\n\n<solution>\n"
 )
 
+_FORCE_VERIFICATION_STEER = (
+    "\n\nI must finalize now. I will write ONLY the complete verification below, "
+    "including a rigorous evaluation, concrete suggestions, and the score XML. "
+    "No planning, no meta-commentary, and no restatement of the task."
+    "\n</think>\n\n<evaluation>\n"
+)
+
 
 def _usage(data: dict) -> dict:
     usage = data.get("usage", {}) or {}
@@ -174,7 +181,11 @@ class AsyncChatClient:
         messages: list[dict],
         reasoning: str,
         content: str,
-    ) -> tuple[list[int], bool]:
+        *,
+        opening_tag: str,
+        force_steer: str,
+        preserve_untagged_content: bool,
+    ) -> tuple[list[int], str, bool]:
         tokenizer = self._get_tokenizer()
         prefix = _token_ids(
             tokenizer.apply_chat_template(
@@ -185,19 +196,21 @@ class AsyncChatClient:
             ),
             "chat-template token IDs",
         )
-        has_solution = "<solution>" in content.lower()
-        suffix = (
-            reasoning + "</think>" + content
-            if has_solution
-            else reasoning + _FORCE_SOLUTION_STEER
-        )
+        has_opening_tag = opening_tag in content.lower()
+        if has_opening_tag:
+            suffix = reasoning + "</think>" + content
+            visible_prefix = content
+        else:
+            untagged_content = content if preserve_untagged_content else ""
+            suffix = reasoning + force_steer + untagged_content
+            visible_prefix = opening_tag + "\n" + untagged_content
         continuation = _token_ids(
             tokenizer.encode(suffix, add_special_tokens=False),
             "continuation-prefix token IDs",
         )
-        return prefix + continuation, not has_solution
+        return prefix + continuation, visible_prefix, not has_opening_tag
 
-    async def continue_solution_raw(
+    async def _continue_xml_raw(
         self,
         initial: dict,
         messages: list[dict],
@@ -207,14 +220,23 @@ class AsyncChatClient:
         top_p: float,
         seed: int,
         request_id: str,
+        role: str,
+        opening_tag: str,
+        force_steer: str,
+        preserve_untagged_content: bool,
     ) -> dict:
         message = initial["message"]
         reasoning = message.get("reasoning_content") or ""
         content = message.get("content") or ""
-        input_ids, injected_solution_tag = self._continuation_input_ids(
-            messages, reasoning, content
+        input_ids, visible_prefix, injected_opening_tag = self._continuation_input_ids(
+            messages,
+            reasoning,
+            content,
+            opening_tag=opening_tag,
+            force_steer=force_steer,
+            preserve_untagged_content=preserve_untagged_content,
         )
-        continuation_id = f"{request_id}/solution-continuation"
+        continuation_id = f"{request_id}/{role}-continuation"
         payload = {
             "input_ids": input_ids,
             "sampling_params": {
@@ -245,18 +267,16 @@ class AsyncChatClient:
         native_completion_tokens = meta.get("completion_tokens")
         if type(native_completion_tokens) is not int:
             native_completion_tokens = len(output_ids)
-        combined_content = (
-            f"<solution>\n{text}" if injected_solution_tag else f"{content}{text}"
-        )
+        combined_content = visible_prefix + text
+        if injected_opening_tag:
+            trigger = "length_thinking" if not content else f"length_unstructured_{role}"
+        else:
+            trigger = f"length_partial_{role}"
         segment = {
-            "kind": "solution_continuation",
+            "kind": f"{role}_continuation",
             "request_id": continuation_id,
-            "trigger": (
-                "length_thinking"
-                if injected_solution_tag
-                else "length_partial_solution"
-            ),
-            "injected_solution_tag": injected_solution_tag,
+            "trigger": trigger,
+            f"injected_{role}_tag": injected_opening_tag,
             "finish_reason": native_finish,
             "raw_finish_reason": meta.get("finish_reason"),
             "prompt_tokens": native_prompt_tokens,
@@ -270,6 +290,7 @@ class AsyncChatClient:
             "latency_s": latency,
         }
         initial_prompt_tokens = initial.get("prompt_tokens")
+        requested_continuation_field = f"requested_{role}_continuation_tokens"
         return {
             **initial,
             "message": {
@@ -281,7 +302,7 @@ class AsyncChatClient:
             "completion_tokens": _optional_sum(
                 initial.get("completion_tokens"), native_completion_tokens
             ),
-            "requested_solution_continuation_tokens": max_new_tokens,
+            requested_continuation_field: max_new_tokens,
             "logical_max_completion_tokens": (
                 initial["requested_max_completion_tokens"] + max_new_tokens
             ),
@@ -292,3 +313,53 @@ class AsyncChatClient:
             "segments": [*initial.get("segments", []), segment],
             "latency_s": round(initial.get("latency_s", 0.0) + latency, 3),
         }
+
+    async def continue_solution_raw(
+        self,
+        initial: dict,
+        messages: list[dict],
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        seed: int,
+        request_id: str,
+    ) -> dict:
+        return await self._continue_xml_raw(
+            initial,
+            messages,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            seed=seed,
+            request_id=request_id,
+            role="solution",
+            opening_tag="<solution>",
+            force_steer=_FORCE_SOLUTION_STEER,
+            preserve_untagged_content=False,
+        )
+
+    async def continue_verification_raw(
+        self,
+        initial: dict,
+        messages: list[dict],
+        *,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        seed: int,
+        request_id: str,
+    ) -> dict:
+        return await self._continue_xml_raw(
+            initial,
+            messages,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            seed=seed,
+            request_id=request_id,
+            role="verifier",
+            opening_tag="<evaluation>",
+            force_steer=_FORCE_VERIFICATION_STEER,
+            preserve_untagged_content=True,
+        )

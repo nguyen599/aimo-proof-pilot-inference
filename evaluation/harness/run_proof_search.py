@@ -116,7 +116,8 @@ async def run_search(config_path: Path, ids_file: Path, output_dir: Path) -> lis
                     f"[proof-search] imo-2025-{problem_id} "
                     f"rounds={record['rounds_completed']} "
                     f"pool={record['proofs_in_pool']} calls={record['calls_completed']} "
-                    f"score={record['mean_verifier_score']:.5f}",
+                    f"score={record['mean_verifier_score']:.5f} "
+                    f"votes={record['valid_verification_count']}",
                     flush=True,
                 )
     finally:

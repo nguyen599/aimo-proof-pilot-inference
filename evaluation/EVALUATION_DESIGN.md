@@ -60,23 +60,27 @@ For each requested problem:
    thinking, or continue an already-started solution without duplicating its
    tag. Admit only the combined output matching ycchen's complete XML contract.
 4. Verify every admitted proof independently 16 times using ycchen's verifier
-   prompt, including the proof's self-evaluation. Hidden thinking is never
-   included.
-5. Rank the cumulative verified pool by mean verifier score, self-score, and a
-   stable seeded tie-breaker.
-6. Unless the best mean exceeds `0.99999`, take the cumulative top 8 proofs.
-7. For every selected parent, choose its four lowest-rated verifier analyses,
+   prompt, including the proof's self-evaluation. A length-truncated verifier
+   receives one verifier-specific native continuation; hidden thinking is never
+   included in the retained analysis.
+5. Strictly parse each verifier XML response. Log and skip malformed model
+   outputs without replacement. A proof becomes ranking-eligible at the
+   configurable minimum of four valid votes.
+6. Rank the cumulative eligible pool by mean verifier score, valid-vote count,
+   self-score, and a stable seeded tie-breaker.
+7. Unless the best mean exceeds `0.99999`, take the cumulative top 8 proofs.
+8. For every selected parent, choose its four lowest-rated verifier analyses,
    with a stable seeded tie-break. Put each analysis into its own ycchen XML
    candidate bundle and generate exactly one refinement from it.
-8. Verify every admitted refinement 16 times, add it to the cumulative pool,
+9. Verify every admitted refinement 16 times, add it to the cumulative pool,
    rerank, and continue for at most four rounds.
-9. Return the highest-ranked proof. There is no selector-model call or proof
+10. Return the highest-ranked proof. There is no selector-model call or proof
    fallback.
 
-A full-width four-round search makes at most 2,176 logical calls. Its 128
-prover/refiner calls can each add at most one native continuation, producing a
-2,304 physical-request ceiling. Invalid XML and early stopping reduce the
-verifier and continuation counts; there are no replacement generations.
+A full-width four-round search makes at most 2,176 logical calls. Every local
+call can add at most one native continuation, producing a 4,352 physical-request
+ceiling. Invalid XML and early stopping reduce the verifier and continuation
+counts; there are no replacement calls.
 
 All independent logical calls are admitted together under the YAML concurrency
 limit. A native continuation retains its logical call's existing semaphore slot.
@@ -86,20 +90,22 @@ managed by SGLang.
 ## Persistence
 
 Every call has a stable sample ID and seed. The runner flushes a lossless record
-containing content, reasoning, logical and physical finish reasons, per-segment usage,
-cached-prefix tokens, latency, token hashes, prompt hash, and error before the call affects ranking. Full messages
+containing content, reasoning, XML validity and disposition, logical and physical
+finish reasons, per-segment usage, cached-prefix tokens, latency, token hashes,
+prompt hash, and error before the call affects ranking. Full messages
 are stored once in hash-addressed prompt files. Proofs, verifier sets, round
 summaries, final selection, config, ID manifest, server validation, model hashes,
 dataset hash, prompt hashes, and source commit are persisted.
 
 Successful calls are resume checkpoints. A persisted failure is terminal. There
-are no request retries, second continuations, prompt fallbacks, model fallbacks,
-or synthetic scores.
+are no request retries, second continuations, replacement verifier calls, prompt
+fallbacks, model fallbacks, or synthetic scores. Malformed model-level verifier
+outputs are successful call artifacts but do not enter the score mean.
 The YAML sets a strict 24-hour HTTP deadline for each local model response.
-The checked-in YAML uses a configurable 65,536-token first segment and a
-configurable 16,384-token solution continuation. The client performs no
-prompt-size subtraction, output-budget clamp, or context preflight, and SGLang
-alone enforces its 262,144-token server context.
+The checked-in YAML uses a configurable 65,536-token first segment and separate
+configurable 16,384-token solution and verifier continuations. The client
+performs no prompt-size subtraction, output-budget clamp, or context preflight,
+and SGLang alone enforces its 262,144-token server context.
 
 ## Final grading
 

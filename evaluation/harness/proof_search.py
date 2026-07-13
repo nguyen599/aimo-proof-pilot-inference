@@ -122,6 +122,7 @@ class CallStore:
         semaphore: asyncio.Semaphore,
         max_completion_tokens: int,
         solution_continuation_tokens: int,
+        verifier_continuation_tokens: int,
         temperature: float,
         top_p: float,
         spec: CallSpec,
@@ -145,10 +146,25 @@ class CallStore:
                     request_id=spec.sample_id,
                 )
                 is_proof_generation = spec.stage.endswith("/generate")
-                if is_proof_generation and response["finish_reason"] == "length":
+                is_verification = "/verify/" in spec.stage
+                parser = (
+                    parse_generation
+                    if is_proof_generation
+                    else parse_verification if is_verification else None
+                )
+                was_length = response["finish_reason"] == "length"
+                content = response["message"].get("content") or ""
+                xml_valid = False
+                xml_error = None
+                if parser is not None:
                     try:
-                        parse_generation(response["message"].get("content") or "")
-                    except ValueError:
+                        parser(content)
+                    except ValueError as error:
+                        xml_error = str(error)
+                    else:
+                        xml_valid = True
+                if was_length and not xml_valid:
+                    if is_proof_generation:
                         response = await client.continue_solution_raw(
                             response,
                             spec.messages,
@@ -158,13 +174,38 @@ class CallStore:
                             seed=spec.seed,
                             request_id=spec.sample_id,
                         )
+                    elif is_verification:
+                        response = await client.continue_verification_raw(
+                            response,
+                            spec.messages,
+                            max_new_tokens=verifier_continuation_tokens,
+                            temperature=temperature,
+                            top_p=top_p,
+                            seed=spec.seed,
+                            request_id=spec.sample_id,
+                        )
+                    content = response["message"].get("content") or ""
                     try:
-                        parse_generation(response["message"].get("content") or "")
-                    except ValueError:
-                        pass
+                        parser(content)
+                    except ValueError as error:
+                        xml_valid = False
+                        xml_error = str(error)
                     else:
-                        response["finish_reason"] = "stop"
-                        response["xml_complete_after_length"] = True
+                        xml_valid = True
+                        xml_error = None
+                if was_length and xml_valid:
+                    response["finish_reason"] = "stop"
+                    response["xml_complete_after_length"] = True
+                response["xml_valid"] = xml_valid
+                response["xml_error"] = xml_error
+                if is_verification:
+                    if response["finish_reason"] == "stop" and xml_valid:
+                        disposition = "accepted"
+                    elif not xml_valid:
+                        disposition = "skipped_invalid_xml"
+                    else:
+                        disposition = "skipped_non_stop"
+                    response["verification_disposition"] = disposition
             message = response.pop("message")
             record = {
                 "sample_id": spec.sample_id,
@@ -245,6 +286,7 @@ class ProblemSearch:
                     self.semaphore,
                     self.config["max_completion_tokens"],
                     self.config["solution_continuation_tokens"],
+                    self.config["verifier_continuation_tokens"],
                     self.config["temperature"],
                     self.config["top_p"],
                     spec,
@@ -256,16 +298,16 @@ class ProblemSearch:
     async def _perform_prompt_groups(self, groups: list[list[CallSpec]]) -> list[dict]:
         return await self._perform([spec for group in groups for spec in group])
 
-    def _rank_key(self, proof: Proof) -> tuple[float, float, int]:
+    def _rank_key(self, proof: Proof) -> tuple[float, int, float, int]:
         tie = stable_seed(self.config["seed"], self.problem_id, "tie", proof.proof_id)
-        return proof.mean_score, proof.self_score, tie
+        return proof.mean_score, len(proof.verifications), proof.self_score, tie
 
     def ranked(self) -> list[Proof]:
-        required = self.config["verifications_per_proof"]
+        required = self.config["min_valid_verifications"]
         verified = [
             proof
             for proof in self.proofs.values()
-            if len(proof.verifications) == required
+            if len(proof.verifications) >= required
         ]
         return sorted(verified, key=self._rank_key, reverse=True)
 
@@ -358,7 +400,7 @@ class ProblemSearch:
             raise RuntimeError(f"{self.problem_id} round {round_index} produced no valid proof")
         return generated
 
-    async def _verify(self, proofs: list[Proof], round_index: int) -> None:
+    async def _verify(self, proofs: list[Proof], round_index: int) -> dict:
         groups: list[list[CallSpec]] = []
         for proof in proofs:
             stage = f"round-{round_index:02d}/verify/{proof.proof_id}"
@@ -378,11 +420,19 @@ class ProblemSearch:
         by_proof: dict[str, list[Verification]] = {
             proof.proof_id: [] for proof in proofs
         }
+        stats = {
+            "attempted": len(records),
+            "valid": 0,
+            "invalid": 0,
+            "by_proof": {},
+        }
         for proof, group in zip(proofs, groups, strict=True):
+            invalid_sample_ids = []
             for spec in group:
                 record = records_by_id[spec.sample_id]
-                if record["finish_reason"] != "stop":
-                    raise RuntimeError(f"verification did not stop naturally: {spec.sample_id}")
+                if record["verification_disposition"] != "accepted":
+                    invalid_sample_ids.append(spec.sample_id)
+                    continue
                 analysis, score = parse_verification(record["content"])
                 by_proof[proof.proof_id].append(
                     Verification(
@@ -391,16 +441,36 @@ class ProblemSearch:
                         analysis=analysis,
                     )
                 )
+            valid_count = len(by_proof[proof.proof_id])
+            invalid_count = len(invalid_sample_ids)
+            stats["valid"] += valid_count
+            stats["invalid"] += invalid_count
+            stats["by_proof"][proof.proof_id] = {
+                "attempted": len(group),
+                "valid": valid_count,
+                "invalid": invalid_count,
+                "invalid_sample_ids": invalid_sample_ids,
+            }
         for proof in proofs:
             proof.verifications = by_proof[proof.proof_id]
-            if len(proof.verifications) != self.config["verifications_per_proof"]:
-                raise RuntimeError(f"incomplete verifier set for {proof.proof_id}")
             self._save_proof(proof)
+        return stats
 
-    def _round_summary(self, round_index: int, generated: list[Proof]) -> dict:
+    def _round_summary(
+        self,
+        round_index: int,
+        generated: list[Proof],
+        verification_stats: dict,
+    ) -> dict:
         ranked = self.ranked()
+        if not ranked:
+            minimum = self.config["min_valid_verifications"]
+            raise RuntimeError(
+                f"{self.problem_id} round {round_index} produced no proof with "
+                f"at least {minimum} valid verifications"
+            )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "problem_id": self.problem_id,
             "round": round_index,
             "generated_proof_ids": [proof.proof_id for proof in generated],
@@ -408,6 +478,8 @@ class ProblemSearch:
             "verified_pool_size": len(ranked),
             "best_proof_id": ranked[0].proof_id,
             "best_mean_score": ranked[0].mean_score,
+            "best_valid_verification_count": len(ranked[0].verifications),
+            "verification_stats": verification_stats,
             "early_stop": ranked[0].mean_score
             > self.config["early_stop_threshold"],
         }
@@ -430,23 +502,35 @@ class ProblemSearch:
                     break
                 continue
             generated = await self._generate_round(round_index)
-            await self._verify(generated, round_index)
-            summary = self._round_summary(round_index, generated)
+            verification_stats = await self._verify(generated, round_index)
+            summary = self._round_summary(
+                round_index, generated, verification_stats
+            )
             atomic_json(self.rounds_dir / f"round-{round_index:02d}.json", summary)
             if summary["early_stop"]:
                 break
 
         ranked = self.ranked()
         if not ranked:
-            raise RuntimeError(f"{self.problem_id} has no completely verified proof")
+            minimum = self.config["min_valid_verifications"]
+            raise RuntimeError(
+                f"{self.problem_id} has no proof with at least "
+                f"{minimum} valid verifications"
+            )
         winner = ranked[0]
+        verification_records = [
+            record
+            for record in self.calls.records.values()
+            if "/verify/" in record["stage"] and record["error"] is None
+        ]
         final = {
-            "schema_version": 1,
+            "schema_version": 2,
             "problem_id": self.problem_id,
             "final_source": "verification_pool",
             "selected_proof_id": winner.proof_id,
             "final_proof": winner.proof,
             "mean_verifier_score": winner.mean_score,
+            "valid_verification_count": len(winner.verifications),
             "self_score": winner.self_score,
             "rounds_completed": len(list(self.rounds_dir.glob("round-*.json"))),
             "proofs_in_pool": len(self.proofs),
@@ -454,6 +538,14 @@ class ProblemSearch:
             "physical_requests_completed": sum(
                 record.get("physical_request_count", 1)
                 for record in self.calls.records.values()
+            ),
+            "valid_verifications_completed": sum(
+                record.get("verification_disposition") == "accepted"
+                for record in verification_records
+            ),
+            "invalid_verifications_completed": sum(
+                record.get("verification_disposition") != "accepted"
+                for record in verification_records
             ),
         }
         atomic_json(final_path, final)

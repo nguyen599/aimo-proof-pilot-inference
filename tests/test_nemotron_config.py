@@ -32,6 +32,8 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(search["request_timeout_seconds"], 86400)
         self.assertEqual(search["max_completion_tokens"], 65536)
         self.assertEqual(search["solution_continuation_tokens"], 16384)
+        self.assertEqual(search["verifier_continuation_tokens"], 16384)
+        self.assertEqual(search["min_valid_verifications"], 4)
         server = self.config["server"]
         self.assertEqual(server["max_running_requests"], 32)
         self.assertEqual(server["mem_fraction_static"], 0.82)
@@ -103,17 +105,31 @@ class NemotronConfigTests(unittest.TestCase):
                     "solution_continuation_tokens: 8192",
                     1,
                 )
+                .replace(
+                    "verifier_continuation_tokens: 16384",
+                    "verifier_continuation_tokens: 4096",
+                    1,
+                )
+                .replace(
+                    "min_valid_verifications: 4",
+                    "min_valid_verifications: 5",
+                    1,
+                )
             )
             config = load_config(path)
         self.assertEqual(config["server"]["context_length"], 262144)
         self.assertEqual(config["search"]["max_completion_tokens"], 32768)
         self.assertEqual(config["search"]["solution_continuation_tokens"], 8192)
+        self.assertEqual(config["search"]["verifier_continuation_tokens"], 4096)
+        self.assertEqual(config["search"]["min_valid_verifications"], 5)
 
     def test_search_shape_validation_rejects_inconsistent_profiles(self):
         replacements = (
             ("proofs_per_round: 32", "proofs_per_round: 31"),
             ("analyses_per_refinement: 4", "analyses_per_refinement: 3"),
             ("verifications_per_proof: 16", "verifications_per_proof: 3"),
+            ("min_valid_verifications: 4", "min_valid_verifications: 3"),
+            ("min_valid_verifications: 4", "min_valid_verifications: 17"),
         )
         for old, new in replacements:
             with self.subTest(new=new), tempfile.TemporaryDirectory() as directory:

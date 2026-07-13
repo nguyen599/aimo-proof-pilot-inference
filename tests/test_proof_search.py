@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
@@ -54,6 +55,10 @@ class ScriptedClient:
             "completion_tokens": 20,
             "reasoning_tokens": 5,
             "requested_max_completion_tokens": 100,
+            "logical_max_completion_tokens": 100,
+            "physical_request_count": 1,
+            "physical_prompt_tokens": 10,
+            "segments": [{"kind": "chat", "finish_reason": "stop"}],
             "latency_s": 0.01,
         }
 
@@ -153,12 +158,107 @@ class CompleteXMLAtLengthClient(ScriptedClient):
         raise AssertionError("complete XML must not receive a continuation")
 
 
+class LengthVerifierContinuationClient(ScriptedClient):
+    def __init__(self, *, invalid_continuation: bool = False):
+        super().__init__()
+        self.invalid_continuation = invalid_continuation
+        self.verifier_continuation_calls: list[dict] = []
+
+    async def chat_raw(self, messages, *, request_id, **kwargs):
+        response = await super().chat_raw(
+            messages, request_id=request_id, **kwargs
+        )
+        if not request_id.endswith("/r01-p0000/v000"):
+            return response
+        response.update(
+            finish_reason="length",
+            completion_tokens=kwargs["max_completion_tokens"],
+            requested_max_completion_tokens=kwargs["max_completion_tokens"],
+            logical_max_completion_tokens=kwargs["max_completion_tokens"],
+            physical_request_count=1,
+            physical_prompt_tokens=10,
+            segments=[{"kind": "chat", "finish_reason": "length"}],
+        )
+        response["message"] = {
+            "content": "",
+            "reasoning_content": "private verifier reasoning",
+        }
+        return response
+
+    async def continue_verification_raw(self, initial, messages, **kwargs):
+        self.verifier_continuation_calls.append({"messages": messages, **kwargs})
+        content = (
+            "<evaluation>unfinished"
+            if self.invalid_continuation
+            else (
+                "<evaluation>Recovered review.</evaluation>\n"
+                "<suggestions>No repairs.</suggestions>\n"
+                "<score>0.5</score>"
+            )
+        )
+        return {
+            **initial,
+            "message": {
+                "content": content,
+                "reasoning_content": initial["message"]["reasoning_content"],
+            },
+            "finish_reason": "stop",
+            "completion_tokens": (
+                initial["completion_tokens"] + kwargs["max_new_tokens"]
+            ),
+            "requested_verifier_continuation_tokens": kwargs["max_new_tokens"],
+            "logical_max_completion_tokens": (
+                initial["requested_max_completion_tokens"]
+                + kwargs["max_new_tokens"]
+            ),
+            "physical_request_count": 2,
+            "physical_prompt_tokens": 150,
+            "segments": [
+                *initial["segments"],
+                {"kind": "verifier_continuation", "finish_reason": "stop"},
+            ],
+            "latency_s": initial["latency_s"] + 0.02,
+        }
+
+
+class CompleteVerifierXMLAtLengthClient(ScriptedClient):
+    def __init__(self):
+        super().__init__()
+        self.verifier_continuation_calls = 0
+
+    async def chat_raw(self, messages, *, request_id, **kwargs):
+        response = await super().chat_raw(
+            messages, request_id=request_id, **kwargs
+        )
+        if request_id.endswith("/r01-p0000/v000"):
+            response.update(
+                finish_reason="length",
+                physical_request_count=1,
+                segments=[{"kind": "chat", "finish_reason": "length"}],
+            )
+        return response
+
+    async def continue_verification_raw(self, initial, messages, **kwargs):
+        self.verifier_continuation_calls += 1
+        raise AssertionError("complete verifier XML must not receive a continuation")
+
+
 class MalformedVerifierClient(ScriptedClient):
     async def chat_raw(self, messages, *, request_id, **kwargs):
         response = await super().chat_raw(
             messages, request_id=request_id, **kwargs
         )
         if request_id.endswith("/v000"):
+            response["message"]["content"] = "No XML verification."
+        return response
+
+
+class AllMalformedVerifierClient(ScriptedClient):
+    async def chat_raw(self, messages, *, request_id, **kwargs):
+        response = await super().chat_raw(
+            messages, request_id=request_id, **kwargs
+        )
+        if "/verify/" in request_id:
             response["message"]["content"] = "No XML verification."
         return response
 
@@ -201,6 +301,8 @@ def small_config() -> dict:
         "top_p": 0.95,
         "max_completion_tokens": 128,
         "solution_continuation_tokens": 64,
+        "verifier_continuation_tokens": 64,
+        "min_valid_verifications": 2,
         "concurrency": 4,
         "seed": 17,
     }
@@ -296,6 +398,38 @@ class ProofSearchTests(unittest.TestCase):
             [item.sample_id for item in selected],
             [item.sample_id for item in repeated],
         )
+
+    def test_ranking_prefers_more_valid_votes_after_equal_mean(self):
+        with tempfile.TemporaryDirectory() as directory:
+            search = ProblemSearch(
+                problem_id="1",
+                problem="Prove the claim.",
+                output_dir=Path(directory),
+                client=ScriptedClient(),
+                semaphore=asyncio.Semaphore(4),
+                config=small_config(),
+            )
+            fewer = Proof(
+                "fewer", 1, None, "Proof.", "Audit.", 1.0, "generate",
+                [Verification(f"f{i}", 0.5, "Review.") for i in range(2)],
+            )
+            more = Proof(
+                "more", 1, None, "Proof.", "Audit.", 0.0, "generate",
+                [Verification(f"m{i}", 0.5, "Review.") for i in range(3)],
+            )
+            below_minimum = Proof(
+                "below", 1, None, "Proof.", "Audit.", 1.0, "generate",
+                [Verification("b0", 1.0, "Review.")],
+            )
+            search.proofs = {
+                proof.proof_id: proof
+                for proof in (fewer, more, below_minimum)
+            }
+
+            self.assertEqual(
+                [proof.proof_id for proof in search.ranked()],
+                ["more", "fewer"],
+            )
 
     def test_strict_xml_response_parsers(self):
         proof, evaluation, score = parse_generation(
@@ -479,6 +613,117 @@ class ProofSearchTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_complete_verifier_xml_at_length_avoids_continuation(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                config = small_config()
+                config["max_rounds"] = 1
+                client = CompleteVerifierXMLAtLengthClient()
+                search = ProblemSearch(
+                    problem_id="13",
+                    problem="Prove the claim.",
+                    output_dir=Path(directory),
+                    client=client,
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                )
+
+                final = await search.solve()
+                boundary = search.calls.records[
+                    "round-01/verify/r01-p0000/v000"
+                ]
+
+                self.assertEqual(client.verifier_continuation_calls, 0)
+                self.assertTrue(boundary["xml_complete_after_length"])
+                self.assertEqual(boundary["verification_disposition"], "accepted")
+                self.assertEqual(final["physical_requests_completed"], 6)
+
+        asyncio.run(run())
+
+    def test_length_truncated_verifier_gets_configured_continuation(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                config = small_config()
+                config["max_rounds"] = 1
+                client = LengthVerifierContinuationClient()
+                search = ProblemSearch(
+                    problem_id="14",
+                    problem="Prove the claim.",
+                    output_dir=Path(directory),
+                    client=client,
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                )
+
+                final = await search.solve()
+                forced = search.calls.records[
+                    "round-01/verify/r01-p0000/v000"
+                ]
+
+                self.assertEqual(len(client.verifier_continuation_calls), 1)
+                self.assertEqual(
+                    client.verifier_continuation_calls[0]["max_new_tokens"],
+                    config["verifier_continuation_tokens"],
+                )
+                self.assertEqual(forced["verification_disposition"], "accepted")
+                self.assertTrue(forced["xml_valid"])
+                self.assertEqual(forced["physical_request_count"], 2)
+                self.assertEqual(final["physical_requests_completed"], 7)
+                self.assertEqual(final["valid_verifications_completed"], 4)
+                self.assertEqual(final["invalid_verifications_completed"], 0)
+                analyses = [
+                    verification.analysis
+                    for proof in search.proofs.values()
+                    for verification in proof.verifications
+                ]
+                self.assertNotIn("private verifier reasoning", "\n".join(analyses))
+
+        asyncio.run(run())
+
+    def test_invalid_forced_verifier_is_skipped_and_logged(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                config = small_config()
+                config["max_rounds"] = 1
+                client = LengthVerifierContinuationClient(
+                    invalid_continuation=True
+                )
+                search = ProblemSearch(
+                    problem_id="15",
+                    problem="Prove the claim.",
+                    output_dir=Path(directory),
+                    client=client,
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                )
+
+                final = await search.solve()
+                invalid_id = "round-01/verify/r01-p0000/v000"
+                invalid = search.calls.records[invalid_id]
+                summary = json.loads(
+                    Path(directory, "rounds", "round-01.json").read_text()
+                )
+
+                self.assertEqual(len(client.verifier_continuation_calls), 1)
+                self.assertFalse(invalid["xml_valid"])
+                self.assertEqual(
+                    invalid["verification_disposition"], "skipped_invalid_xml"
+                )
+                self.assertIn("does not match", invalid["xml_error"])
+                self.assertEqual(len(search.proofs["r01-p0000"].verifications), 1)
+                self.assertEqual(
+                    summary["verification_stats"]["by_proof"]["r01-p0000"][
+                        "invalid_sample_ids"
+                    ],
+                    [invalid_id],
+                )
+                self.assertEqual(final["valid_verifications_completed"], 3)
+                self.assertEqual(final["invalid_verifications_completed"], 1)
+                self.assertEqual(final["selected_proof_id"], "r01-p0001")
+                self.assertEqual(final["valid_verification_count"], 2)
+
+        asyncio.run(run())
+
     def test_invalid_forced_xml_is_disqualified_without_retry(self):
         async def run():
             with tempfile.TemporaryDirectory() as directory:
@@ -532,11 +777,12 @@ class ProofSearchTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_malformed_verifier_xml_remains_fatal(self):
+    def test_malformed_verifier_xml_is_skipped_and_logged(self):
         async def run():
             with tempfile.TemporaryDirectory() as directory:
                 config = small_config()
                 config["max_rounds"] = 1
+                config["verifications_per_proof"] = 3
                 search = ProblemSearch(
                     problem_id="8",
                     problem="Prove the claim.",
@@ -545,8 +791,57 @@ class ProofSearchTests(unittest.TestCase):
                     semaphore=asyncio.Semaphore(4),
                     config=config,
                 )
-                with self.assertRaises(ValueError):
+                final = await search.solve()
+                summary = json.loads(
+                    Path(directory, "rounds", "round-01.json").read_text()
+                )
+
+                self.assertEqual(final["valid_verifications_completed"], 4)
+                self.assertEqual(final["invalid_verifications_completed"], 2)
+                self.assertEqual(summary["verification_stats"]["attempted"], 6)
+                self.assertEqual(summary["verification_stats"]["valid"], 4)
+                self.assertEqual(summary["verification_stats"]["invalid"], 2)
+                self.assertEqual(summary["best_valid_verification_count"], 2)
+                for proof in search.proofs.values():
+                    self.assertEqual(len(proof.verifications), 2)
+                invalid = search.calls.records[
+                    "round-01/verify/r01-p0000/v000"
+                ]
+                self.assertEqual(
+                    invalid["verification_disposition"], "skipped_invalid_xml"
+                )
+                self.assertEqual(invalid["physical_request_count"], 1)
+
+        asyncio.run(run())
+
+    def test_round_fails_clearly_when_no_proof_meets_minimum_votes(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                config = small_config()
+                config["max_rounds"] = 1
+                search = ProblemSearch(
+                    problem_id="16",
+                    problem="Prove the claim.",
+                    output_dir=Path(directory),
+                    client=AllMalformedVerifierClient(),
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "no proof with at least 2 valid verifications",
+                ):
                     await search.solve()
+                self.assertEqual(
+                    sum(
+                        record["verification_disposition"]
+                        == "skipped_invalid_xml"
+                        for record in search.calls.records.values()
+                        if "/verify/" in record["stage"]
+                    ),
+                    4,
+                )
 
         asyncio.run(run())
 

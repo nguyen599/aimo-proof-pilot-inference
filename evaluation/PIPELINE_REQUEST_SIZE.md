@@ -9,10 +9,11 @@ under the checked-in serving semantics:
 - the first segment of every local logical call uses the configurable
   `max_completion_tokens = O = 65,536`;
 - a length-truncated prover or refiner may use one configurable
-  `solution_continuation_tokens = R = 16,384` native continuation; and
-- verifier calls never receive a continuation.
+  `solution_continuation_tokens = R_s = 16,384` native continuation; and
+- a length-truncated verifier may use one independently configurable
+  `verifier_continuation_tokens = R_v = 16,384` native continuation.
 
-The client does not subtract prompt tokens from either configured output budget,
+The client does not subtract prompt tokens from any configured output budget,
 clamp either budget, truncate prompt material, or perform a context preflight.
 SGLang's configured context length is the sole context enforcement point.
 
@@ -43,21 +44,31 @@ Invalid candidates are disqualified without retries. Hidden thinking is stored
 for audit and for the one continuation request only. It is never inserted into a
 verifier or later refinement prompt.
 
+A verifier at `length` follows the same one-continuation rule with
+`<evaluation>` as its visible opening tag. Naturally malformed verifier XML and
+combined output that remains invalid are logged and skipped. A proof is eligible
+for ranking with at least the configurable four valid verifier responses; no
+replacement calls or synthetic scores are used.
+
 ## Definitions
 
 Let:
 
 - `O` be the configured first-segment completion budget, 65,536;
-- `R` be the configured solution-continuation budget, 16,384;
-- `L = O + R = 81,920` be the maximum logical prover/refiner output across both
+- `R_s` be the configured solution-continuation budget, 16,384;
+- `R_v` be the configured verifier-continuation budget, 16,384;
+- `L_s = O + R_s = 81,920` be the maximum logical prover/refiner output across both
+  physical segments;
+- `L_v = O + R_v = 81,920` be the maximum retained verifier output across both
   physical segments;
 - `B_r` be the parsed parent proof plus self-evaluation retained from round `r`;
 - `V_{r,i}` be one selected verifier response for that parent;
 - `F_g` be the fixed generation prompt;
 - `F_v` be the verifier wrapper, problem, and chat-template overhead;
 - `F_{r,1}` be the refinement wrapper, problem, candidate markup, chat template,
-  and one empty review wrapper; and
-- `F_c` be the force-close steering suffix, including `</think><solution>`.
+  and one empty review wrapper;
+- `F_{cs}` be the solution force-close steering suffix; and
+- `F_{cv}` be the verifier force-close steering suffix.
 
 Using the live OPD tokenizer on IMO 2025 Problem 1:
 
@@ -66,7 +77,8 @@ Using the live OPD tokenizer on IMO 2025 Problem 1:
 | Generation prompt, `F_g` | 426 |
 | Verifier with an empty candidate, `F_v` | 377 |
 | Refiner with an empty parent and one empty review, `F_{r,1}` | 399 |
-| Force-close steering suffix, `F_c` | 51 |
+| Solution force-close suffix, `F_{cs}` | 51 |
+| Verifier force-close suffix, `F_{cv}` | 52 |
 
 These fixed counts are problem-, tokenizer-, and steering-text-specific. The
 formulas remain the same when the configurable budgets or fixed counts change.
@@ -95,8 +107,8 @@ original prompt and generated prefix as input. The thinking-only force-close is
 the larger fixed-overhead case:
 
 ```text
-continuation_input <= F_g + O + F_c
-continuation_total <= F_g + O + F_c + R
+continuation_input <= F_g + O + F_{cs}
+continuation_total <= F_g + O + F_{cs} + R_s
 ```
 
 For Problem 1:
@@ -116,7 +128,7 @@ server context               262,144
 A partial solution can span both segments, so structurally:
 
 ```text
-tokens(B_1) <= L = 81,920
+tokens(B_1) <= L_s = 81,920
 ```
 
 Reasoning remains in the separate `reasoning_content` artifact and is not part
@@ -128,7 +140,7 @@ Each verifier receives one parsed proof and its self-evaluation:
 
 ```text
 verification_input <= F_v + tokens(B_r)
-                   <= F_v + L
+                   <= F_v + L_s
 ```
 
 For Problem 1:
@@ -144,11 +156,35 @@ requested total           147,833
 server context            262,144
 ```
 
-Verifier calls have no continuation. Each parsed verifier response therefore
-satisfies:
+If a verifier reaches `length` without complete XML, its continuation includes
+the original verifier prompt, the first generated prefix, and its role-specific
+force-close suffix:
 
 ```text
-tokens(V_{r,i}) <= O = 65,536
+continuation_input <= F_v + L_s + O + F_{cv}
+continuation_total <= F_v + L_s + O + F_{cv} + R_v
+```
+
+For Problem 1:
+
+```text
+fixed verifier wrapper          377
+parent proof and self-eval   81,920
+first generated prefix       65,536
+verifier force-close suffix      52
+-----------------------------------
+continuation input          147,885
+continuation output          16,384
+-----------------------------------
+continuation total          164,269
+server context             262,144
+remaining margin            97,875
+```
+
+A valid combined verifier response can span both segments:
+
+```text
+tokens(V_{r,i}) <= L_v = 81,920
 ```
 
 ## Refinement requests
@@ -158,20 +194,20 @@ response:
 
 ```text
 refinement_input <= F_{r,1} + tokens(B_r) + tokens(V_{r,i})
-                 <= F_{r,1} + L + O
+                 <= F_{r,1} + L_s + L_v
 ```
 
 For Problem 1:
 
 ```text
 parent proof and self-eval     81,920
-one verifier response          65,536
+one verifier response          81,920
 fixed refinement wrapper          399
 -------------------------------------
-maximum first input           147,855
+maximum first input           164,239
 first requested output         65,536
 -------------------------------------
-maximum first total           213,391
+maximum first total           229,775
 server context                262,144
 ```
 
@@ -179,28 +215,28 @@ If that segment reaches `length` without complete XML, the continuation also
 contains the first generated prefix and force-close suffix:
 
 ```text
-continuation_input <= F_{r,1} + L + O + O + F_c
-continuation_total <= F_{r,1} + L + O + O + F_c + R
+continuation_input <= F_{r,1} + L_s + L_v + O + F_{cs}
+continuation_total <= F_{r,1} + L_s + L_v + O + F_{cs} + R_s
 ```
 
 For Problem 1:
 
 ```text
 parent proof and self-eval     81,920
-one verifier response          65,536
+one verifier response          81,920
 fixed refinement wrapper          399
 first generated prefix         65,536
 force-close steering               51
 --------------------------------------
-maximum continuation input    213,442
+maximum continuation input    229,826
 continuation output            16,384
 --------------------------------------
-maximum continuation total    229,826
+maximum continuation total    246,210
 server context                262,144
-remaining structural margin    32,318
+remaining structural margin    15,934
 ```
 
-The conservative `3L` check is also below context:
+The equivalent three-output check is also below context:
 
 ```text
 3 * 81,920 + 399 + 51 = 246,210 < 262,144
@@ -214,13 +250,13 @@ the sole authority over the concrete request.
 A prover/refiner's combined output is capped again on every round:
 
 ```text
-tokens(B_{r+1}) <= L
+tokens(B_{r+1}) <= L_s
 ```
 
 Its verifier responses are independently capped:
 
 ```text
-tokens(V_{r+1,i}) <= O
+tokens(V_{r+1,i}) <= L_v
 ```
 
 The cumulative proof pool affects ranking only. Prompt construction does not
@@ -235,11 +271,11 @@ The four-round full-width search still has at most 2,176 logical calls:
 4 * (32 prover/refiner calls + 32 * 16 verifier calls) = 2,176
 ```
 
-There are at most 128 prover/refiner calls across four rounds. If every one
-requires its single continuation, the physical request ceiling is:
+Every logical call is either a prover/refiner or verifier and can require its
+single continuation. If every call does, the physical request ceiling is:
 
 ```text
-2,176 + 128 = 2,304
+2,176 + 2,176 = 4,352
 ```
 
 Invalid candidates and early stopping reduce these counts. Artifacts retain the
@@ -254,8 +290,8 @@ does not receive verifier responses, ancestry, or hidden thinking.
 If `F_grader` is the external model's token count for its fixed material:
 
 ```text
-grader_input <= L + F_grader
-grader_requested_total <= L + F_grader + 65,536
+grader_input <= L_s + F_grader
+grader_requested_total <= L_s + F_grader + 65,536
 ```
 
 The external grader model controls its own accepted context.
@@ -267,8 +303,8 @@ them into one context window. If 32 structural worst-case refinement
 continuations were simultaneously submitted:
 
 ```text
-aggregate input <= 32 * 213,442 = 6,830,144 tokens
-aggregate requested total <= 32 * 229,826 = 7,354,432 tokens
+aggregate input <= 32 * 229,826 = 7,354,432 tokens
+aggregate requested total <= 32 * 246,210 = 7,878,720 tokens
 ```
 
 Those figures describe aggregate work and KV demand, not one request context.
