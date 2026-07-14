@@ -1486,6 +1486,9 @@ class VLLMServer:
             return
         cmd = self.build_command()
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.gpu_group}
+        # vLLM 0.25 defaults to Model Runner V2, which does not yet support the
+        # thinking_token_budget request field used by this inference pipeline.
+        env.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
         log_path = self.cfg.logdir / f"vllm_server_{self.index}.log"
         self._log_path = log_path
         self._log_file = open(log_path, "w", encoding="utf-8", buffering=1)
