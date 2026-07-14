@@ -1,151 +1,340 @@
-# aimo-proof-pilot-inference
+# AIMO Proof Pilot Inference
 
-Inference for the **OPD-32B** model family (`Olmo3SinkForCausalLM` — Olmo3 32B
-plus a trained per-head attention-sink logit in every layer, gpt-oss style,
-with hybrid sliding-window attention and YaRN rope). The production launcher
-supports exactly two model pairs: Humming W4A8 and BF16. It is
-verified on 2× H200 with one replica per GPU.
+This repository runs the OPD-32B generate-verify-refine proof pipeline and its
+strict GPT-5.6 Sol grader. The checked-in production configuration uses all
+eight H200 GPUs as four TP2 replicas, with BF16 target and draft weights,
+DFlash speculative decoding, and FlashAttention 3.
 
-Stock sglang/vLLM don't know the `Olmo3Sink` architecture, so this runs a
-patched sglang: `sglang_patches/` carries the upstream proof-pilot patch files
-(sink-aware `olmo2.py` target model, DFlash speculative-decoding support,
-SWA-eviction and deterministic speculative-finish fixes) and an applier.
+Follow this document in order on a clean machine. Commands assume the repository
+is at `/workspace/aimo-proof-pilot-inference` and the prebuilt runtime is at
+`/workspace/pp`.
 
-## Environment (not in this repo)
+## Production defaults
 
-The server runs in the prebuilt `proof-pilot-env` venv (own Python 3.12,
-torch 2.11 cu130, custom sglang 0.5.14 nightly build — no conda needed):
+[`evaluation/configs/nemotron_cascade2.yaml`](evaluation/configs/nemotron_cascade2.yaml)
+is the source of truth. Its current defaults are:
+
+| Setting | Value |
+|---|---|
+| Hardware | 8 x NVIDIA H200 |
+| Model | OPD-32B BF16 target and BF16 DFlash draft |
+| Parallelism | TP2 x DP4 |
+| Attention | FA3, page size 1, deterministic inference |
+| Server context | 262,144 tokens |
+| Server concurrency | 64 running requests per DP replica |
+| Search concurrency | 96 requests cluster-wide |
+| Search policy | 32 proofs, 16 verifications per proof, top 8, 4 refinements, up to 4 rounds |
+| Sampling | temperature 1.0, top-p 0.95 |
+| Prover/refiner segment | 65,536 tokens plus at most one 16,384-token forced solution continuation |
+| Verifier continuation | at most one additional 16,384-token continuation |
+| Final grader | 64 GPT-5.6 Sol attempts per proof, strict zero-veto aggregation |
+
+Do not infer production settings from old run directories or historical test
+scripts. Read the YAML before every run.
+
+## 1. Prerequisites
+
+You need all of the following before starting:
+
+- Linux x86_64 with exactly eight visible H200 GPUs and an NVIDIA driver that
+  supports the CUDA 13 runtime in the supplied environment.
+- At least 100 GB of free local storage for the runtime, target model, draft
+  model, logs, and evaluation artifacts.
+- Git, `unzip`, `tar`, and network access to GitHub, Hugging Face, and the
+  OpenAI API.
+- The private `proof-pilot-env.zip` runtime archive from the project
+  maintainers. It is not stored in this repository or in the Hugging Face model
+  bundle. There is no supported PyPI-only replacement for this patched runtime.
+- A Hugging Face token with access to
+  `ycchen/proof-pilot-deploy-bundle`.
+- An OpenAI API key with access and sufficient balance for `gpt-5.6-sol`.
+
+The supplied runtime contains Python 3.12, CUDA 13 PyTorch, the custom SGLang
+build, FlashInfer caches, and the Humming helper required by the repository
+patches.
+
+## 2. Clone the repository
 
 ```bash
-unzip proof-pilot-env.zip -d proof-pilot-env-x       # -> proof-pilot-env.bin (gzip tar)
-mkdir -p /workspace/pp
-tar -xzf proof-pilot-env-x/proof-pilot-env.bin -C /workspace/pp --strip-components=1
-sed -i "s|^home = .*|home = /workspace/pp/pybase/bin|" /workspace/pp/venv/pyvenv.cfg
-mkdir -p ~/.cache/flashinfer ~/.humming/cache
-cp -rn /workspace/pp/flashinfer_cache/. ~/.cache/flashinfer/
+git clone https://github.com/bogoconic1/aimo-proof-pilot-inference.git \
+  /workspace/aimo-proof-pilot-inference
+cd /workspace/aimo-proof-pilot-inference
 
-# apply the sglang patches from this repo to the venv (idempotent)
-bash sglang_patches/apply_patches.sh /workspace/pp/venv
+export REPO=/workspace/aimo-proof-pilot-inference
+export VENV=/workspace/pp/venv
 ```
 
-Model downloads (need `HF_TOKEN`):
+Use the same checkout and commit for server startup and evaluation. The evaluator
+records the current commit and rejects a resume from a different one.
+
+## 3. Configure credentials
+
+Create `/workspace/.env` and keep it outside the repository:
 
 ```bash
-hf download ycchen/proof-pilot-deploy-bundle --include "opd-32b-deploy/*" \
-  --include "dflash-32b-draft-v2test-phaseL/*" \
+cat > /workspace/.env <<'EOF'
+HF_TOKEN="replace-with-your-hugging-face-token"
+OPENAI_API_KEY="replace-with-your-openai-api-key"
+EOF
+chmod 600 /workspace/.env
+
+set -a
+source /workspace/.env
+set +a
+```
+
+Never commit this file. A new terminal must source it again before downloading
+models or running the full evaluator.
+
+## 4. Install the prebuilt runtime
+
+Start with empty `/workspace/pp` and `/workspace/proof-pilot-env-x` directories.
+Replace the archive path below with the location supplied by the maintainers:
+
+```bash
+export ENV_ARCHIVE=/path/to/proof-pilot-env.zip
+
+mkdir -p /workspace/proof-pilot-env-x /workspace/pp
+unzip -q "$ENV_ARCHIVE" -d /workspace/proof-pilot-env-x
+tar -xzf /workspace/proof-pilot-env-x/proof-pilot-env.bin \
+  -C /workspace/pp --strip-components=1
+
+sed -i 's|^home = .*|home = /workspace/pp/pybase/bin|' \
+  /workspace/pp/venv/pyvenv.cfg
+
+mkdir -p "$HOME/.cache/flashinfer" "$HOME/.humming/cache"
+cp -rn /workspace/pp/flashinfer_cache/. "$HOME/.cache/flashinfer/"
+```
+
+Install the repository's pinned evaluation dependencies, then apply its SGLang
+patch set. Apply the patches after dependency installation so a package update
+cannot overwrite them:
+
+```bash
+cd "$REPO"
+uv pip install --python "$VENV/bin/python" \
+  -r evaluation/requirements.txt
+bash sglang_patches/apply_patches.sh "$VENV"
+```
+
+The patch command is idempotent. Re-run it whenever the environment's SGLang
+installation is replaced or upgraded.
+
+## 5. Download the BF16 models
+
+The production YAML expects these exact local paths:
+
+```bash
+set -a
+source /workspace/.env
+set +a
+
+"$VENV/bin/hf" download ycchen/proof-pilot-deploy-bundle \
+  --include 'opd-32b-deploy/*' \
+  --include 'dflash-32b-draft-v2test-phaseL/*' \
   --local-dir /workspace/models
-
-hf download ycchen/proof-pilot-deploy-bundle \
-  --include "opd-32b-v33-s200-gptq-w4a16/*" \
-  --include "dflash-32b-draft-v2test-phaseL-int4mlp/*" \
-  --local-dir /workspace/original/models
 ```
 
-## Serve + solve
+Confirm the required files and GPU count before launching:
 
 ```bash
-MODEL_MODE=humming_w4a8 bash serve_opd32b.sh &
-MODEL_MODE=humming_w4a8 PORT=30001 CUDA_VISIBLE_DEVICES=1 bash serve_opd32b.sh &
-python solve_problems.py                                  # fans out across both
+test -f /workspace/models/opd-32b-deploy/config.json
+test -f /workspace/models/dflash-32b-draft-v2test-phaseL/config.json
+test "$(nvidia-smi -L | wc -l)" -eq 8
+
+"$VENV/bin/python" - <<'PY'
+import openai
+import torch
+
+print("OpenAI SDK:", openai.__version__)
+print("PyTorch:", torch.__version__)
+print("Visible GPUs:", torch.cuda.device_count())
+assert tuple(int(x) for x in openai.__version__.split(".")[:2]) >= (2, 45)
+assert torch.cuda.device_count() == 8
+assert all("H200" in torch.cuda.get_device_name(i) for i in range(8))
+PY
 ```
 
-`MODEL_MODE=humming_w4a8` uses the GPTQ INT4 checkpoint with mandatory Humming
-W4A8 SM90 execution, the int4-MLP phase-L DFlash draft, and BF16 KV.
-`MODEL_MODE=bf16` selects the BF16 target, draft, KV cache, and LM head. No
-other weight or activation mode is supported. Both modes use mandatory DFlash,
-200k context, and FA3 attention with in-kernel sinks.
+Do not continue if any command fails.
 
-## KV-cache reuse experiment
+## 6. Start the production server
 
-For a diagram-first explanation of the submission notebook's complete
-target-KV, draft-ring, radix-prefix, and DFlash verification flow, see
-[`dflash-kv-cache-architecture.md`](dflash-kv-cache-architecture.md).
-
-[`tests/run_kv_cache_experiment.py`](tests/run_kv_cache_experiment.py) compares
-normal SGLang generation, which reuses the request's KV state while decoding,
-with an emulated no-reuse path that submits one-token requests over the entire
-growing sequence. Its defaults, engine settings, and required environment are
-isolated in the test-only
-[`tests/configs/kv_cache_reuse_h200.json`](tests/configs/kv_cache_reuse_h200.json);
-production launchers do not source that file. Radix prefix caching is disabled
-for both paths, so every one-token request performs a full prefill. DFlash is
-mandatory in this experiment: there is no opt-in switch and no non-DFlash
-fallback. It always loads the local BF16 draft, uses block size 8, an auto-read
-512-token draft ring, and FA3 draft attention.
-
-Run the default equation-solving experiment on GPU 1 with the patched
-environment:
+Use a dedicated terminal and keep it open. The evaluator validates markers from
+the complete startup log, so write to a stable, non-rotating file rather than a
+log that may be truncated by a service manager.
 
 ```bash
-cd /workspace
-/workspace/pp/venv/bin/python tests/run_kv_cache_experiment.py \
-  --gpu 1 \
-  --json-out tests/results/<run-name>/kv_cache_reuse_h200_dflash.json
+cd /workspace/aimo-proof-pilot-inference
+export REPO=/workspace/aimo-proof-pilot-inference
+export VENV=/workspace/pp/venv
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export EVAL_SERVER_LOG=/workspace/opd32b-eval.log
+
+: > "$EVAL_SERVER_LOG"
+set -o pipefail
+bash serve_opd32b.sh \
+  --config evaluation/configs/nemotron_cascade2.yaml \
+  2>&1 | tee "$EVAL_SERVER_LOG"
 ```
 
-The default target KV dtype is production's BF16 `auto`. The full-reprefill
-timing includes one SGLang scheduler/IPC round trip and per-request allocation
-overhead per output token, so it is an end-to-end comparison rather than a pure
-attention-kernel benchmark. Because each no-reuse request ends on its one target
-prefill token, that arm does not execute a DFlash draft/verify step; the result
-measures KV-reuse cost in a DFlash-enabled runtime, not symmetric speculative
-throughput.
-The JSON also preserves DFlash acceptance metadata, the effective block-size
-override versus the draft's declared value, warmup data, and streaming chunk
-sizes so the speculative behavior is auditable.
+Wait until the log reports that the SGLang server is ready. Do not start an
+evaluation while models or CUDA graphs are still loading.
 
-The recorded H200 run is in
-[`kv_cache_reuse_h200_dflash.json`](tests/results/20260710-kv-cache-reuse-h200-dflash/kv_cache_reuse_h200_dflash.json)
-with its
-[complete console log](tests/results/20260710-kv-cache-reuse-h200-dflash/kv_cache_reuse_h200_dflash.log):
+## 7. Validate the live server
 
-| Arm | Tokens | Elapsed | End-to-end rate | Correct |
-|---|---:|---:|---:|---|
-| With KV reuse + DFlash | 244 | 1.516 s | 160.98 tok/s | yes |
-| Full re-prefill | 244 | 15.763 s | 15.48 tok/s | yes |
+Open a second terminal. This check compares the live SGLang server, model
+metadata, all eight GPUs, and required DFlash startup markers with the YAML:
 
-Full re-prefill was 10.40x slower. The KV-reuse arm ran 63 DFlash verify
-steps, accepting 180 of 441 proposed draft tokens (40.82% acceptance;
-published mean accept length 3.873). Its 244 tokens arrived in 64 stream
-chunks. As expected, none of the 244 one-token full-reprefill requests
-reported a speculative verify metric. Prefix-cache hits were zero in both
-arms.
+```bash
+cd /workspace/aimo-proof-pilot-inference
+export REPO=/workspace/aimo-proof-pilot-inference
+export VENV=/workspace/pp/venv
+export EVAL_SERVER_LOG=/workspace/opd32b-eval.log
 
-## Measured throughput (2× H200, 512-token generations)
+"$VENV/bin/python" evaluation/harness/validate_server.py \
+  --url http://127.0.0.1:30000 \
+  --config evaluation/configs/nemotron_cascade2.yaml \
+  --output /tmp/opd32b-server-validation.json \
+  --server-log "$EVAL_SERVER_LOG"
+```
 
-| Concurrency per GPU | Total tok/s | Per stream |
-|---|---|---|
-| 1 | 78 | 38.8 |
-| 4 | 352 | 44.0 |
-| 16 | 1,160 | 36.2 |
-| 48 | 3,772 | 39.3 |
+No output means validation passed. Inspect the recorded configuration with:
 
-Per-stream speed stays flat up to the configured `MAXREQ=48` cap — throughput
-scales linearly with concurrency. Long-context requests decode slower as the
-KV cache grows.
+```bash
+"$VENV/bin/python" -m json.tool /tmp/opd32b-server-validation.json | less
+```
 
-`sample_results_sglang.json` holds the outputs of the 6-problem sample run
-(5/6 proved cleanly; the harmonic-sum problem thinks past the token cap —
-known long-thinking tendency of this OPD checkpoint).
+Do not run the evaluation against a server that fails validation.
 
-## Tensor parallelism
+## 8. Run IMO 2025 Problem 1
 
-`TP=2 bash serve_opd32b.sh` spans one server across both H200s (NVLink). The
-patched model TP-shards the per-head attention sinks (20 heads per rank).
-~1.3× single-stream speed and double the KV headroom; use it when per-problem
-compute matters more than problems-in-parallel.
+The full runner performs server preflight, proof search, artifact audits, strict
+GPT-5.6 Sol grading, and report generation:
 
-## Historical six-problem agentic evaluation
+```bash
+cd /workspace/aimo-proof-pilot-inference
+export VENV=/workspace/pp/venv
+export EVAL_SERVER_LOG=/workspace/opd32b-eval.log
+set -a
+source /workspace/.env
+set +a
 
-The active 60-problem ProofBench pipeline and every evaluation artifact now live
-under [`evaluation/`](evaluation/). The older six-problem AIMO Proof Pilot run is
-preserved losslessly under
-[`evaluation/legacy-six-problem/`](evaluation/legacy-six-problem/) rather than
-occupying a second top-level evaluation directory.
+RUN_ID="imo-2025-p1-$(date -u +%Y%m%dT%H%M%SZ)"
+"$VENV/bin/python" evaluation/harness/run_full_evaluation.py \
+  --config evaluation/configs/nemotron_cascade2.yaml \
+  --ids-file evaluation/manifests/imo-2025-problem-1.json \
+  --run-id "$RUN_ID"
 
-The legacy runner executes the unmodified proof-pilot agentic loop
-(`run_v2.py` prove→verify→refine→select, prompts byte-identical) against the
-server. Finding (DIVALL): at 900 seconds per problem the loop degenerates to
-salvage-only and answered 998002; at 3,600 seconds on the TP-2 server it produced
-33 candidates and 26 refinements, then converged to the correct 998285. See
-[`trace_DIVALL_3600_summary.json`](evaluation/legacy-six-problem/results/trace_DIVALL_3600_summary.json).
+echo "evaluation/runs/$RUN_ID/RESULT.md"
+```
+
+The final grader uses the MathArena problem-specific grading scheme from the
+pinned dataset and the strict checked-in grader prompts. It does not use a
+lenient alternate-method override.
+
+## 9. Run all six IMO 2025 problems
+
+Create one manifest and run the same production pipeline. Problems are processed
+sequentially; the requests within each problem use the configured concurrency.
+
+```bash
+cd /workspace/aimo-proof-pilot-inference
+printf '%s\n' \
+  '{"dataset":"imo_2025","problem_ids":["1","2","3","4","5","6"]}' \
+  > /tmp/imo-2025-all.json
+
+export VENV=/workspace/pp/venv
+export EVAL_SERVER_LOG=/workspace/opd32b-eval.log
+set -a
+source /workspace/.env
+set +a
+
+RUN_ID="imo-2025-all-$(date -u +%Y%m%dT%H%M%SZ)"
+"$VENV/bin/python" evaluation/harness/run_full_evaluation.py \
+  --config evaluation/configs/nemotron_cascade2.yaml \
+  --ids-file /tmp/imo-2025-all.json \
+  --run-id "$RUN_ID"
+```
+
+## 10. Resume an interrupted run
+
+Run the exact same command with the same `--run-id`, config file, manifest file,
+repository commit, model files, and prompts. Completed generation and grading
+records are reused; missing or failed work is retried.
+
+Do not edit or replace the YAML or manifest after a run starts. The evaluator
+pins their hashes under the run directory and intentionally rejects mismatches.
+For `/tmp/imo-2025-all.json`, recreate byte-for-byte identical content before
+resuming.
+
+## 11. Inspect results
+
+Every run is written to `evaluation/runs/<run-id>/`:
+
+| Path | Contents |
+|---|---|
+| `RESULT.md` | final score summary |
+| `run_manifest.json` | pinned commit, inputs, hashes, model, search, and grader settings |
+| `server_validation.json` | live server and GPU validation record |
+| `generation/records.jsonl` | per-problem generation summary |
+| `generation/problems/<id>/calls.jsonl` | every logical LLM call and request metadata |
+| `generation/problems/<id>/rounds/` | round rankings and selections |
+| `generation/problems/<id>/proofs/` | admitted proof artifacts |
+| `grading/records.jsonl` | raw final-grader attempts |
+| `grading/summary.json` | strict aggregated grades |
+
+Evaluation directories can be very large. Do not commit them unless the result
+is intentionally being published.
+
+## 12. Change settings safely
+
+Copy the production YAML to a clearly named file, edit that copy, and pass the
+same path to both `serve_opd32b.sh` and `run_full_evaluation.py`. The validator
+rejects a server whose TP/DP topology, attention backend, context, concurrency,
+DFlash setup, or model mode differs from the selected YAML.
+
+The server context is a total input-plus-output limit, not an output allowance.
+Review [`evaluation/PIPELINE_REQUEST_SIZE.md`](evaluation/PIPELINE_REQUEST_SIZE.md)
+before increasing generation lengths or prompt fan-in.
+
+## 13. Stop the server
+
+Press `Ctrl-C` in the server terminal. Confirm no model process still owns a GPU:
+
+```bash
+nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
+  --format=csv,noheader
+```
+
+## Troubleshooting
+
+**`openai` is older than 2.45.0:** rerun the requirements installation with the
+same `/workspace/pp/venv`, then reapply the SGLang patches.
+
+**Server validation reports missing DFlash markers:** make sure
+`EVAL_SERVER_LOG` points to the complete log from the current startup. Restart
+the server into a freshly truncated, non-rotating log if the beginning is gone.
+
+**CUDA device-count mismatch:** the production config requires exactly eight
+visible GPUs because `TP x DP = 2 x 4`. Export all eight device IDs before
+launching and stop any stale server first.
+
+**A resume says an input differs:** restore the original commit, YAML, and
+manifest or use a new run ID. Do not bypass the provenance check.
+
+**The OpenAI grader fails before search:** verify that `OPENAI_API_KEY` is
+exported, has `gpt-5.6-sol` access, and has available account balance.
+
+## Architecture and additional workflows
+
+- [`evaluation/EVALUATION_DESIGN.md`](evaluation/EVALUATION_DESIGN.md) defines
+  ranking, selection, asynchronous verification, refinement, and resume
+  semantics.
+- [`evaluation/PIPELINE_REQUEST_SIZE.md`](evaluation/PIPELINE_REQUEST_SIZE.md)
+  derives request payload and context sizes from first principles.
+- [`dflash-kv-cache-architecture.md`](dflash-kv-cache-architecture.md) explains
+  target KV, the draft ring, radix-prefix reuse, and DFlash verification.
+- [`tests/README.md`](tests/README.md) documents the isolated DFlash and KV-cache
+  experiments. Test settings are not production settings.
+- [`evaluation/legacy-six-problem/`](evaluation/legacy-six-problem/) preserves the
+  older six-problem runner and historical artifacts.
