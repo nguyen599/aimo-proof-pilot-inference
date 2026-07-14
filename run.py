@@ -43,7 +43,10 @@ DEFAULT_PROBLEM_TIMEOUT_SECONDS = 86_400
 DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
 REPO_ROOT = Path(__file__).resolve().parent
 
-DEFAULT_VLLM_EXTRA_ARGS = "--generation-config vllm --kv-cache-dtype fp8 --max_num_batched_tokens 16384 --uvicorn-log-level warning"
+DEFAULT_VLLM_EXTRA_ARGS = (
+    "--generation-config vllm --kv-cache-dtype fp8 --block-size 256 "
+    "--max_num_batched_tokens 16384 --uvicorn-log-level warning"
+)
 
 
 class CFG:
@@ -134,7 +137,7 @@ class CFG:
     gpus = ""
     tensor_parallel_size = 0
     dtype = "auto"
-    gpu_memory_utilization = 0.97
+    gpu_memory_utilization = 0.95
     max_num_seqs = 32
     max_concurrent_requests = 32
     max_concurrent_problems = 1
