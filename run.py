@@ -93,8 +93,9 @@ class CFG:
         122_000,
     ]
     thinking_budget_force_text = (
-        "\nWe should now write the final solution due to the time limit.\n"
-        "</think>\n\n<solution>\n"
+        "\n</think>\n\n<solution>\n"
+        "We were unable to produce a complete proof. However, the strongest "
+        "partial progress is as follows:\n"
     )
     verifier_thinking_budget_tokens = 112_000
     verifier_thinking_budget_force_text = (

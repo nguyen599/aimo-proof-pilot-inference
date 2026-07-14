@@ -33,6 +33,12 @@ class RunOpdPromptContractTests(unittest.TestCase):
             max(run.CFG.proof_generation_thinking_budgets),
             run.CFG.max_new_tokens,
         )
+        self.assertEqual(
+            run.CFG.thinking_budget_force_text,
+            "\n</think>\n\n<solution>\n"
+            "We were unable to produce a complete proof. However, the strongest "
+            "partial progress is as follows:\n",
+        )
         self.assertEqual(run.CFG.verifier_max_new_tokens, 126_000)
         self.assertEqual(run.CFG.meta_max_new_tokens, 126_000)
         self.assertLess(
