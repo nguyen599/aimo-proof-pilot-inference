@@ -32,7 +32,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -305,7 +310,7 @@ class Olmo3SinkDecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class Olmo3SinkModel(nn.Module):
+class Olmo3SinkModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -351,12 +356,30 @@ class Olmo3SinkModel(nn.Module):
                 raise ValueError("pipeline rank requires intermediate_tensors")
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [],
+            self.start_layer,
+            hidden_states,
+            None,
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states = layer(positions, hidden_states)
+            self._maybe_add_hidden_state(
+                aux_hidden_states,
+                layer_idx + 1,
+                hidden_states,
+                None,
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
-        return self.norm(hidden_states)
+        hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
+        return hidden_states
 
     def load_weights(
         self,
@@ -399,7 +422,12 @@ class Olmo3SinkModel(nn.Module):
         return loaded_params
 
 
-class Olmo3SinkForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class Olmo3SinkForCausalLM(
+    nn.Module,
+    SupportsPP,
+    SupportsLoRA,
+    SupportsEagle3,
+):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

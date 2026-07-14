@@ -15,8 +15,11 @@ sys.path.insert(0, str(PATCH_ROOT / "src"))
 
 plugin = import_module("olmo3_sink_vllm")
 model_module = import_module("olmo3_sink_vllm.model")
+dflash_module = import_module("olmo3_sink_vllm.dflash")
 register = plugin.register
 Olmo3SinkForCausalLM = model_module.Olmo3SinkForCausalLM
+Olmo3SinkDFlashForCausalLM = dflash_module.Olmo3SinkDFlashForCausalLM
+_draft_sliding_window = dflash_module._draft_sliding_window
 _rope_parameters_for_layer = model_module._rope_parameters_for_layer
 _select_sink_shard = model_module._select_sink_shard
 
@@ -26,6 +29,15 @@ class VllmOlmo3SinkPluginTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.config = AutoConfig.from_pretrained(
             REPO_ROOT.parent / "olmo3sink-32b" / "opd-32b-deploy",
+            trust_remote_code=True,
+        )
+        cls.draft_path = (
+            REPO_ROOT.parent
+            / "olmo3sink-32b"
+            / "dflash-32b-draft-v2test-phaseL"
+        )
+        cls.draft_config = AutoConfig.from_pretrained(
+            cls.draft_path,
             trust_remote_code=True,
         )
 
@@ -40,6 +52,15 @@ class VllmOlmo3SinkPluginTests(unittest.TestCase):
         self.assertIn("Olmo3SinkForCausalLM", ModelRegistry.get_supported_archs())
         model_class = ModelRegistry._try_load_model_cls("Olmo3SinkForCausalLM")
         self.assertIs(model_class, Olmo3SinkForCausalLM)
+
+        for architecture in (
+            "Olmo3SinkDFlashForCausalLM",
+            "DFlashDraftModel",
+        ):
+            with self.subTest(architecture=architecture):
+                self.assertIn(architecture, ModelRegistry.get_supported_archs())
+                model_class = ModelRegistry._try_load_model_cls(architecture)
+                self.assertIs(model_class, Olmo3SinkDFlashForCausalLM)
 
     def test_nested_rope_parameters_are_resolved_per_layer(self) -> None:
         full = _rope_parameters_for_layer(self.config, None)
@@ -73,10 +94,35 @@ class VllmOlmo3SinkPluginTests(unittest.TestCase):
                 tp_rank=0,
             )
 
-    def test_target_plugin_has_no_dflash_registration(self) -> None:
-        source = (PATCH_ROOT / "src" / "olmo3_sink_vllm" / "__init__.py").read_text()
-        self.assertNotIn("DFlash", source)
-        self.assertNotIn("speculative", source)
+    def test_target_exposes_eagle3_hidden_states(self) -> None:
+        self.assertTrue(Olmo3SinkForCausalLM.supports_eagle3)
+        self.assertIn(model_module.SupportsEagle3, Olmo3SinkForCausalLM.__mro__)
+
+    def test_dflash_checkpoint_contract(self) -> None:
+        from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+
+        self.assertTrue(
+            issubclass(Olmo3SinkDFlashForCausalLM, DFlashQwen3ForCausalLM)
+        )
+        self.assertEqual(_draft_sliding_window(self.draft_config), 512)
+        self.assertEqual(
+            self.draft_config.dflash_config["target_layer_ids"],
+            [1, 10, 18, 27, 35, 44, 52, 61],
+        )
+        self.assertEqual(self.draft_config.dflash_config["block_size"], 11)
+
+    def test_dflash_checkpoint_contains_shared_model_contract(self) -> None:
+        import json
+
+        index = json.loads(
+            (self.draft_path / "model.safetensors.index.json").read_text()
+        )
+        names = set(index["weight_map"])
+        self.assertIn("mask_embed", names)
+        self.assertIn("layers.0.self_attn.sinks", names)
+        self.assertIn("layers.0.post_feedforward_layernorm.weight", names)
+        self.assertNotIn("embed_tokens.weight", names)
+        self.assertNotIn("lm_head.weight", names)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import atexit
 import asyncio
 import contextlib
 import csv
+import gzip
 import glob
 import hashlib
 import json
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI
 from tqdm.auto import tqdm
 import nest_asyncio
 
@@ -43,10 +44,56 @@ DEFAULT_PROBLEM_TIMEOUT_SECONDS = 86_400
 DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
 REPO_ROOT = Path(__file__).resolve().parent
 
+
+class InferenceServerUnavailable(RuntimeError):
+    """The local inference engine died or became unreachable."""
+
+
+def is_fatal_inference_error(exc: BaseException) -> bool:
+    if isinstance(exc, APIConnectionError):
+        return True
+    return isinstance(exc, APIStatusError) and exc.status_code >= 500
+
 DEFAULT_VLLM_EXTRA_ARGS = (
     "--generation-config vllm --quantization fp8 --kv-cache-dtype fp8 --block-size 256 "
     "--max_num_batched_tokens 16384 --uvicorn-log-level warning"
 )
+
+
+def default_vllm_extra_args() -> str:
+    extra_args = shlex.split(DEFAULT_VLLM_EXTRA_ARGS)
+    draft_model = os.environ.get("AIMO_DFLASH_MODEL_PATH", "").strip()
+    if not draft_model:
+        return shlex.join(extra_args)
+
+    num_speculative_tokens = int(
+        os.environ.get("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS", "10")
+    )
+    context_cutoff = int(os.environ.get("AIMO_DFLASH_CONTEXT_CUTOFF", "65536"))
+    if num_speculative_tokens <= 0:
+        raise ValueError("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS must be positive")
+    if context_cutoff <= 0:
+        raise ValueError("AIMO_DFLASH_CONTEXT_CUTOFF must be positive")
+
+    speculative_config = {
+        "method": "dflash",
+        "model": draft_model,
+        "num_speculative_tokens": num_speculative_tokens,
+        "disable_above_context_len": context_cutoff,
+    }
+    extra_args.extend(
+        [
+            "--speculative-config",
+            json.dumps(speculative_config, separators=(",", ":")),
+        ]
+    )
+    return shlex.join(extra_args)
+
+
+def default_min_p() -> Optional[float]:
+    if os.environ.get("AIMO_DFLASH_MODEL_PATH", "").strip():
+        return None
+    return 0.01
 
 
 class CFG:
@@ -77,14 +124,14 @@ class CFG:
     max_new_tokens = 126_000
     thinking_budget_enabled = True
     proof_generation_thinking_budgets = [
-        121_000,
-        121_000,
-        121_000,
-        121_000,
-        121_000,
-        121_000,
-        121_000,
-        121_500,
+        120_000,
+        120_000,
+        120_000,
+        120_000,
+        120_000,
+        120_000,
+        120_000,
+        120_500,
         121_500,
         121_500,
         121_500,
@@ -130,9 +177,10 @@ class CFG:
         1.0,
     ]
     top_p = 0.95
-    top_k = -1
+    top_k = 64
     min_new_tokens = 0
-    min_p: Optional[float] = 0.01
+    # vLLM 0.25.1 rejects min_p when speculative decoding is active.
+    min_p: Optional[float] = default_min_p()
 
     num_gpus = 1
     gpus = ""
@@ -164,11 +212,11 @@ class CFG:
     min_valid_low = 1
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
     selection_reserve_seconds = DEFAULT_SELECTION_RESERVE_SECONDS
-    selection_temperature = 0.2
+    selection_temperature = 1.0
     selector_mode = "llm"  # llm, score
     selector_min_final_score = 0.5
 
-    vllm_extra_args = DEFAULT_VLLM_EXTRA_ARGS
+    vllm_extra_args = default_vllm_extra_args()
     stream_interval = 100
     host = "127.0.0.1"
     port = 8000
@@ -271,6 +319,8 @@ MAX_FORWARDED_EVALUATION_CHARS = 32_000
 MAX_FORWARDED_META_ANALYSIS_CHARS = 24_000
 REPETITION_GUARD_RECENT_TOKENS = 500
 REPETITION_GUARD_DUPLICATE_LINE_THRESHOLD = 20
+REASONING_REPETITION_WINDOW_WORDS = 32
+REASONING_GZIP_WARNING_THRESHOLD = 5.0
 _CLIPPED_TEXT_MARKER = "\n\n[... clipped middle reasoning before forwarding ...]\n\n"
 
 
@@ -858,6 +908,63 @@ def output_after_last_thinking_block(text: str) -> tuple[str, bool]:
     if not matches:
         return strip_reasoning_blocks(raw), False
     return raw[matches[-1].end() :].strip(), True
+
+
+def extract_hidden_reasoning(text: str) -> str:
+    raw = str(text or "")
+    close_match = re.search(r"(?is)</think>", raw)
+    if close_match is not None:
+        prefix = raw[: close_match.start()]
+        open_matches = list(re.finditer(r"(?is)<think>\s*", prefix))
+        if open_matches:
+            prefix = prefix[open_matches[-1].end() :]
+        return prefix.strip()
+
+    open_matches = list(re.finditer(r"(?is)<think>\s*", raw))
+    if open_matches:
+        return raw[open_matches[-1].end() :].strip()
+    return ""
+
+
+def measure_reasoning_repetition(
+    text: str,
+    *,
+    window_words: int = REASONING_REPETITION_WINDOW_WORDS,
+) -> dict[str, Any]:
+    if window_words <= 0:
+        raise ValueError("window_words must be positive")
+
+    reasoning = extract_hidden_reasoning(text)
+    uncompressed = reasoning.encode("utf-8")
+    compressed = gzip.compress(uncompressed, compresslevel=9, mtime=0)
+    words = reasoning.split()
+    window_count = max(0, len(words) - window_words + 1)
+    repeated_windows = 0
+    seen_windows: set[tuple[str, ...]] = set()
+    for start in range(window_count):
+        window = tuple(words[start : start + window_words])
+        if window in seen_windows:
+            repeated_windows += 1
+        else:
+            seen_windows.add(window)
+
+    gzip_factor = (
+        len(uncompressed) / len(compressed) if uncompressed and compressed else 0.0
+    )
+    repeated_fraction = repeated_windows / window_count if window_count else 0.0
+    return {
+        "hidden_reasoning_chars": len(reasoning),
+        "uncompressed_bytes": len(uncompressed),
+        "gzip_bytes": len(compressed),
+        "gzip_factor": gzip_factor,
+        "gzip_warning_threshold": REASONING_GZIP_WARNING_THRESHOLD,
+        "gzip_warning": gzip_factor > REASONING_GZIP_WARNING_THRESHOLD,
+        "word_count": len(words),
+        "window_words": window_words,
+        "word_window_count": window_count,
+        "repeated_word_window_count": repeated_windows,
+        "repeated_word_window_fraction": repeated_fraction,
+    }
 
 
 def log_generation_visible_output(
@@ -1505,6 +1612,7 @@ class VLLMServer:
             return
         cmd = self.build_command()
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.gpu_group}
+        env.setdefault("VLLM_PLUGINS", "olmo3_sink")
         # vLLM 0.25 defaults to Model Runner V2, which does not yet support the
         # thinking_token_budget request field used by this inference pipeline.
         env.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
@@ -1828,6 +1936,10 @@ class ChatScheduler:
         path: Optional[Path],
         response: dict[str, Any],
     ) -> None:
+        if response.get("stage") in {"proof_generation", "proof_refine"}:
+            response["reasoning_repetition"] = measure_reasoning_repetition(
+                str(response.get("text") or "")
+            )
         if path is None:
             return
         try:
@@ -1843,6 +1955,16 @@ class ChatScheduler:
                     )
                     + "\n"
                 )
+                if response.get("reasoning_repetition") is not None:
+                    file_obj.write(
+                        "reasoning_repetition: "
+                        + json.dumps(
+                            response["reasoning_repetition"],
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                        + "\n"
+                    )
                 file_obj.write(f"server_url: {response.get('server_url')}\n")
                 file_obj.write(f"latency_s: {response.get('latency_s')}\n\n")
                 file_obj.write(str(response.get("text") or ""))
@@ -1926,6 +2048,20 @@ class ChatScheduler:
                 progress.stream_finish(stream_id)
         if response is None:
             raise RuntimeError(f"LLM call at stage={stage} returned no response")
+        repetition = response.get("reasoning_repetition")
+        if repetition is not None:
+            logging.info(
+                "Reasoning repetition stage=%s detail=%s gzip_factor=%.4f "
+                "repeated_%dword_windows=%.4f (%d/%d) warning=%s",
+                stage,
+                detail or "-",
+                repetition["gzip_factor"],
+                repetition["window_words"],
+                repetition["repeated_word_window_fraction"],
+                repetition["repeated_word_window_count"],
+                repetition["word_window_count"],
+                repetition["gzip_warning"],
+            )
         if progress is not None:
             usage = response.get("usage") or {}
             completion_tokens = usage.get("completion_tokens")
@@ -2362,6 +2498,11 @@ class ChatScheduler:
                 "latency_s": time.time() - started,
             }
             self._append_llm_call_output(call_log_path, result)
+            if is_fatal_inference_error(exc):
+                raise InferenceServerUnavailable(
+                    f"Inference server failed during stage={stage} at "
+                    f"{self.base_urls[index]}: {exc!r}"
+                ) from exc
             return result
 
     def _mock_response(
@@ -2415,6 +2556,7 @@ def make_output(
         "usage": response.get("usage", {}),
         "server_url": response.get("server_url"),
         "latency_s": response.get("latency_s"),
+        "reasoning_repetition": response.get("reasoning_repetition"),
     }
     output.update(extra)
     return output
@@ -3447,6 +3589,8 @@ async def run_candidate_pipeline(
             throttle=throttle,
         )
         return {"attempt_idx": attempt_idx, "candidate": candidate, "error": None}
+    except InferenceServerUnavailable:
+        raise
     except Exception as exc:
         logging.exception("Pipeline failed id=%s attempt=%d", problem_id, attempt_idx)
         return {"attempt_idx": attempt_idx, "candidate": None, "error": repr(exc)}
@@ -3511,6 +3655,8 @@ async def run_streaming_candidates(
                 result = await future
             except (TimeoutError, asyncio.TimeoutError):
                 raise
+            except InferenceServerUnavailable:
+                raise
             except Exception as exc:
                 logging.exception("Pipeline task failed id=%s", problem_id)
                 failed_attempts.append({"attempt_idx": None, "error": repr(exc)})
@@ -3552,6 +3698,9 @@ async def run_streaming_candidates(
                 cancelled_count,
                 float(timeout_s or 0.0),
             )
+    except InferenceServerUnavailable:
+        cancelled_count += await cancel_pending_tasks(pipeline_tasks)
+        raise
 
     return {
         "candidates": candidates,
@@ -4620,6 +4769,8 @@ def run_simple_csv(
                     "error": "",
                 }
                 write_debug_row(runtime.logdir / "results.jsonl", result)
+            except InferenceServerUnavailable:
+                raise
             except Exception as exc:
                 logging.exception("Failed row=%s id=%s", row_idx, problem_id)
                 output_row = {

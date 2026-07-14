@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shlex
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -50,6 +53,33 @@ class RunOpdPromptContractTests(unittest.TestCase):
             run.CFG.meta_max_new_tokens,
         )
 
+    def test_dflash_can_be_enabled_from_environment(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AIMO_DFLASH_MODEL_PATH": "/draft",
+                "AIMO_DFLASH_NUM_SPECULATIVE_TOKENS": "10",
+            },
+        ):
+            args = shlex.split(run.default_vllm_extra_args())
+
+        config_index = args.index("--speculative-config") + 1
+        self.assertEqual(
+            json.loads(args[config_index]),
+            {
+                "method": "dflash",
+                "model": "/draft",
+                "num_speculative_tokens": 10,
+                "disable_above_context_len": 65536,
+            },
+        )
+
+    def test_dflash_disables_unsupported_min_p(self):
+        with patch.dict(os.environ, {"AIMO_DFLASH_MODEL_PATH": "/draft"}):
+            self.assertIsNone(run.default_min_p())
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(run.default_min_p(), 0.01)
+
     def test_imo2025_defaults_run_the_complete_candidate_pipeline(self):
         self.assertEqual(
             run.CFG.input_csv,
@@ -73,6 +103,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
 
         self.assertEqual([message["role"] for message in messages], ["system", "user"])
         self.assertIn("mathematical proof generator", messages[0]["content"])
+        self.assertIn(
+            "Do not repeat yourself or brute-force a solution.",
+            messages[0]["content"],
+        )
         self.assertIn("Problem:\nProve the claim.", messages[1]["content"])
         self.assertIn("<self_evaluation>", messages[1]["content"])
 
@@ -87,6 +121,46 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertTrue(parsed["is_valid_candidate_response"])
         self.assertEqual(parsed["proof"], "A complete proof.")
         self.assertEqual(parsed["self_score"], 1.0)
+
+    def test_reasoning_repetition_metrics_use_hidden_reasoning_only(self):
+        words = [f"word{index}" for index in range(32)] * 3
+        text = (
+            "<think>"
+            + " ".join(words)
+            + "</think><solution>Visible output is excluded.</solution>"
+        )
+
+        metrics = run.measure_reasoning_repetition(text)
+
+        self.assertEqual(metrics["word_count"], 96)
+        self.assertEqual(metrics["window_words"], 32)
+        self.assertEqual(metrics["word_window_count"], 65)
+        self.assertEqual(metrics["repeated_word_window_count"], 33)
+        self.assertAlmostEqual(metrics["repeated_word_window_fraction"], 33 / 65)
+        self.assertGreater(metrics["gzip_factor"], 1.0)
+
+    def test_reasoning_repetition_supports_orphan_think_close(self):
+        metrics = run.measure_reasoning_repetition(
+            "private hidden work</think><solution>Visible.</solution>"
+        )
+
+        self.assertEqual(metrics["word_count"], 3)
+        self.assertEqual(metrics["word_window_count"], 0)
+        self.assertEqual(metrics["repeated_word_window_fraction"], 0.0)
+
+    def test_proof_output_carries_reasoning_repetition_metrics(self):
+        response = {
+            "stage": "proof_generation",
+            "success": True,
+            "text": "<think>private work</think><solution>Proof.</solution>",
+        }
+        response["reasoning_repetition"] = run.measure_reasoning_repetition(
+            response["text"]
+        )
+
+        output = run.make_output("proof_generation", response, {})
+
+        self.assertEqual(output["reasoning_repetition"]["word_count"], 2)
 
     def test_verifier_requires_complete_xml_contract(self):
         valid = run.parse_verifier_response(
