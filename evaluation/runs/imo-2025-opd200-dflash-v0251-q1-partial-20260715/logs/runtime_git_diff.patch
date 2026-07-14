@@ -1,0 +1,776 @@
+diff --git a/evaluation/prompts/ycchen_math_3r/prover.txt b/evaluation/prompts/ycchen_math_3r/prover.txt
+index fe13c24..84395b8 100644
+--- a/evaluation/prompts/ycchen_math_3r/prover.txt
++++ b/evaluation/prompts/ycchen_math_3r/prover.txt
+@@ -3,6 +3,8 @@ You are a mathematical proof generator with an internal proof verifier.
+ 
+ Solve the given olympiad-style proof problem. First construct a proof, then verify it as if you were grading an IMO solution: reject any step that relies only on numerical evidence, intuition, or an unstated lemma, and strengthen or replace weak parts before finalizing.
+ 
++Do not repeat yourself or brute-force a solution.
++
+ Output ONLY the final answer in the exact XML format below — no scratch work and no text outside the tags.
+ ===USER===
+ Problem:
+diff --git a/run.py b/run.py
+index e356d08..f794fa7 100644
+--- a/run.py
++++ b/run.py
+@@ -4,6 +4,7 @@ import atexit
+ import asyncio
+ import contextlib
+ import csv
++import gzip
+ import glob
+ import hashlib
+ import json
+@@ -25,7 +26,7 @@ from pathlib import Path
+ from typing import Any, Optional
+ 
+ import pandas as pd
+-from openai import OpenAI
++from openai import APIConnectionError, APIStatusError, OpenAI
+ from tqdm.auto import tqdm
+ import nest_asyncio
+ 
+@@ -43,12 +44,58 @@ DEFAULT_PROBLEM_TIMEOUT_SECONDS = 86_400
+ DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
+ REPO_ROOT = Path(__file__).resolve().parent
+ 
++
++class InferenceServerUnavailable(RuntimeError):
++    """The local inference engine died or became unreachable."""
++
++
++def is_fatal_inference_error(exc: BaseException) -> bool:
++    if isinstance(exc, APIConnectionError):
++        return True
++    return isinstance(exc, APIStatusError) and exc.status_code >= 500
++
+ DEFAULT_VLLM_EXTRA_ARGS = (
+     "--generation-config vllm --quantization fp8 --kv-cache-dtype fp8 --block-size 256 "
+     "--max_num_batched_tokens 16384 --uvicorn-log-level warning"
+ )
+ 
+ 
++def default_vllm_extra_args() -> str:
++    extra_args = shlex.split(DEFAULT_VLLM_EXTRA_ARGS)
++    draft_model = os.environ.get("AIMO_DFLASH_MODEL_PATH", "").strip()
++    if not draft_model:
++        return shlex.join(extra_args)
++
++    num_speculative_tokens = int(
++        os.environ.get("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS", "10")
++    )
++    context_cutoff = int(os.environ.get("AIMO_DFLASH_CONTEXT_CUTOFF", "65536"))
++    if num_speculative_tokens <= 0:
++        raise ValueError("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS must be positive")
++    if context_cutoff <= 0:
++        raise ValueError("AIMO_DFLASH_CONTEXT_CUTOFF must be positive")
++
++    speculative_config = {
++        "method": "dflash",
++        "model": draft_model,
++        "num_speculative_tokens": num_speculative_tokens,
++        "disable_above_context_len": context_cutoff,
++    }
++    extra_args.extend(
++        [
++            "--speculative-config",
++            json.dumps(speculative_config, separators=(",", ":")),
++        ]
++    )
++    return shlex.join(extra_args)
++
++
++def default_min_p() -> Optional[float]:
++    if os.environ.get("AIMO_DFLASH_MODEL_PATH", "").strip():
++        return None
++    return 0.01
++
++
+ class CFG:
+     model_path = Path(os.environ.get("AIMO_MODEL_PATH", "/model"))
+     input_csv = Path(
+@@ -77,14 +124,14 @@ class CFG:
+     max_new_tokens = 126_000
+     thinking_budget_enabled = True
+     proof_generation_thinking_budgets = [
+-        121_000,
+-        121_000,
+-        121_000,
+-        121_000,
+-        121_000,
+-        121_000,
+-        121_000,
+-        121_500,
++        120_000,
++        120_000,
++        120_000,
++        120_000,
++        120_000,
++        120_000,
++        120_000,
++        120_500,
+         121_500,
+         121_500,
+         121_500,
+@@ -93,8 +140,9 @@ class CFG:
+         122_000,
+     ]
+     thinking_budget_force_text = (
+-        "\nWe should now write the final solution due to the time limit.\n"
+-        "</think>\n\n<solution>\n"
++        "\n</think>\n\n<solution>\n"
++        "We were unable to produce a complete proof. However, the strongest "
++        "partial progress is as follows:\n"
+     )
+     verifier_thinking_budget_tokens = 112_000
+     verifier_thinking_budget_force_text = (
+@@ -129,9 +177,10 @@ class CFG:
+         1.0,
+     ]
+     top_p = 0.95
+-    top_k = -1
++    top_k = 64
+     min_new_tokens = 0
+-    min_p: Optional[float] = 0.01
++    # vLLM 0.25.1 rejects min_p when speculative decoding is active.
++    min_p: Optional[float] = default_min_p()
+ 
+     num_gpus = 1
+     gpus = ""
+@@ -163,11 +212,11 @@ class CFG:
+     min_valid_low = 1
+     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
+     selection_reserve_seconds = DEFAULT_SELECTION_RESERVE_SECONDS
+-    selection_temperature = 0.2
++    selection_temperature = 1.0
+     selector_mode = "llm"  # llm, score
+     selector_min_final_score = 0.5
+ 
+-    vllm_extra_args = DEFAULT_VLLM_EXTRA_ARGS
++    vllm_extra_args = default_vllm_extra_args()
+     stream_interval = 100
+     host = "127.0.0.1"
+     port = 8000
+@@ -270,6 +319,8 @@ MAX_FORWARDED_EVALUATION_CHARS = 32_000
+ MAX_FORWARDED_META_ANALYSIS_CHARS = 24_000
+ REPETITION_GUARD_RECENT_TOKENS = 500
+ REPETITION_GUARD_DUPLICATE_LINE_THRESHOLD = 20
++REASONING_REPETITION_WINDOW_WORDS = 32
++REASONING_GZIP_WARNING_THRESHOLD = 5.0
+ _CLIPPED_TEXT_MARKER = "\n\n[... clipped middle reasoning before forwarding ...]\n\n"
+ 
+ 
+@@ -859,6 +910,63 @@ def output_after_last_thinking_block(text: str) -> tuple[str, bool]:
+     return raw[matches[-1].end() :].strip(), True
+ 
+ 
++def extract_hidden_reasoning(text: str) -> str:
++    raw = str(text or "")
++    close_match = re.search(r"(?is)</think>", raw)
++    if close_match is not None:
++        prefix = raw[: close_match.start()]
++        open_matches = list(re.finditer(r"(?is)<think>\s*", prefix))
++        if open_matches:
++            prefix = prefix[open_matches[-1].end() :]
++        return prefix.strip()
++
++    open_matches = list(re.finditer(r"(?is)<think>\s*", raw))
++    if open_matches:
++        return raw[open_matches[-1].end() :].strip()
++    return ""
++
++
++def measure_reasoning_repetition(
++    text: str,
++    *,
++    window_words: int = REASONING_REPETITION_WINDOW_WORDS,
++) -> dict[str, Any]:
++    if window_words <= 0:
++        raise ValueError("window_words must be positive")
++
++    reasoning = extract_hidden_reasoning(text)
++    uncompressed = reasoning.encode("utf-8")
++    compressed = gzip.compress(uncompressed, compresslevel=9, mtime=0)
++    words = reasoning.split()
++    window_count = max(0, len(words) - window_words + 1)
++    repeated_windows = 0
++    seen_windows: set[tuple[str, ...]] = set()
++    for start in range(window_count):
++        window = tuple(words[start : start + window_words])
++        if window in seen_windows:
++            repeated_windows += 1
++        else:
++            seen_windows.add(window)
++
++    gzip_factor = (
++        len(uncompressed) / len(compressed) if uncompressed and compressed else 0.0
++    )
++    repeated_fraction = repeated_windows / window_count if window_count else 0.0
++    return {
++        "hidden_reasoning_chars": len(reasoning),
++        "uncompressed_bytes": len(uncompressed),
++        "gzip_bytes": len(compressed),
++        "gzip_factor": gzip_factor,
++        "gzip_warning_threshold": REASONING_GZIP_WARNING_THRESHOLD,
++        "gzip_warning": gzip_factor > REASONING_GZIP_WARNING_THRESHOLD,
++        "word_count": len(words),
++        "window_words": window_words,
++        "word_window_count": window_count,
++        "repeated_word_window_count": repeated_windows,
++        "repeated_word_window_fraction": repeated_fraction,
++    }
++
++
+ def log_generation_visible_output(
+     stage: str,
+     text: str,
+@@ -1504,6 +1612,7 @@ class VLLMServer:
+             return
+         cmd = self.build_command()
+         env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.gpu_group}
++        env.setdefault("VLLM_PLUGINS", "olmo3_sink")
+         # vLLM 0.25 defaults to Model Runner V2, which does not yet support the
+         # thinking_token_budget request field used by this inference pipeline.
+         env.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+@@ -1827,6 +1936,10 @@ class ChatScheduler:
+         path: Optional[Path],
+         response: dict[str, Any],
+     ) -> None:
++        if response.get("stage") in {"proof_generation", "proof_refine"}:
++            response["reasoning_repetition"] = measure_reasoning_repetition(
++                str(response.get("text") or "")
++            )
+         if path is None:
+             return
+         try:
+@@ -1842,6 +1955,16 @@ class ChatScheduler:
+                     )
+                     + "\n"
+                 )
++                if response.get("reasoning_repetition") is not None:
++                    file_obj.write(
++                        "reasoning_repetition: "
++                        + json.dumps(
++                            response["reasoning_repetition"],
++                            ensure_ascii=False,
++                            default=str,
++                        )
++                        + "\n"
++                    )
+                 file_obj.write(f"server_url: {response.get('server_url')}\n")
+                 file_obj.write(f"latency_s: {response.get('latency_s')}\n\n")
+                 file_obj.write(str(response.get("text") or ""))
+@@ -1925,6 +2048,20 @@ class ChatScheduler:
+                 progress.stream_finish(stream_id)
+         if response is None:
+             raise RuntimeError(f"LLM call at stage={stage} returned no response")
++        repetition = response.get("reasoning_repetition")
++        if repetition is not None:
++            logging.info(
++                "Reasoning repetition stage=%s detail=%s gzip_factor=%.4f "
++                "repeated_%dword_windows=%.4f (%d/%d) warning=%s",
++                stage,
++                detail or "-",
++                repetition["gzip_factor"],
++                repetition["window_words"],
++                repetition["repeated_word_window_fraction"],
++                repetition["repeated_word_window_count"],
++                repetition["word_window_count"],
++                repetition["gzip_warning"],
++            )
+         if progress is not None:
+             usage = response.get("usage") or {}
+             completion_tokens = usage.get("completion_tokens")
+@@ -2361,6 +2498,11 @@ class ChatScheduler:
+                 "latency_s": time.time() - started,
+             }
+             self._append_llm_call_output(call_log_path, result)
++            if is_fatal_inference_error(exc):
++                raise InferenceServerUnavailable(
++                    f"Inference server failed during stage={stage} at "
++                    f"{self.base_urls[index]}: {exc!r}"
++                ) from exc
+             return result
+ 
+     def _mock_response(
+@@ -2414,6 +2556,7 @@ def make_output(
+         "usage": response.get("usage", {}),
+         "server_url": response.get("server_url"),
+         "latency_s": response.get("latency_s"),
++        "reasoning_repetition": response.get("reasoning_repetition"),
+     }
+     output.update(extra)
+     return output
+@@ -3446,6 +3589,8 @@ async def run_candidate_pipeline(
+             throttle=throttle,
+         )
+         return {"attempt_idx": attempt_idx, "candidate": candidate, "error": None}
++    except InferenceServerUnavailable:
++        raise
+     except Exception as exc:
+         logging.exception("Pipeline failed id=%s attempt=%d", problem_id, attempt_idx)
+         return {"attempt_idx": attempt_idx, "candidate": None, "error": repr(exc)}
+@@ -3510,6 +3655,8 @@ async def run_streaming_candidates(
+                 result = await future
+             except (TimeoutError, asyncio.TimeoutError):
+                 raise
++            except InferenceServerUnavailable:
++                raise
+             except Exception as exc:
+                 logging.exception("Pipeline task failed id=%s", problem_id)
+                 failed_attempts.append({"attempt_idx": None, "error": repr(exc)})
+@@ -3551,6 +3698,9 @@ async def run_streaming_candidates(
+                 cancelled_count,
+                 float(timeout_s or 0.0),
+             )
++    except InferenceServerUnavailable:
++        cancelled_count += await cancel_pending_tasks(pipeline_tasks)
++        raise
+ 
+     return {
+         "candidates": candidates,
+@@ -4619,6 +4769,8 @@ def run_simple_csv(
+                     "error": "",
+                 }
+                 write_debug_row(runtime.logdir / "results.jsonl", result)
++            except InferenceServerUnavailable:
++                raise
+             except Exception as exc:
+                 logging.exception("Failed row=%s id=%s", row_idx, problem_id)
+                 output_row = {
+diff --git a/tests/test_run_opd_prompt_contract.py b/tests/test_run_opd_prompt_contract.py
+index a9aa4a2..96a3add 100644
+--- a/tests/test_run_opd_prompt_contract.py
++++ b/tests/test_run_opd_prompt_contract.py
+@@ -2,10 +2,13 @@ from __future__ import annotations
+ 
+ import hashlib
+ import json
++import os
++import shlex
+ import sys
+ import tempfile
+ import unittest
+ from pathlib import Path
++from unittest.mock import patch
+ 
+ 
+ REPO = Path(__file__).resolve().parents[1]
+@@ -33,6 +36,12 @@ class RunOpdPromptContractTests(unittest.TestCase):
+             max(run.CFG.proof_generation_thinking_budgets),
+             run.CFG.max_new_tokens,
+         )
++        self.assertEqual(
++            run.CFG.thinking_budget_force_text,
++            "\n</think>\n\n<solution>\n"
++            "We were unable to produce a complete proof. However, the strongest "
++            "partial progress is as follows:\n",
++        )
+         self.assertEqual(run.CFG.verifier_max_new_tokens, 126_000)
+         self.assertEqual(run.CFG.meta_max_new_tokens, 126_000)
+         self.assertLess(
+@@ -44,6 +53,33 @@ class RunOpdPromptContractTests(unittest.TestCase):
+             run.CFG.meta_max_new_tokens,
+         )
+ 
++    def test_dflash_can_be_enabled_from_environment(self):
++        with patch.dict(
++            os.environ,
++            {
++                "AIMO_DFLASH_MODEL_PATH": "/draft",
++                "AIMO_DFLASH_NUM_SPECULATIVE_TOKENS": "10",
++            },
++        ):
++            args = shlex.split(run.default_vllm_extra_args())
++
++        config_index = args.index("--speculative-config") + 1
++        self.assertEqual(
++            json.loads(args[config_index]),
++            {
++                "method": "dflash",
++                "model": "/draft",
++                "num_speculative_tokens": 10,
++                "disable_above_context_len": 65536,
++            },
++        )
++
++    def test_dflash_disables_unsupported_min_p(self):
++        with patch.dict(os.environ, {"AIMO_DFLASH_MODEL_PATH": "/draft"}):
++            self.assertIsNone(run.default_min_p())
++        with patch.dict(os.environ, {}, clear=True):
++            self.assertEqual(run.default_min_p(), 0.01)
++
+     def test_imo2025_defaults_run_the_complete_candidate_pipeline(self):
+         self.assertEqual(
+             run.CFG.input_csv,
+@@ -67,6 +103,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
+ 
+         self.assertEqual([message["role"] for message in messages], ["system", "user"])
+         self.assertIn("mathematical proof generator", messages[0]["content"])
++        self.assertIn(
++            "Do not repeat yourself or brute-force a solution.",
++            messages[0]["content"],
++        )
+         self.assertIn("Problem:\nProve the claim.", messages[1]["content"])
+         self.assertIn("<self_evaluation>", messages[1]["content"])
+ 
+@@ -82,6 +122,46 @@ class RunOpdPromptContractTests(unittest.TestCase):
+         self.assertEqual(parsed["proof"], "A complete proof.")
+         self.assertEqual(parsed["self_score"], 1.0)
+ 
++    def test_reasoning_repetition_metrics_use_hidden_reasoning_only(self):
++        words = [f"word{index}" for index in range(32)] * 3
++        text = (
++            "<think>"
++            + " ".join(words)
++            + "</think><solution>Visible output is excluded.</solution>"
++        )
++
++        metrics = run.measure_reasoning_repetition(text)
++
++        self.assertEqual(metrics["word_count"], 96)
++        self.assertEqual(metrics["window_words"], 32)
++        self.assertEqual(metrics["word_window_count"], 65)
++        self.assertEqual(metrics["repeated_word_window_count"], 33)
++        self.assertAlmostEqual(metrics["repeated_word_window_fraction"], 33 / 65)
++        self.assertGreater(metrics["gzip_factor"], 1.0)
++
++    def test_reasoning_repetition_supports_orphan_think_close(self):
++        metrics = run.measure_reasoning_repetition(
++            "private hidden work</think><solution>Visible.</solution>"
++        )
++
++        self.assertEqual(metrics["word_count"], 3)
++        self.assertEqual(metrics["word_window_count"], 0)
++        self.assertEqual(metrics["repeated_word_window_fraction"], 0.0)
++
++    def test_proof_output_carries_reasoning_repetition_metrics(self):
++        response = {
++            "stage": "proof_generation",
++            "success": True,
++            "text": "<think>private work</think><solution>Proof.</solution>",
++        }
++        response["reasoning_repetition"] = run.measure_reasoning_repetition(
++            response["text"]
++        )
++
++        output = run.make_output("proof_generation", response, {})
++
++        self.assertEqual(output["reasoning_repetition"]["word_count"], 2)
++
+     def test_verifier_requires_complete_xml_contract(self):
+         valid = run.parse_verifier_response(
+             "<evaluation>A fatal gap exists.</evaluation>"
+diff --git a/vllm_patches/README.md b/vllm_patches/README.md
+index 7cea19d..c031616 100644
+--- a/vllm_patches/README.md
++++ b/vllm_patches/README.md
+@@ -1,26 +1,37 @@
+ # OLMo3Sink vLLM Plugin
+ 
+-This directory provides the target-model support required to serve Proof Pilot
+-checkpoints whose `config.json` declares `Olmo3SinkForCausalLM`.
+-
+-The plugin adds only the target model. It does not install or register a DFlash
+-draft model and does not enable speculative decoding.
++This directory provides the target and DFlash draft model support required to
++serve Proof Pilot OLMo3Sink checkpoints with vLLM.
+ 
+ ## Behavior
+ 
+ - Registers `Olmo3SinkForCausalLM` through vLLM's `vllm.general_plugins`
+   entry-point group. vLLM loads this plugin in the API, engine-core, and worker
+   processes.
++- Registers `Olmo3SinkDFlashForCausalLM` and redirects the existing
++  `DFlashDraftModel` checkpoint architecture to it. This replaces vLLM's stock
++  Qwen3 draft with the trained OLMo3 post-norm architecture.
+ - Passes each layer's trained per-query-head sink logits to vLLM's sink-aware
+   attention backend.
+ - Preserves OLMo3 hybrid sliding-window attention and applies YaRN only to
+   full-attention layers.
++- Exposes the target hidden states selected by
++  `dflash_config.target_layer_ids` through vLLM's Eagle3 interface.
++- Preserves the draft's full-projection Q/K RMSNorm, learned `mask_embed`,
++  512-token all-layer sliding attention, post-attention/post-MLP norms, and
++  native vLLM DFlash context-KV materialization.
++- Shares the target embedding and LM head because the Proof Pilot draft
++  checkpoint intentionally contains neither tensor.
+ - Shards the checkpoint's full sink vector by tensor-parallel rank.
+ - Fails model loading when a local layer is missing its sink tensor or a sink
+   tensor has the wrong number of heads.
++- Adds `disable_above_context_len` to `--speculative-config` on vLLM `0.25.1`.
++  When the largest request in a batch reaches the threshold, the V1 runner skips
++  the drafter, clears pending draft tokens, and continues target-only decoding.
+ 
+-The implementation targets vLLM `0.23.1rc1.dev699` through `0.25.1`. The CUDA
+-attention backend must support sinks. On H200, vLLM's FlashAttention 3 backend
++The target implementation supports vLLM `0.23.1rc1.dev699` through `0.25.1`.
++The DFlash implementation and context cutoff target vLLM `0.25.1` V1. The CUDA
++attention backend must support sinks; on H200, vLLM's FlashAttention 3 backend
+ provides this support.
+ 
+ ## Install
+@@ -33,6 +44,13 @@ bash vllm_patches/install.sh /path/to/venv
+ 
+ The script installs the local plugin without resolving dependencies, then
+ starts a fresh Python process to verify model registration and importability.
++On vLLM `0.25.1`, it applies and verifies the context-cutoff patch before
++installing the plugin. The patcher is idempotent and keeps one
++`*.pre_dflash_context_cutoff` backup beside each modified vLLM source file.
++
++Set `AIMO_VLLM_APPLY_DFLASH_CONTEXT_CUTOFF=0` to install only the model plugin.
++Other vLLM versions keep the plugin behavior and skip this versioned source
++patch.
+ 
+ To install with an explicit interpreter instead:
+ 
+@@ -57,3 +75,55 @@ VLLM_PLUGINS=olmo3_sink vllm serve /path/to/opd-32b-deploy \
+ Do not rename the checkpoint architecture to `Olmo3ForCausalLM`. The stock
+ model has no sink parameters and would silently change every attention
+ distribution.
++
++## OLMo3Sink DFlash
++
++The trained draft has block size 11: one anchor plus 10 mask-token proposals.
++Use `num_speculative_tokens=10` to match that checkpoint:
++
++```bash
++VLLM_USE_V2_MODEL_RUNNER=0 \
++VLLM_PLUGINS=olmo3_sink \
++vllm serve /path/to/opd-model \
++  --trust-remote-code \
++  --speculative-config '{
++    "method": "dflash",
++    "model": "/path/to/dflash-32b-draft-v2test-phaseL",
++    "num_speculative_tokens": 10,
++    "disable_above_context_len": 65536
++  }'
++```
++
++The draft checkpoint can retain `"architectures": ["DFlashDraftModel"]`.
++When this plugin is active, the installer verifies that name resolves to
++`Olmo3SinkDFlashForCausalLM`, not vLLM's generic Qwen3 implementation.
++
++## DFlash context cutoff
++
++This repository starts vLLM with `VLLM_USE_V2_MODEL_RUNNER=0`, so the patch is
++deliberately limited to the V1 runner. Configure a 64K cutoff as follows:
++
++```bash
++VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/opd-model \
++  --speculative-config '{
++    "method": "dflash",
++    "model": "/path/to/dflash-model",
++    "num_speculative_tokens": 10,
++    "disable_above_context_len": 65536
++  }'
++```
++
++The comparison is inclusive: a batch with maximum context length `65536` or
++larger runs target-only. Shorter requests in the same batch also stop drafting
++until they are scheduled in a batch whose maximum context is below the cutoff.
++The scheduler sets the proposal width to zero, so this remains coordinated when
++`run.py` enables `--async-scheduling`. The worker retains vLLM's native K-wide
++zero buffer while clearing valid drafts; that buffer is required when a mixed
++batch moves from target-only decoding back to DFlash. This is a deterministic
++context policy, not a live acceptance-rate controller.
++
++To apply only this patch to an existing vLLM `0.25.1` environment:
++
++```bash
++python vllm_patches/patch_dflash_context_cutoff.py /path/to/venv
++```
+diff --git a/vllm_patches/install.sh b/vllm_patches/install.sh
+index 99351e9..b759c3e 100755
+--- a/vllm_patches/install.sh
++++ b/vllm_patches/install.sh
+@@ -15,6 +15,14 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
+   exit 1
+ fi
+ 
++VLLM_VERSION="$($PYTHON_BIN -c 'import vllm; print(vllm.__version__)')"
++APPLY_CONTEXT_CUTOFF="${AIMO_VLLM_APPLY_DFLASH_CONTEXT_CUTOFF:-1}"
++if [[ "$APPLY_CONTEXT_CUTOFF" == "1" && "$VLLM_VERSION" == "0.25.1" ]]; then
++  "$PYTHON_BIN" "$ROOT/patch_dflash_context_cutoff.py" "$PYTHON_BIN"
++elif [[ "$APPLY_CONTEXT_CUTOFF" == "1" ]]; then
++  echo "[vllm-patch] skipping V1 DFlash context cutoff for vLLM $VLLM_VERSION"
++fi
++
+ BUILD_ROOT="$(mktemp -d)"
+ trap 'rm -rf "$BUILD_ROOT"' EXIT
+ cp "$ROOT/pyproject.toml" "$ROOT/README.md" "$BUILD_ROOT/"
+@@ -27,15 +35,57 @@ cp -R "$ROOT/src" "$BUILD_ROOT/src"
+   "$BUILD_ROOT"
+ 
+ VLLM_PLUGINS=olmo3_sink "$PYTHON_BIN" - <<'PY'
++import os
++
+ from vllm import ModelRegistry
++from vllm.config.speculative import SpeculativeConfig
+ from vllm.plugins import load_general_plugins
+ 
++if (
++    __import__("vllm").__version__ == "0.25.1"
++    and os.environ.get("AIMO_VLLM_APPLY_DFLASH_CONTEXT_CUTOFF", "1") == "1"
++):
++    from types import SimpleNamespace
++
++    from vllm.v1.core.sched.scheduler import (
++        _batch_reaches_speculation_context_cutoff,
++    )
++
++    if "disable_above_context_len" not in SpeculativeConfig.__dataclass_fields__:
++        raise RuntimeError("DFlash context cutoff field was not installed")
++    requests = {"req": SimpleNamespace(num_computed_tokens=65534)}
++    assert not _batch_reaches_speculation_context_cutoff(
++        requests,
++        {"req": 1},
++        65536,
++    )
++    assert _batch_reaches_speculation_context_cutoff(
++        requests,
++        {"req": 2},
++        65536,
++    )
++
+ load_general_plugins()
+-architecture = "Olmo3SinkForCausalLM"
+-if architecture not in ModelRegistry.get_supported_archs():
+-    raise RuntimeError(f"vLLM plugin did not register {architecture}")
+-model_class = ModelRegistry._try_load_model_cls(architecture)
+-if model_class is None or model_class.__name__ != architecture:
+-    raise RuntimeError(f"vLLM could not import {architecture}")
+-print(f"[vllm-patch] registered {model_class.__module__}:{model_class.__name__}")
++expected_architectures = {
++    "Olmo3SinkForCausalLM": "Olmo3SinkForCausalLM",
++}
++if __import__("vllm").__version__ == "0.25.1":
++    expected_architectures.update(
++        {
++            "Olmo3SinkDFlashForCausalLM": "Olmo3SinkDFlashForCausalLM",
++            "DFlashDraftModel": "Olmo3SinkDFlashForCausalLM",
++        }
++    )
++
++for architecture, expected_class_name in expected_architectures.items():
++    if architecture not in ModelRegistry.get_supported_archs():
++        raise RuntimeError(f"vLLM plugin did not register {architecture}")
++    model_class = ModelRegistry._try_load_model_cls(architecture)
++    if model_class is None or model_class.__name__ != expected_class_name:
++        raise RuntimeError(
++            f"vLLM resolved {architecture} to {model_class}, expected "
++            f"{expected_class_name}"
++        )
++    print(f"[vllm-patch] registered {architecture} -> "
++          f"{model_class.__module__}:{model_class.__name__}")
+ PY
+diff --git a/vllm_patches/pyproject.toml b/vllm_patches/pyproject.toml
+index 4a44695..ae04d25 100644
+--- a/vllm_patches/pyproject.toml
++++ b/vllm_patches/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "aimo-olmo3-sink-vllm"
+-version = "0.1.0"
++version = "0.2.0"
+ description = "Out-of-tree vLLM model plugin for Proof Pilot OLMo3Sink checkpoints"
+ readme = "README.md"
+ requires-python = ">=3.10"
+diff --git a/vllm_patches/src/olmo3_sink_vllm/__init__.py b/vllm_patches/src/olmo3_sink_vllm/__init__.py
+index f17b740..a4483ca 100644
+--- a/vllm_patches/src/olmo3_sink_vllm/__init__.py
++++ b/vllm_patches/src/olmo3_sink_vllm/__init__.py
+@@ -17,6 +17,16 @@ def register() -> None:
+         "Olmo3SinkForCausalLM",
+         "olmo3_sink_vllm.model:Olmo3SinkForCausalLM",
+     )
++    ModelRegistry.register_model(
++        "Olmo3SinkDFlashForCausalLM",
++        "olmo3_sink_vllm.dflash:Olmo3SinkDFlashForCausalLM",
++    )
++    # Existing Proof Pilot drafts use this generic architecture name. Replace
++    # vLLM's Qwen3 implementation with the trained OLMo3 post-norm/sink model.
++    ModelRegistry.register_model(
++        "DFlashDraftModel",
++        "olmo3_sink_vllm.dflash:Olmo3SinkDFlashForCausalLM",
++    )
+     _REGISTERED = True
+ 
+ 
+diff --git a/vllm_patches/src/olmo3_sink_vllm/model.py b/vllm_patches/src/olmo3_sink_vllm/model.py
+index d433c98..3567ee2 100644
+--- a/vllm_patches/src/olmo3_sink_vllm/model.py
++++ b/vllm_patches/src/olmo3_sink_vllm/model.py
+@@ -32,7 +32,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
+     VocabParallelEmbedding,
+ )
+ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
++from vllm.model_executor.models.interfaces import (
++    EagleModelMixin,
++    SupportsEagle3,
++    SupportsLoRA,
++    SupportsPP,
++)
+ from vllm.model_executor.models.utils import (
+     AutoWeightsLoader,
+     extract_layer_index,
+@@ -305,7 +310,7 @@ class Olmo3SinkDecoderLayer(nn.Module):
+         "inputs_embeds": 0,
+     }
+ )
+-class Olmo3SinkModel(nn.Module):
++class Olmo3SinkModel(nn.Module, EagleModelMixin):
+     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+         super().__init__()
+         self.config = vllm_config.model_config.hf_config
+@@ -351,12 +356,30 @@ class Olmo3SinkModel(nn.Module):
+                 raise ValueError("pipeline rank requires intermediate_tensors")
+             hidden_states = intermediate_tensors["hidden_states"]
+ 
+-        for layer in islice(self.layers, self.start_layer, self.end_layer):
++        aux_hidden_states = self._maybe_add_hidden_state(
++            [],
++            self.start_layer,
++            hidden_states,
++            None,
++        )
++        for layer_idx, layer in enumerate(
++            islice(self.layers, self.start_layer, self.end_layer),
++            start=self.start_layer,
++        ):
+             hidden_states = layer(positions, hidden_states)
++            self._maybe_add_hidden_state(
++                aux_hidden_states,
++                layer_idx + 1,
++                hidden_states,
++                None,
++            )
+ 
+         if not get_pp_group().is_last_rank:
+             return IntermediateTensors({"hidden_states": hidden_states})
+-        return self.norm(hidden_states)
++        hidden_states = self.norm(hidden_states)
++        if aux_hidden_states:
++            return hidden_states, aux_hidden_states
++        return hidden_states
+ 
+     def load_weights(
+         self,
+@@ -399,7 +422,12 @@ class Olmo3SinkModel(nn.Module):
+         return loaded_params
+ 
+ 
+-class Olmo3SinkForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
++class Olmo3SinkForCausalLM(
++    nn.Module,
++    SupportsPP,
++    SupportsLoRA,
++    SupportsEagle3,
++):
+     packed_modules_mapping = {
+         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+         "gate_up_proj": ["gate_proj", "up_proj"],
