@@ -316,9 +316,9 @@ class Olmo3SinkModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda layer_prefix: Olmo3SinkDecoderLayer(
+            lambda prefix: Olmo3SinkDecoderLayer(
                 vllm_config=vllm_config,
-                prefix=layer_prefix,
+                prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
         )
