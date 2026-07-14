@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -159,8 +160,20 @@ def load_config(path: Path) -> dict[str, Any]:
         )
     if not 0 < search["early_stop_threshold"] <= 1:
         raise ValueError("search.early_stop_threshold must be in (0, 1]")
-    if search["temperature"] != 1.0 or search["top_p"] != 0.95:
-        raise ValueError("search sampling must be temperature=1.0 and top_p=0.95")
+    temperature = search["temperature"]
+    if (
+        type(temperature) not in {int, float}
+        or not math.isfinite(temperature)
+        or temperature < 0
+    ):
+        raise ValueError("search.temperature must be a finite non-negative number")
+    top_p = search["top_p"]
+    if (
+        type(top_p) not in {int, float}
+        or not math.isfinite(top_p)
+        or not 0 < top_p <= 1
+    ):
+        raise ValueError("search.top_p must be a finite number in (0, 1]")
     if type(search["seed"]) is not int or search["seed"] < 0:
         raise ValueError("search.seed must be a non-negative integer")
 

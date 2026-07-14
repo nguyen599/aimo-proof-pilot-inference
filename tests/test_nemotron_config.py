@@ -31,6 +31,8 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(search["concurrency"], 96)
         self.assertEqual(search["request_timeout_seconds"], 86400)
         self.assertEqual(search["max_completion_tokens"], 128000)
+        self.assertEqual(search["temperature"], 1.0)
+        self.assertEqual(search["top_p"], 0.95)
         self.assertEqual(search["solution_continuation_tokens"], 16384)
         self.assertEqual(search["verifier_continuation_tokens"], 16384)
         self.assertEqual(search["min_valid_verifications"], 4)
@@ -122,6 +124,70 @@ class NemotronConfigTests(unittest.TestCase):
         self.assertEqual(config["search"]["solution_continuation_tokens"], 8192)
         self.assertEqual(config["search"]["verifier_continuation_tokens"], 4096)
         self.assertEqual(config["search"]["min_valid_verifications"], 5)
+
+    def test_search_temperature_is_configurable(self):
+        for temperature in (0, 0.6, 1.5):
+            with (
+                self.subTest(temperature=temperature),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "config.yaml"
+                path.write_text(
+                    self.path.read_text().replace(
+                        "temperature: 1.0", f"temperature: {temperature}", 1
+                    )
+                )
+                config = load_config(path)
+                self.assertEqual(config["search"]["temperature"], temperature)
+
+    def test_search_temperature_rejects_invalid_values(self):
+        invalid_values = ("-0.1", ".nan", "invalid")
+        for temperature in invalid_values:
+            with (
+                self.subTest(temperature=temperature),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "invalid.yaml"
+                path.write_text(
+                    self.path.read_text().replace(
+                        "temperature: 1.0", f"temperature: {temperature}", 1
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "search.temperature must be"
+                ):
+                    load_config(path)
+
+    def test_search_top_p_is_configurable(self):
+        for top_p in (0.5, 0.95, 1):
+            with (
+                self.subTest(top_p=top_p),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "config.yaml"
+                path.write_text(
+                    self.path.read_text().replace(
+                        "top_p: 0.95", f"top_p: {top_p}", 1
+                    )
+                )
+                config = load_config(path)
+                self.assertEqual(config["search"]["top_p"], top_p)
+
+    def test_search_top_p_rejects_invalid_values(self):
+        invalid_values = ("0", "-0.1", "1.1", ".nan", "invalid")
+        for top_p in invalid_values:
+            with (
+                self.subTest(top_p=top_p),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "invalid.yaml"
+                path.write_text(
+                    self.path.read_text().replace(
+                        "top_p: 0.95", f"top_p: {top_p}", 1
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "search.top_p must be"):
+                    load_config(path)
 
     def test_search_shape_validation_rejects_inconsistent_profiles(self):
         replacements = (

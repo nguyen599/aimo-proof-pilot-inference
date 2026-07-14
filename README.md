@@ -33,6 +33,28 @@ is the source of truth. Its current defaults are:
 Do not infer production settings from old run directories or historical test
 scripts. Read the YAML before every run.
 
+### Configure generation length and sampling
+
+Set all three controls in the `search` section of
+`evaluation/configs/nemotron_cascade2.yaml`:
+
+```yaml
+search:
+  temperature: 0.6
+  top_p: 0.9
+  max_completion_tokens: 65536
+```
+
+`temperature` accepts any finite non-negative number; use `0` for greedy
+sampling. `top_p` accepts any finite number in `(0, 1]`.
+`max_completion_tokens` must be a positive integer and controls the first
+output segment for every local prover, refiner, and verifier request.
+
+These settings do not change `server.context_length`. A configured solution or
+verifier continuation may extend a truncated local response beyond the first
+segment, and `grader.max_completion_tokens` separately controls the final
+OpenAI grader.
+
 ## 1. Prerequisites
 
 You need all of the following before starting:

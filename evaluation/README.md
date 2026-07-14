@@ -15,7 +15,9 @@ inference policy remains:
   proofs, four lowest-rated analyses producing one refinement each, and four rounds;
 - asynchronous per-candidate verification under a shared cluster-wide concurrency
   of 96, with ranking and subsequent rounds waiting at the current-round barrier;
-- a configurable 128,000-token first segment plus one configurable 16,384-token solution continuation after prover/refiner length truncation;
+- configurable sampling temperature and top-p (defaults 1.0 and 0.95);
+- a configurable 128,000-token first segment plus one configurable 16,384-token
+  solution continuation after prover/refiner length truncation;
 - one separately configurable 16,384-token verifier continuation, with malformed
   verifier outputs logged and skipped and at least four valid votes required;
 - ycchen's byte-identical deployed prover, verifier, and refiner prompts, with hidden thinking excluded from downstream prompts; and
