@@ -23,7 +23,7 @@ is the source of truth. Its current defaults are:
 | Server context | 262,144 tokens |
 | Server concurrency | 64 running requests per DP replica |
 | Search concurrency | 96 requests cluster-wide |
-| Search policy | 32 proofs, 16 verifications per proof, top 8, 4 refinements, up to 4 rounds |
+| Search policy | 32 proofs, 16 verifications per proof, top 8, 4 refinements, up to 8 rounds |
 | Sampling | temperature 1.0, top-p 0.95 |
 | Local first segment | 128,000 tokens for prover, refiner, and verifier |
 | Solution continuation | at most one additional 16,384-token forced solution continuation |
@@ -40,9 +40,9 @@ Set all three controls in the `search` section of
 
 ```yaml
 search:
-  temperature: 0.6
-  top_p: 0.9
-  max_completion_tokens: 65536
+  temperature: 1.0
+  top_p: 0.95
+  max_completion_tokens: 128000
 ```
 
 `temperature` accepts any finite non-negative number; use `0` for greedy
