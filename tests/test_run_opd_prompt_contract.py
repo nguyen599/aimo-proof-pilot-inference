@@ -41,6 +41,24 @@ class RunOpdPromptContractTests(unittest.TestCase):
             run.CFG.meta_max_new_tokens,
         )
 
+    def test_imo2025_defaults_run_the_complete_candidate_pipeline(self):
+        self.assertEqual(
+            run.CFG.input_csv,
+            REPO / "evaluation" / "data" / "imo_2025.parquet",
+        )
+        self.assertEqual(run.CFG.pipelines_per_problem, 14)
+        self.assertEqual(run.CFG.proof_only_candidate_count, 0)
+        self.assertFalse(run.CFG.skip_self_score_zero)
+        self.assertFalse(run.CFG.stop_on_strict_pass)
+        self.assertFalse(run.CFG.verification_early_stop)
+        self.assertEqual(run.CFG.verify_n, 4)
+        self.assertEqual(run.CFG.meta_n, 1)
+        self.assertEqual(run.CFG.meta_policy, "all-reviews")
+        self.assertEqual(run.CFG.refine_rounds, 1)
+        self.assertEqual(run.CFG.refine_review_n, 2)
+        self.assertLess(run.CFG.refine_review_n, run.CFG.verify_n)
+        self.assertGreaterEqual(run.CFG.problem_timeout_seconds, 86_400)
+
     def test_prover_uses_trained_system_user_prompt(self):
         messages = run.build_opd_proof_generation_prompt("Prove the claim.")
 

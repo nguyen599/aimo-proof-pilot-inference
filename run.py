@@ -39,22 +39,33 @@ os.environ["VLLM_LOGGING_LEVEL"] = "INFO"
 # refinement, and final candidate selection.
 DEFAULT_API_KEY = "vllm-local"
 DEFAULT_SERVED_MODEL_NAME = "proof-model"
-DEFAULT_PROBLEM_TIMEOUT_SECONDS = 13800
-DEFAULT_SELECTION_RESERVE_SECONDS = 900
+DEFAULT_PROBLEM_TIMEOUT_SECONDS = 86_400
+DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
+REPO_ROOT = Path(__file__).resolve().parent
 
 DEFAULT_VLLM_EXTRA_ARGS = "--generation-config vllm --kv-cache-dtype fp8 --max_num_batched_tokens 16384 --uvicorn-log-level warning"
 
 
 class CFG:
-    model_path = Path(
-        "/kaggle/input/models/nguyennguyen599/allenai-olmo-3.1-32b-think-aimo-proof-pilot/transformers/sft-v2-ckpt-1000-nvfp4-w4a16/1"
-    )
+    model_path = Path(os.environ.get("AIMO_MODEL_PATH", "/model"))
     input_csv = Path(
-        "/kaggle/input/competitions/ai-mathematical-olympiad-proof-pilot/test.csv"
+        os.environ.get(
+            "AIMO_INPUT_PATH",
+            str(REPO_ROOT / "evaluation" / "data" / "imo_2025.parquet"),
+        )
     )
-
-    output_csv = Path("/kaggle/working/submission.csv")
-    logdir = Path("/kaggle/working/proof_logs")
+    output_csv = Path(
+        os.environ.get(
+            "AIMO_OUTPUT_PATH",
+            str(REPO_ROOT / "outputs" / "imo_2025_submission.csv"),
+        )
+    )
+    logdir = Path(
+        os.environ.get(
+            "AIMO_LOGDIR",
+            str(REPO_ROOT / "outputs" / "imo_2025_logs"),
+        )
+    )
 
     # The checkpoint exposes a 256K context window, but training sequences were
     # capped at 128K. Keep each generated trajectory below that training length
@@ -99,12 +110,12 @@ class CFG:
 
     temperature = 0.7
     proof_generation_temperatures = [
-        0.7,
-        0.7,
-        0.6,
-        0.6,
-        0.7,
-        0.7,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
         1.0,
         1.0,
         0.7,
@@ -134,15 +145,17 @@ class CFG:
     # the context/output limit.
     # OPD-V2 was trained on the full prover XML contract, not a proof-only role.
     proof_only_candidate_count = 0
-    skip_self_score_zero = True
+    skip_self_score_zero = False
+    stop_on_strict_pass = False
+    verification_early_stop = False
     wait_for_all_generations_before_verify = False
     verify_candidate_limit_while_generating = 2
     verify_request_limit_while_generating = 8
     verify_n = 4
-    meta_n = 0
+    meta_n = 1
     meta_policy = "all-reviews"  # low-only, all-reviews
     strict_pass_meta = True
-    refine_rounds = 0
+    refine_rounds = 1
     refine_review_n = 2
     min_valid_low = 1
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
@@ -250,10 +263,10 @@ _VISIBLE_OUTPUT_MARKERS = (
 _DEFAULT_STAGE_TOKEN_LIMITS: dict[str, int] = {}
 MAX_SUBMISSION_ANSWER_CHARS = 20_000
 DEFAULT_FALLBACK_ANSWER = "0"
-MAX_FORWARDED_EVALUATION_CHARS = 12_000
-MAX_FORWARDED_META_ANALYSIS_CHARS = 8_000
+MAX_FORWARDED_EVALUATION_CHARS = 32_000
+MAX_FORWARDED_META_ANALYSIS_CHARS = 24_000
 REPETITION_GUARD_RECENT_TOKENS = 500
-REPETITION_GUARD_DUPLICATE_LINE_THRESHOLD = 8
+REPETITION_GUARD_DUPLICATE_LINE_THRESHOLD = 20
 _CLIPPED_TEXT_MARKER = "\n\n[... clipped middle reasoning before forwarding ...]\n\n"
 
 
@@ -292,6 +305,8 @@ class PipelineConfig:
     proof_generation_temperatures: list[float]
     proof_only_candidate_count: int
     skip_self_score_zero: bool
+    stop_on_strict_pass: bool
+    verification_early_stop: bool
     wait_for_all_generations_before_verify: bool
     thinking_budget_enabled: bool
     proof_generation_thinking_budgets: list[int]
@@ -2879,6 +2894,8 @@ async def run_verification_round(
         )
 
     def enough_validated_critiques() -> bool:
+        if not cfg.verification_early_stop:
+            return False
         aggregation = current_aggregation()
         return (
             round_idx < cfg.refine_rounds
@@ -3512,7 +3529,7 @@ async def run_streaming_candidates(
                     len(candidates),
                     pipelines_per_problem,
                 )
-            if candidate.get("strict_pass"):
+            if candidate.get("strict_pass") and cfg.stop_on_strict_pass:
                 strict_pass_candidate = candidate
                 cancelled_count += await cancel_pending_tasks(pipeline_tasks)
                 if progress is not None:
@@ -4124,6 +4141,8 @@ class ProofRuntime:
         pipelines_per_problem: int,
         proof_only_candidate_count: int,
         skip_self_score_zero: bool,
+        stop_on_strict_pass: bool,
+        verification_early_stop: bool,
         wait_for_all_generations_before_verify: bool,
         verify_candidate_limit_while_generating: int,
         verify_request_limit_while_generating: int,
@@ -4237,6 +4256,8 @@ class ProofRuntime:
             ],
             proof_only_candidate_count=max(0, int(proof_only_candidate_count)),
             skip_self_score_zero=bool(skip_self_score_zero),
+            stop_on_strict_pass=bool(stop_on_strict_pass),
+            verification_early_stop=bool(verification_early_stop),
             wait_for_all_generations_before_verify=bool(
                 wait_for_all_generations_before_verify
             ),
@@ -4320,10 +4341,13 @@ class ProofRuntime:
             self.pipelines_per_problem,
         )
         progress.log(
-            "status=start candidates=%d verify_n=%d refine_rounds=%d question_chars=%d",
+            "status=start candidates=%d verify_n=%d meta_n=%d refine_rounds=%d "
+            "stop_on_strict_pass=%s question_chars=%d",
             self.pipelines_per_problem,
             self.pipeline_config.verify_n,
+            self.pipeline_config.meta_n,
             self.pipeline_config.refine_rounds,
+            self.pipeline_config.stop_on_strict_pass,
             len(question),
         )
         attempt_budget = max(
@@ -4624,6 +4648,8 @@ def run(cfg: type[CFG] = CFG) -> None:
         pipelines_per_problem=cfg.pipelines_per_problem,
         proof_only_candidate_count=cfg.proof_only_candidate_count,
         skip_self_score_zero=cfg.skip_self_score_zero,
+        stop_on_strict_pass=cfg.stop_on_strict_pass,
+        verification_early_stop=cfg.verification_early_stop,
         wait_for_all_generations_before_verify=cfg.wait_for_all_generations_before_verify,
         verify_candidate_limit_while_generating=cfg.verify_candidate_limit_while_generating,
         verify_request_limit_while_generating=cfg.verify_request_limit_while_generating,
