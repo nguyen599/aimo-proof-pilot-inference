@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,6 +26,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
 
     def test_long_context_defaults_stay_near_training_length(self):
         self.assertEqual(run.CFG.num_ctx, 262_144)
+        self.assertIn("--quantization fp8", run.CFG.vllm_extra_args)
         self.assertLessEqual(run.CFG.max_new_tokens, 131_072)
         self.assertGreaterEqual(min(run.CFG.proof_generation_thinking_budgets), 120_000)
         self.assertLess(
@@ -140,6 +143,38 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertFalse(hasattr(run, "build_deepseek_gold_proof_evaluation_prompt"))
         self.assertFalse(hasattr(run, "build_proof_architect_prompt"))
         self.assertFalse(hasattr(run, "build_sublemma_prover_prompt"))
+
+    def test_grader_input_uses_full_proofs_and_omits_failed_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "grader_input" / "records.jsonl"
+            full_proof = "A" * (run.MAX_SUBMISSION_ANSWER_CHARS + 100)
+            run.write_grader_input_records(
+                path,
+                [
+                    {
+                        "id": 1,
+                        "answer": full_proof[: run.MAX_SUBMISSION_ANSWER_CHARS],
+                        "prediction": full_proof,
+                        "selected_pipeline": 3,
+                        "final_score": 0.75,
+                        "final_status": "refined",
+                        "error": "",
+                    },
+                    {
+                        "id": 2,
+                        "prediction": "Fallback proof",
+                        "final_status": "all_attempts_failed",
+                        "error": "",
+                    },
+                ],
+            )
+
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["problem_id"], "1")
+            self.assertEqual(records[0]["final_proof"], full_proof)
+            self.assertEqual(records[0]["selected_pipeline"], 3)
+            self.assertFalse(path.with_suffix(".jsonl.tmp").exists())
 
 
 if __name__ == "__main__":

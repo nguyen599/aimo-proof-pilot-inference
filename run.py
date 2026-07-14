@@ -44,7 +44,7 @@ DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
 REPO_ROOT = Path(__file__).resolve().parent
 
 DEFAULT_VLLM_EXTRA_ARGS = (
-    "--generation-config vllm --kv-cache-dtype fp8 --block-size 256 "
+    "--generation-config vllm --quantization fp8 --kv-cache-dtype fp8 --block-size 256 "
     "--max_num_batched_tokens 16384 --uvicorn-log-level warning"
 )
 
@@ -3714,6 +3714,34 @@ def write_debug_row(path: Path, row: dict[str, Any]) -> None:
         file_obj.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
+def write_grader_input_records(
+    path: Path,
+    rows: list[dict[str, Any]],
+) -> None:
+    """Write selected proofs in the ordering required by the grading harness."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as output:
+        for row in rows:
+            proof = str(row.get("prediction") or "").strip()
+            if (
+                row.get("error")
+                or row.get("final_status") in {"error", "all_attempts_failed"}
+                or not proof
+            ):
+                continue
+            record = {
+                "problem_id": str(row.get("id")),
+                "final_proof": proof,
+                "selected_pipeline": row.get("selected_pipeline"),
+                "final_score": row.get("final_score"),
+                "final_status": row.get("final_status"),
+                "source": "run.py",
+            }
+            output.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    os.replace(temporary, path)
+
+
 def format_submission_answer(value: Any) -> str:
     answer = str(value or "").strip()
     if not answer:
@@ -4547,6 +4575,8 @@ def run_simple_csv(
     df, problem_column, id_column = load_simple_input(input_csv)
     if max_rows > 0:
         df = df.head(max_rows)
+    grader_records_path = runtime.logdir / "grader_input" / "records.jsonl"
+    write_grader_input_records(grader_records_path, [])
     runtime.ensure_ready()
     output_rows: dict[int, dict[str, Any]] = {}
     semaphore = asyncio.Semaphore(max(1, max_concurrent_problems))
@@ -4554,6 +4584,10 @@ def run_simple_csv(
     def persist_outputs() -> None:
         rows = [output_rows[index] for index in sorted(output_rows)]
         write_simple_output(output_csv, rows)
+        write_grader_input_records(
+            grader_records_path,
+            rows,
+        )
 
     async def process_row(
         row_position: int, row_idx: int, row: pd.Series
