@@ -84,6 +84,25 @@ This smoke validates inter-node controller communication, not vLLM GPU worker
 communication. The production design starts one independent local vLLM server
 per node (`TP=2, DP=4`); vLLM does not form a cross-node tensor-parallel group.
 
+## Validated NII result
+
+The setup was validated on all eight H200 nodes on 2026-07-16 while the existing
+SFT job remained active:
+
+- vLLM 0.25.1 and all three OLMo3Sink/DFlash plugin architectures imported on
+  every node from the shared venv.
+- `nguyen599/olmo3-opd-sft-425` downloaded to `/tmp/models`, and all 14
+  safetensor shards passed an open/read validation.
+- Controller smoke `nii-vllm0251-20260715T205900Z` completed on ranks 0-7 with
+  `world_size=8`; rank 0 received candidate IDs `[0, 8]` and rank 7 received
+  `[7]`.
+- GPU memory stayed in the pre-existing training range (about 102.7 GiB per
+  H200). No vLLM engine or model weights were loaded by the smoke.
+
+The vLLM patch installer intentionally preserves the venv `bin/python` symlink.
+Resolving that symlink to `/usr/bin/python3` would bypass the venv and patch the
+read-only image's older vLLM installation instead.
+
 ## Production launch after training
 
 After confirming that the training processes have exited and all GPUs are free,
