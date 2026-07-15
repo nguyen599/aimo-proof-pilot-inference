@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -14,6 +17,24 @@ SPEC.loader.exec_module(patch_module)
 
 
 class DFlashContextCutoffPatchTests(unittest.TestCase):
+    def test_resolve_vllm_root_preserves_venv_python_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            venv = Path(temporary) / "venv"
+            interpreter = venv / "bin" / "python"
+            interpreter.parent.mkdir(parents=True)
+            interpreter.symlink_to(sys.executable)
+
+            expected = (Path(temporary) / "site-packages" / "vllm", "0.25.1")
+            with mock.patch.object(
+                patch_module,
+                "_installed_vllm",
+                return_value=expected,
+            ) as locate:
+                result = patch_module.resolve_vllm_root(interpreter)
+
+            self.assertEqual(result, expected)
+            locate.assert_called_once_with(interpreter.absolute())
+
     def test_fresh_runner_patch_preserves_native_k_wide_zero_buffer(self) -> None:
         source = (
             patch_module.RUNNER_GATE_ORIGINAL

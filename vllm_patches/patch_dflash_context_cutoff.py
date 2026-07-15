@@ -252,7 +252,9 @@ def _version_from_root(root: Path) -> str | None:
 
 
 def resolve_vllm_root(target: Path) -> tuple[Path, str | None]:
-    target = target.expanduser().resolve()
+    # Keep a venv's bin/python path intact. Resolving that symlink can turn it
+    # into the base interpreter and silently import vLLM from the system prefix.
+    target = target.expanduser().absolute()
     if (target / CONFIG_PATH).is_file():
         return target, _version_from_root(target)
     if target.is_dir():
