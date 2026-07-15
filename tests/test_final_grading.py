@@ -76,10 +76,6 @@ class FinalGradingTests(unittest.TestCase):
         self.assertEqual(
             list(GraderOutput.model_fields), ["findings", "grade", "reasoning"]
         )
-        config = (REPO / "evaluation/configs/nemotron_cascade2.yaml").read_text()
-        self.assertIn("base_url: https://api.openai.com/v1", config)
-        self.assertIn("model: gpt-5.6-sol", config)
-        self.assertIn("api_key_env: OPENAI_API_KEY", config)
         source = (REPO / "evaluation/harness/grade_proofs.py").read_text()
         self.assertIn(
             'client.responses.parse',

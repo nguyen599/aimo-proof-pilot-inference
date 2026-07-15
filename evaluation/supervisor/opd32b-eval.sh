@@ -6,7 +6,7 @@ utils=/opt/supervisor-scripts/utils
 . "${utils}/environment.sh"
 
 cd /workspace/aimo-proof-pilot-eval
-export CUDA_VISIBLE_DEVICES=0,1
 export VENV=/workspace/pp/venv
+: "${CONFIG:?CONFIG is required and must point to config.yaml}"
 exec /bin/bash serve_opd32b.sh \
-  --config evaluation/configs/nemotron_cascade2.yaml
+  --config "$CONFIG"

@@ -119,7 +119,7 @@ class SubmissionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertRaisesRegex(RuntimeError, "simulated failure"),
             ):
                 await submission_runner.run_submission(
-                    REPO / "evaluation/configs/nemotron_cascade2.yaml",
+                    REPO / "config.yaml",
                     input_path,
                     output_path,
                     root / "artifacts",
@@ -189,7 +189,7 @@ class SubmissionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 await submission_runner.run_submission(
-                    REPO / "evaluation/configs/nemotron_cascade2.yaml",
+                    REPO / "config.yaml",
                     input_path,
                     output_path,
                     root / "artifacts",
@@ -231,7 +231,7 @@ class SubmissionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 await submission_runner.run_submission(
-                    REPO / "evaluation/configs/nemotron_cascade2.yaml",
+                    REPO / "config.yaml",
                     input_path,
                     output_path,
                     root / "artifacts",

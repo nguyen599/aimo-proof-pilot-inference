@@ -28,7 +28,7 @@ For one problem, round 1 makes 32 proof attempts. Every admitted proof is
 verified 16 times. Later rounds select the cumulative top eight proofs, choose
 the four lowest-rated verifier analyses for each parent, generate one refinement
 from each analysis, and verify every admitted refinement 16 times. There are at
-most four rounds.
+most 16 rounds.
 
 A naturally completed candidate is admitted only when it matches the complete
 ycchen XML contract. A length-truncated prover/refiner receives at most one
@@ -267,17 +267,17 @@ Every later round therefore has the same structural bounds.
 
 ## Physical request accounting
 
-The four-round full-width search still has at most 2,176 logical calls:
+The 16-round full-width search has at most 8,704 logical calls:
 
 ```text
-4 * (32 prover/refiner calls + 32 * 16 verifier calls) = 2,176
+16 * (32 prover/refiner calls + 32 * 16 verifier calls) = 8,704
 ```
 
 Every logical call is either a prover/refiner or verifier and can require its
 single continuation. If every call does, the physical request ceiling is:
 
 ```text
-2,176 + 2,176 = 4,352
+8,704 + 8,704 = 17,408
 ```
 
 Invalid candidates and early stopping reduce these counts. Artifacts retain the

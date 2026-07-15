@@ -4,7 +4,7 @@
 
 The problem manifest explicitly selects either the pinned `MathArena/imo_2025` or `MathArena/aime_2026` parquet and a non-empty list of native problem IDs. The AIME 2026 full-run manifest selects Problem 10, whose official dataset answer is 156. Dataset selection does not alter serving, prompts, search, selection, or final GPT-5.6 Sol aggregation.
 
-`configs/nemotron_cascade2.yaml` remains the only configuration. There are no
+The repository-root `config.yaml` remains the only configuration. There are no
 difficulty-specific configurations or problem-dependent budget branches.
 
 ## Serving modes
@@ -70,13 +70,13 @@ For each requested problem:
    with a stable seeded tie-break. Put each analysis into its own ycchen XML
    candidate bundle and generate exactly one refinement from it.
 9. Run every refinement through the same asynchronous generate-verify
-   pipeline, add it to the cumulative pool, rerank, and continue for at most four
+   pipeline, add it to the cumulative pool, rerank, and continue for at most 16
    rounds.
 10. Return the highest-ranked proof. There is no selector-model call or proof
    fallback.
 
-A full-width four-round search makes at most 2,176 logical calls. Every local
-call can add at most one native continuation, producing a 4,352 physical-request
+A full-width 16-round search makes at most 8,704 logical calls. Every local
+call can add at most one native continuation, producing a 17,408 physical-request
 ceiling. Invalid XML and early stopping reduce the verifier and continuation
 counts; there are no replacement calls.
 

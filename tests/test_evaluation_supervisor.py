@@ -7,13 +7,11 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 class EvaluationSupervisorTests(unittest.TestCase):
-    def test_service_launches_one_yaml_on_both_gpus(self):
+    def test_service_requires_explicit_config_without_gpu_override(self):
         wrapper = (REPO / "evaluation/supervisor/opd32b-eval.sh").read_text()
-        self.assertIn("CUDA_VISIBLE_DEVICES=0,1", wrapper)
-        self.assertIn(
-            "--config evaluation/configs/nemotron_cascade2.yaml",
-            wrapper,
-        )
+        self.assertNotIn("CUDA_VISIBLE_DEVICES", wrapper)
+        self.assertIn("CONFIG is required", wrapper)
+        self.assertIn("--config", wrapper)
         for hidden_override in ("MODEL_MODE", "DFLASH=", "MAXREQ=", "CTX="):
             self.assertNotIn(hidden_override, wrapper)
 

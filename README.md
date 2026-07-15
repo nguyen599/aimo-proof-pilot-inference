@@ -38,7 +38,7 @@ run:
 ```bash
 mkdir -p "$PWD/workspace"
 curl -fsSL \
-  "https://raw.githubusercontent.com/bogoconic1/aimo-proof-pilot-inference/$COMMIT/evaluation/configs/nemotron_cascade2.yaml" \
+  "https://raw.githubusercontent.com/bogoconic1/aimo-proof-pilot-inference/$COMMIT/config.yaml" \
   -o "$PWD/workspace/config.yaml"
 ```
 
@@ -100,7 +100,7 @@ The current `main` defaults are:
 | Server context | 262,144 tokens |
 | Server concurrency | 64 running requests per DP replica |
 | Search concurrency | 96 requests cluster-wide |
-| Search policy | 32 proofs, 16 verifications per proof, top 8, 4 refinements, up to 8 rounds |
+| Search policy | 32 proofs, 16 verifications per proof, top 8, 4 refinements, up to 16 rounds |
 | Sampling | temperature 1.0, top-p 0.95 |
 | First output segment | 128,000 tokens |
 | Solution continuation | 16,384 tokens |

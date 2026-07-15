@@ -1,4 +1,4 @@
-"""Load and strictly validate the single Nemotron-Cascade 2 evaluation YAML."""
+"""Load and strictly validate a Proof Pilot runtime YAML."""
 
 from __future__ import annotations
 

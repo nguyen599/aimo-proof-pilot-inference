@@ -12,7 +12,7 @@ inference policy remains:
 - FA3 attention by default, with explicit FA3 or FA4 selection in YAML applied identically to the target and DFlash draft and no backend fallback;
 - Humming W4A8 target quantization as an opt-in boolean, with DFlash enabled by default and independently configurable;
 - 32 initial proof attempts, 16 verifications per admitted proof, cumulative top 8
-  proofs, four lowest-rated analyses producing one refinement each, and four rounds;
+  proofs, four lowest-rated analyses producing one refinement each, and 16 rounds;
 - asynchronous per-candidate verification under a shared cluster-wide concurrency
   of 96, with ranking and subsequent rounds waiting at the current-round barrier;
 - configurable sampling temperature and top-p (defaults 1.0 and 0.95);
@@ -32,7 +32,7 @@ The checked-in manifests select IMO 2025 Problems 1 or 2 and AIME 2026 Problem
 
 | Path | Purpose |
 |---|---|
-| `configs/nemotron_cascade2.yaml` | the only serving, search, and grading config |
+| `../config.yaml` | the only serving, search, and grading config |
 | `manifests/imo-2025-problem-1.json` | exact IMO debug input: problem 1 only |
 | `manifests/aime-2026-problem-10.json` | exact AIME 2026 input: problem 10, answer 156 |
 | `data/imo_2025.parquet` | pinned MathArena IMO 2025 dataset |
@@ -54,7 +54,7 @@ The server is a supervisor service named `opd32b-eval`; its canonical log is
 ```bash
 EVAL_SERVER_LOG=/var/log/portal/opd32b-eval.log \
   /workspace/pp/venv/bin/python evaluation/harness/run_full_evaluation.py \
-  --config evaluation/configs/nemotron_cascade2.yaml \
+  --config config.yaml \
   --ids-file evaluation/manifests/imo-2025-problem-1.json \
   --run-id imo-2025-problem-1-debug
 ```
