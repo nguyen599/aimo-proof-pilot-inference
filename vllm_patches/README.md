@@ -117,7 +117,7 @@ The comparison is inclusive: a batch with maximum context length `81920` or
 larger runs target-only. Shorter requests in the same batch also stop drafting
 until they are scheduled in a batch whose maximum context is below the cutoff.
 The scheduler sets the proposal width to zero, so this remains coordinated when
-`run.py` enables `--async-scheduling`. The worker retains vLLM's native K-wide
+`evaluation/harness_vllm/run.py` enables `--async-scheduling`. The worker retains vLLM's native K-wide
 zero buffer while clearing valid drafts; that buffer is required when a mixed
 batch moves from target-only decoding back to DFlash. This is a deterministic
 context policy, not a live acceptance-rate controller.

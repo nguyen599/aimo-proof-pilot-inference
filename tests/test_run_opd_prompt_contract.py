@@ -15,7 +15,7 @@ from unittest.mock import patch
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-import run  # noqa: E402
+from evaluation.harness_vllm import run  # noqa: E402
 
 
 class RunOpdPromptContractTests(unittest.TestCase):

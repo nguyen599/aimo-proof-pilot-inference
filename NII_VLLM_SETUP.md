@@ -1,7 +1,7 @@
 # NII vLLM 0.25.1 setup
 
 This runbook prepares the eight NII H200 nodes for the standalone multi-node
-`run.py` pipeline. It is safe to execute while training is active because setup
+`evaluation/harness_vllm/run.py` pipeline. It is safe to execute while training is active because setup
 uses CPU, network, and the shared `/tmp` filesystem only. Do not start a vLLM
 server or run a CUDA/NCCL smoke until the training job has stopped.
 
@@ -60,7 +60,7 @@ checkpoint download.
 ## Safe eight-node smoke
 
 While training is active, test only the controller path. This imports vLLM and
-the OLMo3Sink plugin, creates the same short-lived Gloo group as `run.py`,
+the OLMo3Sink plugin, creates the same short-lived Gloo group as the vLLM harness,
 validates the shared startup records, and exits. It never loads model weights
 and never creates a CUDA tensor.
 
@@ -116,7 +116,7 @@ export AIMO_MODEL_PATH=/tmp/models/olmo3-opd-sft-425-vllm
 export AIMO_DFLASH_MODEL_PATH=/tmp/models/dflash-32b-draft-v2test-phaseL
 ```
 
-Use a new `AIMO_DISTRIBUTED_RUN_ID` for each launch. Do not wrap `run.py` in
+Use a new `AIMO_DISTRIBUTED_RUN_ID` for each launch. Do not wrap the harness in
 `torchrun`; each node runs one controller, and each controller starts its own
 local TP2/DP4 vLLM server.
 

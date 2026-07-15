@@ -31,7 +31,7 @@ def main() -> None:
     if missing:
         raise RuntimeError(f"Missing vLLM plugin architectures: {sorted(missing)}")
 
-    import run
+    from evaluation.harness_vllm import run
 
     runtime = run.DistributedRuntime.from_environment()
     metadata = {

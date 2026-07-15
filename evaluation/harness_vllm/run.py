@@ -46,7 +46,7 @@ DEFAULT_API_KEY = "vllm-local"
 DEFAULT_SERVED_MODEL_NAME = "proof-model"
 DEFAULT_PROBLEM_TIMEOUT_SECONDS = 86_400
 DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_FAMILY_OPD = "opd"
 PROMPT_FAMILY_DEEPSEEK_MATH_V2 = "deepseek_math_v2"
 
@@ -618,7 +618,8 @@ class DistributedRuntime:
             raise RuntimeError("torch.distributed is unavailable")
         if dist.is_initialized():
             raise RuntimeError(
-                "run.py must own the node-level control group; do not wrap it in torchrun"
+                "evaluation/harness_vllm/run.py must own the node-level control "
+                "group; do not wrap it in torchrun"
             )
 
         init_method = f"tcp://{self.master_addr}:{self.master_port}"
@@ -1115,9 +1116,7 @@ class PipelineProgress:
             self._bar_state.clear()
 
 
-OPD_PROMPT_ROOT = (
-    Path(__file__).resolve().parent / "evaluation" / "prompts" / "ycchen_math_3r"
-)
+OPD_PROMPT_ROOT = REPO_ROOT / "evaluation" / "prompts" / "ycchen_math_3r"
 OPD_SYSTEM_DELIMITER = "===SYSTEM==="
 OPD_USER_DELIMITER = "===USER==="
 
@@ -4677,7 +4676,7 @@ def write_grader_input_records(
                 "selected_pipeline": row.get("selected_pipeline"),
                 "final_score": row.get("final_score"),
                 "final_status": row.get("final_status"),
-                "source": "run.py",
+                "source": "evaluation/harness_vllm/run.py",
             }
             output.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     os.replace(temporary, path)
@@ -5564,7 +5563,7 @@ class ProofRuntime:
         if self.distributed.enabled:
             raise RuntimeError(
                 "Distributed inference requires every rank to execute the same "
-                "standalone run.py input sequence; predict() is unsupported"
+                "standalone vLLM harness input sequence; predict() is unsupported"
             )
 
         with self._predict_lock:

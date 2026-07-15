@@ -17,7 +17,7 @@ from unittest.mock import patch
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-import run  # noqa: E402
+from evaluation.harness_vllm import run  # noqa: E402
 
 
 def free_tcp_port() -> int:
@@ -189,7 +189,7 @@ class DistributedRuntimeTests(unittest.TestCase):
                 """
                 import os
                 from pathlib import Path
-                import run
+                from evaluation.harness_vllm import run
 
                 run.CFG.model_path = Path('/unused-model')
                 run.CFG.input_csv = Path(os.environ['TEST_INPUT'])
@@ -277,7 +277,7 @@ class DistributedRuntimeTests(unittest.TestCase):
             launcher = textwrap.dedent(
                 """
                 import os
-                import run
+                from evaluation.harness_vllm import run
 
                 distributed = run.DistributedRuntime.from_environment()
                 distributed.initialize({"rank_specific": os.environ["GLOBAL_RANK"]})

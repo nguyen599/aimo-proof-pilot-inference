@@ -1,7 +1,7 @@
-# Multi-node `run.py` inference
+# Multi-node vLLM inference
 
-`run.py` supports one controller process per node. Each controller starts an
-independent local vLLM server, and candidate pipelines are split across nodes
+`evaluation/harness_vllm/run.py` supports one controller process per node. Each
+controller starts an independent local vLLM server, and candidate pipelines are split across nodes
 by their global candidate ID.
 
 For 14 candidates and eight nodes, assignments are:
@@ -71,7 +71,7 @@ mkdir -p \
   /tmp/xdg_cache/huggingface/xet/logs \
   /tmp/hf_xet
 
-python run.py
+python -m evaluation.harness_vllm.run
 ```
 
 `max_concurrent_requests` defaults to `AIMO_REQUESTS_PER_GPU` multiplied by
