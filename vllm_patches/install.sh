@@ -53,16 +53,16 @@ if (
 
     if "disable_above_context_len" not in SpeculativeConfig.__dataclass_fields__:
         raise RuntimeError("DFlash context cutoff field was not installed")
-    requests = {"req": SimpleNamespace(num_computed_tokens=65534)}
+    requests = {"req": SimpleNamespace(num_computed_tokens=81918)}
     assert not _batch_reaches_speculation_context_cutoff(
         requests,
         {"req": 1},
-        65536,
+        81920,
     )
     assert _batch_reaches_speculation_context_cutoff(
         requests,
         {"req": 2},
-        65536,
+        81920,
     )
 
 load_general_plugins()

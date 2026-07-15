@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -70,7 +71,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "method": "dflash",
                 "model": "/draft",
                 "num_speculative_tokens": 10,
-                "disable_above_context_len": 65536,
+                "disable_above_context_len": 81920,
             },
         )
 
@@ -86,6 +87,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             REPO / "evaluation" / "data" / "imo_2025.parquet",
         )
         self.assertEqual(run.CFG.pipelines_per_problem, 14)
+        self.assertEqual(run.CFG.deepseek_math_v2_candidate_count, 6)
         self.assertEqual(run.CFG.proof_only_candidate_count, 0)
         self.assertFalse(run.CFG.skip_self_score_zero)
         self.assertFalse(run.CFG.stop_on_strict_pass)
@@ -121,6 +123,72 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertTrue(parsed["is_valid_candidate_response"])
         self.assertEqual(parsed["proof"], "A complete proof.")
         self.assertEqual(parsed["self_score"], 1.0)
+
+    def test_deepseek_prompt_and_generation_parser_use_markdown_contract(self):
+        prompt = run.build_deepseek_proof_generation_prompt("Prove the claim.")
+        parsed = run.parse_deepseek_generation_response(
+            "<think>private work</think>\n"
+            "## Solution\nA complete proof.\n\n"
+            "## Self Evaluation\n"
+            "Here is my evaluation of the solution: It is complete.\n"
+            "Based on my evaluation, the final overall score should be:\n"
+            "\\boxed{1}"
+        )
+
+        self.assertIn("## Solution", prompt)
+        self.assertIn("## Self Evaluation", prompt)
+        self.assertIn("## Problem\nProve the claim.", prompt)
+        self.assertTrue(parsed["is_valid_candidate_response"])
+        self.assertEqual(parsed["proof"], "A complete proof.")
+        self.assertEqual(parsed["self_score"], 1.0)
+
+    def test_deepseek_verifier_parser_normalizes_current_schema(self):
+        prompt = run.build_deepseek_proof_verification_prompt(
+            "Problem.",
+            "Candidate proof.",
+        )
+        parsed = run.parse_deepseek_verifier_response(
+            "<think>private work</think>\n"
+            "Here is my evaluation of the solution:\nA fatal gap remains.\n\n"
+            "Based on my evaluation, the final overall score should be:\n"
+            "\\boxed{0}"
+        )
+
+        self.assertIn("## Solution\nCandidate proof.", prompt)
+        self.assertTrue(parsed["is_valid_verifier_response"])
+        self.assertEqual(parsed["score"], 0.0)
+        self.assertEqual(parsed["evaluation"], "A fatal gap remains.")
+        self.assertIn("Here is my evaluation", parsed["review"])
+
+    def test_first_six_candidates_use_deepseek_prompt_family(self):
+        cfg = SimpleNamespace(deepseek_math_v2_candidate_count=6)
+
+        families = [
+            run.resolve_candidate_prompt_family(index, 14, cfg)
+            for index in range(14)
+        ]
+
+        self.assertEqual(
+            families,
+            [run.PROMPT_FAMILY_DEEPSEEK_MATH_V2] * 6
+            + [run.PROMPT_FAMILY_OPD] * 8,
+        )
+        all_opd = SimpleNamespace(deepseek_math_v2_candidate_count=0)
+        all_deepseek = SimpleNamespace(deepseek_math_v2_candidate_count=14)
+        self.assertEqual(
+            run.resolve_candidate_prompt_family(0, 14, all_opd),
+            run.PROMPT_FAMILY_OPD,
+        )
+        self.assertEqual(
+            run.resolve_candidate_prompt_family(13, 14, all_deepseek),
+            run.PROMPT_FAMILY_DEEPSEEK_MATH_V2,
+        )
+        with self.assertRaisesRegex(ValueError, "between 0"):
+            run.resolve_candidate_prompt_family(
+                0,
+                14,
+                SimpleNamespace(deepseek_math_v2_candidate_count=15),
+            )
 
     def test_reasoning_repetition_metrics_use_hidden_reasoning_only(self):
         words = [f"word{index}" for index in range(32)] * 3
@@ -218,7 +286,9 @@ class RunOpdPromptContractTests(unittest.TestCase):
         )
         self.assertIsNone(run.parse_selected_index("SELECTED_INDEX: 1", 2))
 
-    def test_only_deepseek_meta_prompt_is_retained(self):
+    def test_only_requested_deepseek_prompt_branches_are_retained(self):
+        self.assertTrue(hasattr(run, "build_deepseek_proof_generation_prompt"))
+        self.assertTrue(hasattr(run, "build_deepseek_proof_verification_prompt"))
         self.assertTrue(hasattr(run, "build_deepseek_meta_verification_prompt"))
         self.assertFalse(hasattr(run, "build_deepseek_gold_proof_evaluation_prompt"))
         self.assertFalse(hasattr(run, "build_proof_architect_prompt"))
@@ -255,6 +325,172 @@ class RunOpdPromptContractTests(unittest.TestCase):
             self.assertEqual(records[0]["final_proof"], full_proof)
             self.assertEqual(records[0]["selected_pipeline"], 3)
             self.assertFalse(path.with_suffix(".jsonl.tmp").exists())
+
+
+class MixedPromptRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generation_dispatches_prompt_parser_and_force_text_by_family(self):
+        class FakeScheduler:
+            def __init__(self) -> None:
+                self.calls: list[tuple[object, dict[str, object]]] = []
+
+            async def call(self, stage: str, prompt: object, **kwargs: object):
+                self.assert_stage(stage)
+                self.calls.append((prompt, kwargs))
+                if isinstance(prompt, str):
+                    text = (
+                        "## Solution\nDeepSeek proof.\n\n"
+                        "## Self Evaluation\nChecked.\n\\boxed{1}"
+                    )
+                else:
+                    text = (
+                        "<solution>OPD proof.</solution>"
+                        "<self_evaluation>Checked.</self_evaluation>"
+                        "<score>1</score>"
+                    )
+                return {"success": True, "text": text}
+
+            @staticmethod
+            def assert_stage(stage: str) -> None:
+                if stage != "proof_generation":
+                    raise AssertionError(stage)
+
+        cfg = SimpleNamespace(
+            deepseek_math_v2_candidate_count=6,
+            thinking_budget_enabled=False,
+            proof_generation_thinking_budgets=[],
+            default_temperature=0.7,
+            proof_generation_temperatures=[],
+            deepseek_thinking_budget_force_text="## Solution\n",
+            thinking_budget_force_text="<solution>\n",
+        )
+        scheduler = FakeScheduler()
+
+        deepseek = await run.generate_single_attempt(
+            "Problem.", 0, 14, scheduler, cfg
+        )
+        opd = await run.generate_single_attempt("Problem.", 6, 14, scheduler, cfg)
+
+        self.assertEqual(
+            deepseek["prompt_family"],
+            run.PROMPT_FAMILY_DEEPSEEK_MATH_V2,
+        )
+        self.assertEqual(opd["prompt_family"], run.PROMPT_FAMILY_OPD)
+        self.assertIsInstance(scheduler.calls[0][0], str)
+        self.assertIsInstance(scheduler.calls[1][0], list)
+        self.assertEqual(
+            scheduler.calls[0][1]["thinking_budget_force_text"],
+            "## Solution\n",
+        )
+        self.assertEqual(
+            scheduler.calls[1][1]["thinking_budget_force_text"],
+            "<solution>\n",
+        )
+
+    async def test_deepseek_candidate_keeps_deepseek_verifier_after_opd_refine(self):
+        class FakeScheduler:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+                self.responses = iter(
+                    [
+                        (
+                            "Here is my evaluation of the solution:\n"
+                            "A key justification is missing.\n\n"
+                            "Based on my evaluation, the final overall score "
+                            "should be:\n\\boxed{0}"
+                        ),
+                        (
+                            "<solution>A repaired complete proof.</solution>"
+                            "<self_evaluation>The gap is now filled.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        (
+                            "Here is my evaluation of the solution:\n"
+                            "The repaired proof is complete.\n\n"
+                            "Based on my evaluation, the final overall score "
+                            "should be:\n\\boxed{1}"
+                        ),
+                    ]
+                )
+
+            async def call(self, stage: str, prompt: object, **kwargs: object):
+                del kwargs
+                self.calls.append((stage, prompt))
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": next(self.responses),
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        initial_text = (
+            "## Solution\nAn incomplete proof.\n\n"
+            "## Self Evaluation\nHere is my evaluation of the solution: "
+            "a gap remains.\n\\boxed{0}"
+        )
+        initial_parsed = run.parse_deepseek_generation_response(initial_text)
+        initial_generation = {
+            "attempt_idx": 0,
+            "prompt_family": run.PROMPT_FAMILY_DEEPSEEK_MATH_V2,
+            "generation_mode": "deepseek_markdown",
+            "generation_output": run.make_output(
+                "proof_generation",
+                {"success": True, "text": initial_text},
+                initial_parsed,
+                prompt_family=run.PROMPT_FAMILY_DEEPSEEK_MATH_V2,
+            ),
+            "generation_parsed": initial_parsed,
+            "proof": initial_parsed["proof"],
+        }
+        cfg = SimpleNamespace(
+            verify_n=1,
+            meta_n=0,
+            meta_policy="all-reviews",
+            strict_pass_meta=False,
+            refine_rounds=1,
+            refine_review_n=1,
+            min_valid_low=1,
+            verification_early_stop=False,
+            thinking_budget_enabled=False,
+            verifier_thinking_budget_tokens=0,
+            verifier_thinking_budget_force_text="<evaluation>\n",
+            deepseek_verifier_thinking_budget_force_text=(
+                "Here is my evaluation of the solution:\n"
+            ),
+            meta_thinking_budget_tokens=0,
+            meta_thinking_budget_force_text="",
+        )
+        scheduler = FakeScheduler()
+
+        result = await run.run_single_attempt(
+            "Problem.",
+            0,
+            14,
+            scheduler,
+            cfg,
+            initial_generation=initial_generation,
+        )
+
+        self.assertEqual(
+            [stage for stage, _ in scheduler.calls],
+            ["proof_verify", "proof_refine", "proof_verify"],
+        )
+        self.assertIsInstance(scheduler.calls[0][1], str)
+        self.assertIsInstance(scheduler.calls[1][1], list)
+        self.assertIsInstance(scheduler.calls[2][1], str)
+        self.assertIn("## Instruction", str(scheduler.calls[0][1]))
+        self.assertIn("## Instruction", str(scheduler.calls[2][1]))
+        self.assertIn(
+            "<candidate id=\"P0\">",
+            scheduler.calls[1][1][1]["content"],
+        )
+        self.assertEqual(
+            result["prompt_family"],
+            run.PROMPT_FAMILY_DEEPSEEK_MATH_V2,
+        )
+        self.assertEqual(result["proof_solution"], "A repaired complete proof.")
 
 
 if __name__ == "__main__":

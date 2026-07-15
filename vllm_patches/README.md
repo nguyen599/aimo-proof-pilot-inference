@@ -90,7 +90,7 @@ vllm serve /path/to/opd-model \
     "method": "dflash",
     "model": "/path/to/dflash-32b-draft-v2test-phaseL",
     "num_speculative_tokens": 10,
-    "disable_above_context_len": 65536
+    "disable_above_context_len": 81920
   }'
 ```
 
@@ -101,7 +101,7 @@ When this plugin is active, the installer verifies that name resolves to
 ## DFlash context cutoff
 
 This repository starts vLLM with `VLLM_USE_V2_MODEL_RUNNER=0`, so the patch is
-deliberately limited to the V1 runner. Configure a 64K cutoff as follows:
+deliberately limited to the V1 runner. Configure an 80K cutoff as follows:
 
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/opd-model \
@@ -109,11 +109,11 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/opd-model \
     "method": "dflash",
     "model": "/path/to/dflash-model",
     "num_speculative_tokens": 10,
-    "disable_above_context_len": 65536
+    "disable_above_context_len": 81920
   }'
 ```
 
-The comparison is inclusive: a batch with maximum context length `65536` or
+The comparison is inclusive: a batch with maximum context length `81920` or
 larger runs target-only. Shorter requests in the same batch also stop drafting
 until they are scheduled in a batch whose maximum context is below the cutoff.
 The scheduler sets the proposal width to zero, so this remains coordinated when

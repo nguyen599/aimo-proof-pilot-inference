@@ -43,6 +43,8 @@ DEFAULT_SERVED_MODEL_NAME = "proof-model"
 DEFAULT_PROBLEM_TIMEOUT_SECONDS = 86_400
 DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
 REPO_ROOT = Path(__file__).resolve().parent
+PROMPT_FAMILY_OPD = "opd"
+PROMPT_FAMILY_DEEPSEEK_MATH_V2 = "deepseek_math_v2"
 
 
 class InferenceServerUnavailable(RuntimeError):
@@ -69,7 +71,7 @@ def default_vllm_extra_args() -> str:
     num_speculative_tokens = int(
         os.environ.get("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS", "10")
     )
-    context_cutoff = int(os.environ.get("AIMO_DFLASH_CONTEXT_CUTOFF", "65536"))
+    context_cutoff = int(os.environ.get("AIMO_DFLASH_CONTEXT_CUTOFF", "81920"))
     if num_speculative_tokens <= 0:
         raise ValueError("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS must be positive")
     if context_cutoff <= 0:
@@ -144,10 +146,18 @@ class CFG:
         "We were unable to produce a complete proof. However, the strongest "
         "partial progress is as follows:\n"
     )
+    deepseek_thinking_budget_force_text = (
+        "\nWe should now write the final solution due time limit.\n"
+        "</think>\n\n## Solution\n"
+    )
     verifier_thinking_budget_tokens = 112_000
     verifier_thinking_budget_force_text = (
         "\nWe should now write the final evaluation due time limit.\n</think>\n\n"
         "<evaluation>\n"
+    )
+    deepseek_verifier_thinking_budget_force_text = (
+        "\nWe should now write the final evaluation due time limit.\n"
+        "</think>\n\nHere is my evaluation of the solution:\n"
     )
     meta_thinking_budget_tokens = 112_000
     meta_thinking_budget_force_text = (
@@ -192,6 +202,9 @@ class CFG:
     max_concurrent_problems = 1
 
     pipelines_per_problem = 14
+    deepseek_math_v2_candidate_count = int(
+        os.environ.get("AIMO_DEEPSEEK_MATH_V2_CANDIDATE_COUNT", "6")
+    )
     # Last N candidates use a shorter proof-only prompt. This keeps some
     # candidates verifyable when full proof+self-evaluation generations hit
     # the context/output limit.
@@ -289,6 +302,20 @@ _XML_SCORE_PATTERN = re.compile(
     r"<score>\s*(0(?:\.5)?|1)\s*</score>", flags=re.IGNORECASE
 )
 _THINK_BLOCK_PATTERN = re.compile(r"(?is)<think>.*?</think>\s*")
+_VERIFIER_EVALUATION_MARKERS = (
+    "Here is my evaluation of the solution:",
+)
+_VERIFIER_EVALUATION_PATTERNS = (
+    re.compile(
+        r"(?im)^[ \t]*(?:#+[ \t]*)?(?:\*\*)?detailed[ \t]+evaluation[ \t]*:?(?:\*\*)?[ \t]*$"
+    ),
+    re.compile(
+        r"(?im)^[ \t]*(?:#+[ \t]*)?(?:\*\*)?evaluation[ \t]*:?(?:\*\*)?[ \t]*$"
+    ),
+    re.compile(
+        r"(?im)^[ \t]*(?:#+[ \t]*)?(?:\*\*)?solution[ \t]+evaluation[ \t]*:?(?:\*\*)?[ \t]*$"
+    ),
+)
 _META_ANALYSIS_MARKERS = (
     'Here is my analysis of the "solution evaluation":',
     "Here is my analysis of the solution evaluation:",
@@ -302,7 +329,14 @@ _META_ANALYSIS_PATTERNS = (
 _META_SCORE_TRAILER_PATTERN = re.compile(
     r"(?is)\n+\s*(?:\*\*)?Based on my analysis[\s,:-]+.*?(?:solution evaluation|rate|score).*",
 )
+_VERIFIER_SCORE_TRAILER_PATTERN = re.compile(
+    r"(?is)\n+\s*(?:\*\*)?Based on my evaluation[\s,:-]+.*?(?:final overall score|score).*",
+)
+_HEADER_SUFFIX_PATTERN = r"[ \t]*:?[ \t]*$"
 _VISIBLE_OUTPUT_MARKERS = (
+    "## Solution",
+    "## Self Evaluation",
+    "Here is my evaluation",
     "<solution>",
     "<self_evaluation>",
     "<evaluation>",
@@ -357,6 +391,7 @@ class PipelineConfig:
     proof_max_new_tokens: int
     default_temperature: float
     proof_generation_temperatures: list[float]
+    deepseek_math_v2_candidate_count: int
     proof_only_candidate_count: int
     skip_self_score_zero: bool
     stop_on_strict_pass: bool
@@ -365,8 +400,10 @@ class PipelineConfig:
     thinking_budget_enabled: bool
     proof_generation_thinking_budgets: list[int]
     thinking_budget_force_text: str
+    deepseek_thinking_budget_force_text: str
     verifier_thinking_budget_tokens: int
     verifier_thinking_budget_force_text: str
+    deepseek_verifier_thinking_budget_force_text: str
     meta_thinking_budget_tokens: int
     meta_thinking_budget_force_text: str
     verify_candidate_limit_while_generating: int
@@ -636,6 +673,55 @@ def _opd_messages(name: str, **replacements: str) -> list[dict[str, str]]:
     ]
 
 
+def build_deepseek_proof_generation_prompt(
+    question: str,
+    use_tool: bool = False,
+) -> str:
+    tool_note = ""
+    if use_tool:
+        tool_note = (
+            "\nYou may use tools if available, but the final response must be a "
+            "standalone proof.\n"
+        )
+
+    return f"""Your task is to solve a given problem. The problem may ask you to prove a statement, or ask for an answer. If finding an answer is required, you should come up with the answer, and your final solution should also be a rigorous proof of that answer being valid.
+
+Your final solution to the problem should be exceptionally comprehensive and easy-to-follow, which will be rated according to the following evaluation instruction:
+
+```txt
+{EVALUATION_RUBRIC}
+```
+{tool_note}
+In fact, you already have the ability to rate your solution yourself, so you are expected to reason carefully about how to solve a given problem, evaluate your method according to the instruction, and refine your solution by fixing issues identified until you can make no further progress.
+
+In your final response, you should present a detailed solution to the problem followed by your evaluation of that solution.
+- To give a good final response, you should try your best to locate potential issues in your own (partial) solution according to the evaluation instruction above, and fix them as many as you can.
+- A good final response should just faithfully present your progress, including the best solution you can give, as well as a faithful evaluation of that solution.
+- Only when you fail to locate any issues in your solution should you score it with 1.
+- If you do notice some issues in your solution but fail to resolve them with your best efforts, it's totally ok to faithfully present the issues in your final response.
+- The worst final response would provide a wrong solution but lie that it's correct or claim that it's correct without careful error checking. A better version should faithfully identify errors in the solution. Remember! You CAN'T cheat! If you cheat, we will know, and you will be penalized!
+
+Your final response should be in the following format:
+
+## Solution // Your final solution should start with this exact same markdown title
+... // Your final solution to the problem here. You should try your best to optimize the quality of your solution according to the evaluation instruction above before finalizing it here.
+
+## Self Evaluation // Your evaluation of your own solution above should start with this exact same markdown title
+
+Here is my evaluation of the solution: // Your analysis should start with this exact same phrase
+... // Your evaluation here. You are required to present in detail the key steps of the solution or the steps for which you had doubts regarding their correctness, and explicitly analyze whether each step is accurate: for correct steps, explain why you initially doubted their correctness and why they are indeed correct; for erroneous steps, explain the reason for the error and the impact of that error on the solution. You should analyze your solution faithfully. E.g., if there are issues in your final solution, you should point it out.
+
+Based on my evaluation, the final overall score should be:
+\\boxed{{...}} // where ... should be the final overall score (0, 0.5, or 1, and nothing else) based on the evaluation instruction above. You should reach this score ONLY AFTER careful RE-examination of your own solution above
+
+---
+
+Here is your task input:
+
+## Problem
+{question}"""
+
+
 def build_opd_proof_generation_prompt(
     question: str,
     use_tool: bool = False,
@@ -665,6 +751,36 @@ def build_opd_proof_verification_prompt(
         candidate_solution=proof,
         candidate_self_eval=self_evaluation,
     )
+
+
+def build_deepseek_proof_verification_prompt(question: str, proof: str) -> str:
+    return f"""## Instruction
+
+Your task is to evaluate the quality of a solution to a problem. The problem may ask for a proof of statement, or ask for an answer. If finding an answer is required, the solution should present the answer, and it should also be a rigorous proof of that answer being valid.
+
+Please evaluate the solution and score it according to the following criteria:
+- If the solution is completely correct, with all steps executed properly and clearly demonstrated, then the score is 1
+- If the solution is generally correct, but with some details omitted or minor errors, then the score is 0.5
+- If the solution does not actually address the required problem, contains fatal errors, or has severe omissions, then the score is 0
+- Additionally, referencing anything from any paper does not save the need to prove the reference. It's okay IF AND ONLY IF the solution also presents a valid proof of the reference argument(s); otherwise, if the solution omits the proof or if the proof provided is not completely correct, the solution should be scored according to the criteria above, and definitely not with a score of 1
+
+Please carefully reason out and analyze the quality of the solution below, and in your final response present a detailed evaluation of the solution's quality followed by your score. Therefore, your response should be in the following format:
+
+Here is my evaluation of the solution:
+... // Your evaluation here. You are required to present in detail the key steps of the solution or the steps for which you had doubts regarding their correctness, and explicitly analyze whether each step is accurate: for correct steps, explain why you initially doubted their correctness and why they are indeed correct; for erroneous steps, explain the reason for the error and the impact of that error on the solution.
+
+Based on my evaluation, the final overall score should be:
+\\boxed{{...}} // where ... should be the final overall score (0, 0.5, or 1, and nothing else) based on the above criteria
+
+---
+
+Here is your task input:
+
+## Problem
+{question}
+
+## Solution
+{proof}"""
 
 
 def build_deepseek_meta_verification_prompt(
@@ -1174,6 +1290,65 @@ def trim_score_trailer(text: str, pattern: re.Pattern[str]) -> str:
     return pattern.sub("", text or "").strip()
 
 
+def _header_matches(text: str, header: str) -> list[re.Match[str]]:
+    header_pattern = re.escape(header.strip()).replace(r"\ ", r"[ \t]+")
+    return list(
+        re.finditer(
+            rf"(?im)^[ \t]*{header_pattern}{_HEADER_SUFFIX_PATTERN}",
+            text,
+        )
+    )
+
+
+def _extract_deepseek_generation_sections(
+    text: str,
+) -> tuple[str, str, bool, bool]:
+    solution_headers = _header_matches(text, "## Solution")
+    evaluation_headers = _header_matches(text, "## Self Evaluation")
+    if not solution_headers:
+        return "", "", False, False
+
+    solution_header = solution_headers[-1]
+    following_evaluation = next(
+        (
+            match
+            for match in evaluation_headers
+            if match.start() > solution_header.end()
+        ),
+        None,
+    )
+    if following_evaluation is None:
+        return text[solution_header.end() :].strip(), "", True, False
+
+    proof = text[solution_header.end() : following_evaluation.start()].strip()
+    self_evaluation = text[following_evaluation.end() :].strip()
+    return proof, self_evaluation, True, True
+
+
+def parse_deepseek_generation_response(
+    text: str,
+    *,
+    require_self_evaluation: bool = True,
+) -> dict[str, Any]:
+    visible_text = strip_reasoning_blocks(text)
+    proof, self_evaluation, has_solution_section, has_self_evaluation_section = (
+        _extract_deepseek_generation_sections(visible_text)
+    )
+    self_score = extract_boxed_score(self_evaluation)
+    is_valid = bool(has_solution_section and proof)
+    if require_self_evaluation:
+        is_valid = bool(is_valid and has_self_evaluation_section)
+    return {
+        "proof": proof,
+        "self_evaluation": self_evaluation,
+        "self_score": self_score,
+        "has_solution_section": has_solution_section,
+        "has_self_evaluation_section": has_self_evaluation_section,
+        "requires_self_evaluation": require_self_evaluation,
+        "is_valid_candidate_response": is_valid,
+    }
+
+
 def parse_generation_response(
     text: str,
     *,
@@ -1270,6 +1445,56 @@ def parse_verifier_response(text: str) -> dict[str, Any]:
         "evaluation_raw_chars": len(visible_text),
         "evaluation_forwarded_chars": len(evaluation),
         "evaluation_clipped": False,
+    }
+
+
+def parse_deepseek_verifier_response(text: str) -> dict[str, Any]:
+    visible_text = strip_reasoning_blocks(text)
+    evaluation, marker_found, marker_kind = extract_after_last_section_marker(
+        visible_text,
+        _VERIFIER_EVALUATION_MARKERS,
+        _VERIFIER_EVALUATION_PATTERNS,
+    )
+    if evaluation:
+        evaluation = trim_score_trailer(evaluation, _VERIFIER_SCORE_TRAILER_PATTERN)
+    else:
+        evaluation = trim_score_trailer(
+            visible_text,
+            _VERIFIER_SCORE_TRAILER_PATTERN,
+        )
+    if not marker_found and len(evaluation) > MAX_FORWARDED_EVALUATION_CHARS:
+        evaluation = evaluation[-MAX_FORWARDED_EVALUATION_CHARS:]
+        clipped = True
+    else:
+        evaluation, clipped = clip_middle_text(
+            evaluation,
+            MAX_FORWARDED_EVALUATION_CHARS,
+        )
+    parsed_score = extract_boxed_score(visible_text)
+    is_valid = bool(evaluation.strip() and parsed_score in {0.0, 0.5, 1.0})
+    review_parts = [
+        "Here is my evaluation of the solution:",
+        evaluation.strip(),
+    ]
+    if parsed_score is not None:
+        review_parts.extend(
+            [
+                "Based on my evaluation, the final overall score should be:",
+                rf"\boxed{{{parsed_score:g}}}",
+            ]
+        )
+    return {
+        "evaluation": evaluation.strip(),
+        "suggestions": "",
+        "review": "\n\n".join(part for part in review_parts if part),
+        "score": parsed_score if is_valid else None,
+        "parsed_score": parsed_score,
+        "is_valid_verifier_response": is_valid,
+        "evaluation_marker_found": marker_found,
+        "evaluation_marker": marker_kind,
+        "evaluation_raw_chars": len(visible_text),
+        "evaluation_forwarded_chars": len(evaluation),
+        "evaluation_clipped": clipped,
     }
 
 
@@ -1597,7 +1822,6 @@ class VLLMServer:
             "--stream-interval",
             str(self.cfg.stream_interval),
             "--async-scheduling",
-            "--disable-log-stats",
             "--enable-prefix-caching",
             "--trust-remote-code",
         ]
@@ -2710,6 +2934,22 @@ def resolve_proof_generation_temperature(
     return float(cfg.default_temperature)
 
 
+def resolve_candidate_prompt_family(
+    attempt_idx: int,
+    total_candidates: int,
+    cfg: PipelineConfig,
+) -> str:
+    deepseek_count = int(cfg.deepseek_math_v2_candidate_count)
+    if not 0 <= deepseek_count <= int(total_candidates):
+        raise ValueError(
+            "deepseek_math_v2_candidate_count must be between 0 and "
+            f"the candidate count ({total_candidates}), got {deepseek_count}"
+        )
+    if 0 <= attempt_idx < deepseek_count:
+        return PROMPT_FAMILY_DEEPSEEK_MATH_V2
+    return PROMPT_FAMILY_OPD
+
+
 def is_proof_only_candidate(
     attempt_idx: int, total_candidates: int, cfg: PipelineConfig
 ) -> bool:
@@ -2799,6 +3039,7 @@ def make_generation_only_candidate(
     proof = str(initial_generation.get("proof") or "")
     return {
         "attempt_idx": initial_generation.get("attempt_idx"),
+        "prompt_family": initial_generation.get("prompt_family"),
         "generation_mode": initial_generation.get("generation_mode"),
         "proof_generation_output": initial_generation.get("generation_output"),
         "proof_verify_output": [],
@@ -2921,24 +3162,39 @@ async def generate_single_attempt(
     problem_id: Any = "problem",
     progress: Optional[PipelineProgress] = None,
 ) -> Optional[dict[str, Any]]:
-    del total_candidates
-    generation_mode = "opd_xml"
+    prompt_family = resolve_candidate_prompt_family(
+        attempt_idx,
+        total_candidates,
+        cfg,
+    )
+    if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2:
+        generation_mode = "deepseek_markdown"
+        generation_prompt = build_deepseek_proof_generation_prompt(question)
+        generation_parser = parse_deepseek_generation_response
+        thinking_budget_force_text = cfg.deepseek_thinking_budget_force_text
+    else:
+        generation_mode = "opd_xml"
+        generation_prompt = build_opd_proof_generation_prompt(question)
+        generation_parser = parse_generation_response
+        thinking_budget_force_text = cfg.thinking_budget_force_text
     if progress is not None:
         progress.log(
-            "candidate=%d stage=generation status=start mode=%s",
+            "candidate=%d stage=generation status=start mode=%s prompt_family=%s",
             attempt_idx,
             generation_mode,
+            prompt_family,
         )
     generation_response = await scheduler.call(
         "proof_generation",
-        build_opd_proof_generation_prompt(
-            question,
-        ),
+        generation_prompt,
         progress=progress,
-        detail=f"candidate={attempt_idx} round=0 mode={generation_mode}",
+        detail=(
+            f"candidate={attempt_idx} round=0 mode={generation_mode} "
+            f"prompt_family={prompt_family}"
+        ),
         temperature=resolve_proof_generation_temperature(attempt_idx, cfg),
         thinking_budget_tokens=resolve_thinking_budget_tokens(attempt_idx, cfg),
-        thinking_budget_force_text=cfg.thinking_budget_force_text,
+        thinking_budget_force_text=thinking_budget_force_text,
     )
     log_generation_visible_output(
         "proof_generation",
@@ -2947,11 +3203,12 @@ async def generate_single_attempt(
         attempt_idx=attempt_idx,
         round_idx=0,
     )
-    generation_parsed = parse_generation_response(
+    generation_parsed = generation_parser(
         generation_response.get("text", ""),
         require_self_evaluation=True,
     )
     generation_parsed["generation_mode"] = generation_mode
+    generation_parsed["prompt_family"] = prompt_family
     if not require_valid_candidate_response(
         generation_parsed,
         problem_id=problem_id,
@@ -2962,7 +3219,10 @@ async def generate_single_attempt(
         return None
     proof = generation_parsed["proof"]
     generation_output = make_output(
-        "proof_generation", generation_response, generation_parsed
+        "proof_generation",
+        generation_response,
+        generation_parsed,
+        prompt_family=prompt_family,
     )
     if progress is not None:
         progress.log(
@@ -2977,6 +3237,7 @@ async def generate_single_attempt(
         )
     return {
         "attempt_idx": attempt_idx,
+        "prompt_family": prompt_family,
         "generation_output": generation_output,
         "generation_parsed": generation_parsed,
         "generation_mode": generation_mode,
@@ -2992,6 +3253,7 @@ async def run_verification_round(
     round_idx: int,
     scheduler: ChatScheduler,
     cfg: PipelineConfig,
+    prompt_family: str = PROMPT_FAMILY_OPD,
     progress: Optional[PipelineProgress] = None,
     throttle: Optional[VerificationThrottle] = None,
 ) -> tuple[
@@ -3110,23 +3372,38 @@ async def run_verification_round(
                 },
             )
 
-    verifier_prompts = [
-        build_opd_proof_verification_prompt(question, proof, self_evaluation)
-        for _ in range(cfg.verify_n)
-    ]
+    if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2:
+        verifier_prompt = build_deepseek_proof_verification_prompt(question, proof)
+        verifier_parser = parse_deepseek_verifier_response
+        verifier_force_text = cfg.deepseek_verifier_thinking_budget_force_text
+    elif prompt_family == PROMPT_FAMILY_OPD:
+        verifier_prompt = build_opd_proof_verification_prompt(
+            question,
+            proof,
+            self_evaluation,
+        )
+        verifier_parser = parse_verifier_response
+        verifier_force_text = cfg.verifier_thinking_budget_force_text
+    else:
+        raise ValueError(f"unsupported prompt family: {prompt_family!r}")
+
+    verifier_prompts = [verifier_prompt for _ in range(cfg.verify_n)]
     for verifier_idx, prompt in enumerate(verifier_prompts):
         add_task(
             verification_call(
                 "proof_verify",
                 prompt,
                 progress=progress,
-                detail=f"candidate={attempt_idx} round={round_idx} verifier={verifier_idx}",
+                detail=(
+                    f"candidate={attempt_idx} round={round_idx} "
+                    f"verifier={verifier_idx} prompt_family={prompt_family}"
+                ),
                 thinking_budget_tokens=(
                     cfg.verifier_thinking_budget_tokens
                     if cfg.thinking_budget_enabled
                     else None
                 ),
-                thinking_budget_force_text=cfg.verifier_thinking_budget_force_text,
+                thinking_budget_force_text=verifier_force_text,
             ),
             {"kind": "verifier", "verifier_index": verifier_idx},
         )
@@ -3168,13 +3445,14 @@ async def run_verification_round(
                         round_idx=round_idx,
                         verifier_index=verifier_index,
                     )
-                    parsed = parse_verifier_response(response.get("text", ""))
+                    parsed = verifier_parser(response.get("text", ""))
                     output = make_output(
                         "proof_verify",
                         response,
                         parsed,
                         round_idx=round_idx,
                         verifier_index=verifier_index,
+                        prompt_family=prompt_family,
                     )
                     finalize_verifier(verifier_index, response, parsed, output)
 
@@ -3268,6 +3546,9 @@ async def run_single_attempt(
         }
     generation_output = initial_generation["generation_output"]
     generation_parsed = initial_generation["generation_parsed"]
+    prompt_family = str(
+        initial_generation.get("prompt_family") or PROMPT_FAMILY_OPD
+    )
     proof = initial_generation["proof"]
 
     proof_verify_output: list[dict[str, Any]] = []
@@ -3324,6 +3605,7 @@ async def run_single_attempt(
                 round_idx,
                 scheduler,
                 cfg,
+                prompt_family=prompt_family,
                 progress=progress,
                 throttle=throttle,
             )
@@ -3431,6 +3713,7 @@ async def run_single_attempt(
                     round_idx=round_idx + 1,
                     used_critiques=critiques,
                     invalid=True,
+                    prompt_family=PROMPT_FAMILY_OPD,
                 )
             )
             if progress is not None:
@@ -3449,6 +3732,7 @@ async def run_single_attempt(
                 refinement_parsed,
                 round_idx=round_idx + 1,
                 used_critiques=critiques,
+                prompt_family=PROMPT_FAMILY_OPD,
             )
         )
         if progress is not None:
@@ -3493,6 +3777,7 @@ async def run_single_attempt(
         )
     return {
         "attempt_idx": attempt_idx,
+        "prompt_family": prompt_family,
         "generation_mode": initial_generation.get("generation_mode"),
         "proof_generation_output": generation_output,
         "proof_verify_output": proof_verify_output,
@@ -4320,6 +4605,7 @@ class ProofRuntime:
         max_num_seqs: int,
         max_concurrent_requests: int,
         pipelines_per_problem: int,
+        deepseek_math_v2_candidate_count: int,
         proof_only_candidate_count: int,
         skip_self_score_zero: bool,
         stop_on_strict_pass: bool,
@@ -4346,8 +4632,10 @@ class ProofRuntime:
         thinking_budget_enabled: bool,
         proof_generation_thinking_budgets: list[int],
         thinking_budget_force_text: str,
+        deepseek_thinking_budget_force_text: str,
         verifier_thinking_budget_tokens: int,
         verifier_thinking_budget_force_text: str,
+        deepseek_verifier_thinking_budget_force_text: str,
         meta_thinking_budget_tokens: int,
         meta_thinking_budget_force_text: str,
         verifier_max_new_tokens: int,
@@ -4375,6 +4663,12 @@ class ProofRuntime:
         self.gpu_group = gpu_group
         self.max_concurrent_requests = max(1, max_concurrent_requests)
         self.pipelines_per_problem = max(1, pipelines_per_problem)
+        if not 0 <= int(deepseek_math_v2_candidate_count) <= self.pipelines_per_problem:
+            raise ValueError(
+                "deepseek_math_v2_candidate_count must be between 0 and "
+                f"pipelines_per_problem ({self.pipelines_per_problem}), got "
+                f"{deepseek_math_v2_candidate_count}"
+            )
         self.problem_timeout_seconds = max(60, problem_timeout_seconds)
         self.selection_reserve_seconds = max(30, selection_reserve_seconds)
         self.api_key = api_key
@@ -4435,6 +4729,9 @@ class ProofRuntime:
             proof_generation_temperatures=[
                 float(value) for value in proof_generation_temperatures
             ],
+            deepseek_math_v2_candidate_count=int(
+                deepseek_math_v2_candidate_count
+            ),
             proof_only_candidate_count=max(0, int(proof_only_candidate_count)),
             skip_self_score_zero=bool(skip_self_score_zero),
             stop_on_strict_pass=bool(stop_on_strict_pass),
@@ -4447,10 +4744,16 @@ class ProofRuntime:
                 int(value) for value in proof_generation_thinking_budgets
             ],
             thinking_budget_force_text=thinking_budget_force_text,
+            deepseek_thinking_budget_force_text=(
+                deepseek_thinking_budget_force_text
+            ),
             verifier_thinking_budget_tokens=max(
                 0, int(verifier_thinking_budget_tokens)
             ),
             verifier_thinking_budget_force_text=verifier_thinking_budget_force_text,
+            deepseek_verifier_thinking_budget_force_text=(
+                deepseek_verifier_thinking_budget_force_text
+            ),
             meta_thinking_budget_tokens=max(0, int(meta_thinking_budget_tokens)),
             meta_thinking_budget_force_text=meta_thinking_budget_force_text,
             verify_candidate_limit_while_generating=max(
@@ -4816,13 +5119,16 @@ def run(cfg: type[CFG] = CFG) -> None:
         )
     logging.info(
         "Inference runtime: stream_vllm=%s stream_vllm_server_log=%s verbose=%s "
-        "meta_policy=%s strict_pass_meta=%s max_concurrent_problems=%s",
+        "meta_policy=%s strict_pass_meta=%s max_concurrent_problems=%s "
+        "candidates=%s deepseek_math_v2_candidates=%s",
         cfg.stream_vllm,
         cfg.stream_vllm_server_log,
         cfg.verbose,
         cfg.meta_policy,
         cfg.strict_pass_meta,
         cfg.max_concurrent_problems,
+        cfg.pipelines_per_problem,
+        cfg.deepseek_math_v2_candidate_count,
     )
     runtime = ProofRuntime(
         model_path=cfg.model_path,
@@ -4835,6 +5141,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         max_num_seqs=cfg.max_num_seqs,
         max_concurrent_requests=cfg.max_concurrent_requests,
         pipelines_per_problem=cfg.pipelines_per_problem,
+        deepseek_math_v2_candidate_count=cfg.deepseek_math_v2_candidate_count,
         proof_only_candidate_count=cfg.proof_only_candidate_count,
         skip_self_score_zero=cfg.skip_self_score_zero,
         stop_on_strict_pass=cfg.stop_on_strict_pass,
@@ -4861,8 +5168,12 @@ def run(cfg: type[CFG] = CFG) -> None:
         thinking_budget_enabled=cfg.thinking_budget_enabled,
         proof_generation_thinking_budgets=list(cfg.proof_generation_thinking_budgets),
         thinking_budget_force_text=cfg.thinking_budget_force_text,
+        deepseek_thinking_budget_force_text=cfg.deepseek_thinking_budget_force_text,
         verifier_thinking_budget_tokens=cfg.verifier_thinking_budget_tokens,
         verifier_thinking_budget_force_text=cfg.verifier_thinking_budget_force_text,
+        deepseek_verifier_thinking_budget_force_text=(
+            cfg.deepseek_verifier_thinking_budget_force_text
+        ),
         meta_thinking_budget_tokens=cfg.meta_thinking_budget_tokens,
         meta_thinking_budget_force_text=cfg.meta_thinking_budget_force_text,
         verifier_max_new_tokens=cfg.verifier_max_new_tokens,
