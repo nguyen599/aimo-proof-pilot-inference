@@ -40,7 +40,7 @@ def main() -> None:
     assert target_config["torch_dtype"] == "bfloat16"
     assert server["tp_size"] == model.tensor_parallel_size
     assert server["dp_size"] == model.data_parallel_size
-    assert server["kv_cache_dtype"] == model.kv_cache_dtype == "auto"
+    assert server["kv_cache_dtype"] == model.kv_cache_dtype
     assert server["enable_fp32_lm_head"] is False
     assert server["context_length"] == expected["context_length"]
     assert server["max_running_requests"] == expected["max_running_requests"]

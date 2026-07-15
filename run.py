@@ -119,7 +119,7 @@ class CFG:
     input_csv = Path(
         os.environ.get(
             "AIMO_INPUT_PATH",
-            str(REPO_ROOT / "evaluation" / "data" / "imo_2025.parquet"),
+            str(REPO_ROOT / "test.csv"),
         )
     )
     output_csv = Path(

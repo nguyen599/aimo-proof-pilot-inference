@@ -6,7 +6,7 @@ VENV="${VENV:-/workspace/pp/venv}"
 PYTHON="${PYTHON:-$VENV/bin/python}"
 INPUT="${1:-test.csv}"
 OUTPUT="${2:-submission.csv}"
-CONFIG="${CONFIG:-$REPO/evaluation/configs/nemotron_cascade2.yaml}"
+CONFIG="${CONFIG:?CONFIG is required and must point to config.yaml}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-submission_artifacts}"
 
 if [[ ! -x "$PYTHON" ]]; then

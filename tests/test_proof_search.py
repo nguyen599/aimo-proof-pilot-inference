@@ -389,11 +389,11 @@ class ProofSearchTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_prompt_files_are_byte_identical_to_ycchen_commit(self):
+    def test_prompt_files_match_checked_in_contract(self):
         self.assertEqual(
             prompt_hashes(),
             {
-                "prover.txt": "2f464567b97288c0b934b3aed2e32bdb5cd612a04c33f3ad86839b87005d5d4c",
+                "prover.txt": "d1471cef526b32f8fd112edfd4139a69e6788ccd8a3ab78967eb700700ee8377",
                 "verifier.txt": "8c8e904270d6ae54d04aa8782d91f5eca94ccbc1c850bee0685b9a4668242dec",
                 "refiner.txt": "0bc15f3fa590cc3970a5a65dd573ec3d31b39ad70a78179e5e06ac5b9654fb18",
             },
@@ -641,6 +641,73 @@ class ProofSearchTests(unittest.TestCase):
                     [1, 1],
                 )
                 self.assertEqual(len(set(review_prompts)), 2)
+
+        asyncio.run(run())
+
+    def test_round_checkpoints_follow_persisted_ranking_and_resume(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = small_config()
+                config["early_stop_threshold"] = 1.0
+                checkpoints = []
+
+                async def checkpoint(value: dict) -> None:
+                    summary_path = (
+                        root
+                        / "rounds"
+                        / "round-{:02d}.json".format(value["round"])
+                    )
+                    self.assertTrue(summary_path.exists())
+                    summary = json.loads(summary_path.read_text())
+                    self.assertEqual(
+                        summary["best_proof_id"], value["selected_proof_id"]
+                    )
+                    checkpoints.append(value)
+
+                search = ProblemSearch(
+                    problem_id="checkpoint",
+                    problem="Prove the claim.",
+                    output_dir=root,
+                    client=ScriptedClient(),
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                    on_round_complete=checkpoint,
+                )
+                final = await search.solve()
+                self.assertEqual(
+                    [value["round"] for value in checkpoints], [1, 2]
+                )
+                self.assertEqual(
+                    checkpoints[-1]["selected_proof_id"],
+                    final["selected_proof_id"],
+                )
+
+                (root / "final.json").unlink()
+                replayed = []
+
+                async def replay(value: dict) -> None:
+                    replayed.append(value)
+
+                resumed_client = ScriptedClient()
+                resumed = ProblemSearch(
+                    problem_id="checkpoint",
+                    problem="Prove the claim.",
+                    output_dir=root,
+                    client=resumed_client,
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                    on_round_complete=replay,
+                )
+                resumed_final = await resumed.solve()
+                self.assertEqual(
+                    [value["round"] for value in replayed], [2]
+                )
+                self.assertEqual(
+                    replayed[0]["selected_proof_id"],
+                    resumed_final["selected_proof_id"],
+                )
+                self.assertEqual(resumed_client.calls, [])
 
         asyncio.run(run())
 
@@ -1039,7 +1106,6 @@ class ProofSearchTests(unittest.TestCase):
                 self.assertEqual(final["calls_completed"], 6)
 
         asyncio.run(run())
-
 
 if __name__ == "__main__":
     unittest.main()

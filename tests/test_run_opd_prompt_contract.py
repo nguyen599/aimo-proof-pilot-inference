@@ -19,12 +19,18 @@ import run  # noqa: E402
 
 
 class RunOpdPromptContractTests(unittest.TestCase):
-    def test_checked_in_imo_parquet_is_supported(self):
-        frame, problem_column, id_column = run.load_simple_input(
-            REPO / "evaluation" / "data" / "imo_2025.parquet"
-        )
+    def test_parquet_input_is_supported(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "problems.parquet"
+            run.pd.DataFrame(
+                {
+                    "problem_idx": [1, 2],
+                    "problem": ["Prove the first claim.", "Prove the second claim."],
+                }
+            ).to_parquet(input_path)
+            frame, problem_column, id_column = run.load_simple_input(input_path)
 
-        self.assertEqual(len(frame), 6)
+        self.assertEqual(len(frame), 2)
         self.assertEqual(problem_column, "problem")
         self.assertEqual(id_column, "problem_idx")
 
@@ -202,7 +208,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
     def test_imo2025_defaults_run_the_complete_candidate_pipeline(self):
         self.assertEqual(
             run.CFG.input_csv,
-            REPO / "evaluation" / "data" / "imo_2025.parquet",
+            REPO / "test.csv",
         )
         self.assertEqual(run.CFG.pipelines_per_problem, 14)
         self.assertEqual(run.CFG.deepseek_math_v2_candidate_count, 6)

@@ -51,7 +51,7 @@ export AIMO_DISTRIBUTED_ROOT=/tmp/aimo-proof-pilot-inference/distributed
 
 export AIMO_MODEL_PATH=/tmp/models/olmo3-opd-sft-200
 export AIMO_DFLASH_MODEL_PATH=/tmp/models/dflash-32b-draft-v2test-phaseL
-export AIMO_INPUT_PATH=/tmp/aimo-proof-pilot-inference/evaluation/data/imo_2025.parquet
+export AIMO_INPUT_PATH=/tmp/aimo-proof-pilot-inference/test.csv
 
 # In distributed mode, omitting these keeps all generated files under /tmp.
 unset AIMO_LOGDIR AIMO_OUTPUT_PATH
