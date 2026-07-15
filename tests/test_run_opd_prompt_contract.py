@@ -31,6 +31,12 @@ class RunOpdPromptContractTests(unittest.TestCase):
     def test_long_context_defaults_stay_near_training_length(self):
         self.assertEqual(run.CFG.num_ctx, 262_144)
         self.assertIn("--quantization fp8", run.CFG.vllm_extra_args)
+        self.assertEqual(run.CFG.gpu_memory_utilization, 0.92)
+        vllm_args = shlex.split(run.CFG.vllm_extra_args)
+        self.assertEqual(
+            vllm_args[vllm_args.index("--max-num-batched-tokens") + 1],
+            "16384",
+        )
         self.assertLessEqual(run.CFG.max_new_tokens, 131_072)
         self.assertGreaterEqual(min(run.CFG.proof_generation_thinking_budgets), 120_000)
         self.assertLess(
@@ -71,9 +77,121 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "method": "dflash",
                 "model": "/draft",
                 "num_speculative_tokens": 10,
-                "disable_above_context_len": 81920,
+                "disable_above_context_len": 65536,
             },
         )
+
+    def test_max_num_batched_tokens_can_be_overridden(self):
+        with patch.dict(
+            os.environ,
+            {"AIMO_MAX_NUM_BATCHED_TOKENS": "32768"},
+        ):
+            args = shlex.split(run.default_vllm_extra_args())
+
+        self.assertEqual(
+            args[args.index("--max-num-batched-tokens") + 1],
+            "32768",
+        )
+
+    def test_tp2_dp4_auto_selects_eight_gpus(self):
+        cfg = SimpleNamespace(
+            gpus="",
+            num_gpus=1,
+            tensor_parallel_size=2,
+            data_parallel_size=4,
+        )
+
+        selected_gpus, tp_size, dp_size = run.resolve_gpu_parallel_layout(cfg)
+
+        self.assertEqual(selected_gpus, [str(index) for index in range(8)])
+        self.assertEqual(tp_size, 2)
+        self.assertEqual(dp_size, 4)
+
+    def test_parallel_layout_infers_tp_from_explicit_gpus(self):
+        cfg = SimpleNamespace(
+            gpus="0,1,2,3,4,5,6,7",
+            num_gpus=1,
+            tensor_parallel_size=0,
+            data_parallel_size=4,
+        )
+
+        selected_gpus, tp_size, dp_size = run.resolve_gpu_parallel_layout(cfg)
+
+        self.assertEqual(len(selected_gpus), 8)
+        self.assertEqual(tp_size, 2)
+        self.assertEqual(dp_size, 4)
+
+    def test_parallel_layout_rejects_incomplete_gpu_group(self):
+        cfg = SimpleNamespace(
+            gpus="0,1,2,3,4,5,6",
+            num_gpus=1,
+            tensor_parallel_size=2,
+            data_parallel_size=4,
+        )
+
+        with self.assertRaisesRegex(ValueError, "GPU count must equal TP x DP"):
+            run.resolve_gpu_parallel_layout(cfg)
+
+    def test_request_concurrency_scales_with_selected_gpu_count(self):
+        cfg = SimpleNamespace(
+            max_concurrent_requests=0,
+            requests_per_gpu=32,
+        )
+
+        self.assertEqual(run.resolve_max_concurrent_requests(cfg, 8), 256)
+
+    def test_request_concurrency_supports_explicit_override(self):
+        cfg = SimpleNamespace(
+            max_concurrent_requests=96,
+            requests_per_gpu=32,
+        )
+
+        self.assertEqual(run.resolve_max_concurrent_requests(cfg, 8), 96)
+
+    def test_request_concurrency_rejects_invalid_values(self):
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            run.resolve_max_concurrent_requests(
+                SimpleNamespace(
+                    max_concurrent_requests=-1,
+                    requests_per_gpu=32,
+                ),
+                8,
+            )
+        with self.assertRaisesRegex(ValueError, "must be at least 1"):
+            run.resolve_max_concurrent_requests(
+                SimpleNamespace(
+                    max_concurrent_requests=0,
+                    requests_per_gpu=0,
+                ),
+                8,
+            )
+
+    def test_vllm_command_forwards_data_parallel_size(self):
+        cfg = SimpleNamespace(
+            model_path="/model",
+            served_model_name="proof-model",
+            api_key="key",
+            tensor_parallel_size=2,
+            data_parallel_size=4,
+            max_num_seqs=32,
+            gpu_memory_utilization=0.95,
+            host="127.0.0.1",
+            dtype="auto",
+            num_ctx=262_144,
+            stream_interval=100,
+            vllm_extra_args="",
+            logdir=REPO / "outputs" / "test-logs",
+        )
+
+        command = run.VLLMServer(
+            cfg,
+            port=8000,
+            gpu_group="0,1,2,3,4,5,6,7",
+            index=0,
+        ).build_command()
+
+        self.assertEqual(command[command.index("--tensor-parallel-size") + 1], "2")
+        self.assertEqual(command[command.index("--data-parallel-size") + 1], "4")
 
     def test_dflash_disables_unsupported_min_p(self):
         with patch.dict(os.environ, {"AIMO_DFLASH_MODEL_PATH": "/draft"}):
@@ -164,14 +282,12 @@ class RunOpdPromptContractTests(unittest.TestCase):
         cfg = SimpleNamespace(deepseek_math_v2_candidate_count=6)
 
         families = [
-            run.resolve_candidate_prompt_family(index, 14, cfg)
-            for index in range(14)
+            run.resolve_candidate_prompt_family(index, 14, cfg) for index in range(14)
         ]
 
         self.assertEqual(
             families,
-            [run.PROMPT_FAMILY_DEEPSEEK_MATH_V2] * 6
-            + [run.PROMPT_FAMILY_OPD] * 8,
+            [run.PROMPT_FAMILY_DEEPSEEK_MATH_V2] * 6 + [run.PROMPT_FAMILY_OPD] * 8,
         )
         all_opd = SimpleNamespace(deepseek_math_v2_candidate_count=0)
         all_deepseek = SimpleNamespace(deepseek_math_v2_candidate_count=14)
@@ -365,9 +481,7 @@ class MixedPromptRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         scheduler = FakeScheduler()
 
-        deepseek = await run.generate_single_attempt(
-            "Problem.", 0, 14, scheduler, cfg
-        )
+        deepseek = await run.generate_single_attempt("Problem.", 0, 14, scheduler, cfg)
         opd = await run.generate_single_attempt("Problem.", 6, 14, scheduler, cfg)
 
         self.assertEqual(
@@ -483,7 +597,7 @@ class MixedPromptRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## Instruction", str(scheduler.calls[0][1]))
         self.assertIn("## Instruction", str(scheduler.calls[2][1]))
         self.assertIn(
-            "<candidate id=\"P0\">",
+            '<candidate id="P0">',
             scheduler.calls[1][1][1]["content"],
         )
         self.assertEqual(

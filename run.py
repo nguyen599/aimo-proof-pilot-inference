@@ -12,15 +12,19 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
@@ -58,12 +62,24 @@ def is_fatal_inference_error(exc: BaseException) -> bool:
 
 DEFAULT_VLLM_EXTRA_ARGS = (
     "--generation-config vllm --quantization fp8 --kv-cache-dtype fp8 --block-size 256 "
-    "--max_num_batched_tokens 16384 --uvicorn-log-level warning"
+    "--uvicorn-log-level warning"
 )
+DEFAULT_MAX_NUM_BATCHED_TOKENS = 16_384
 
 
 def default_vllm_extra_args() -> str:
     extra_args = shlex.split(DEFAULT_VLLM_EXTRA_ARGS)
+    max_num_batched_tokens = int(
+        os.environ.get(
+            "AIMO_MAX_NUM_BATCHED_TOKENS",
+            str(DEFAULT_MAX_NUM_BATCHED_TOKENS),
+        )
+    )
+    if max_num_batched_tokens <= 0:
+        raise ValueError("AIMO_MAX_NUM_BATCHED_TOKENS must be positive")
+    extra_args.extend(
+        ["--max-num-batched-tokens", str(max_num_batched_tokens)]
+    )
     draft_model = os.environ.get("AIMO_DFLASH_MODEL_PATH", "").strip()
     if not draft_model:
         return shlex.join(extra_args)
@@ -71,7 +87,7 @@ def default_vllm_extra_args() -> str:
     num_speculative_tokens = int(
         os.environ.get("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS", "10")
     )
-    context_cutoff = int(os.environ.get("AIMO_DFLASH_CONTEXT_CUTOFF", "81920"))
+    context_cutoff = int(os.environ.get("AIMO_DFLASH_CONTEXT_CUTOFF", "65536"))
     if num_speculative_tokens <= 0:
         raise ValueError("AIMO_DFLASH_NUM_SPECULATIVE_TOKENS must be positive")
     if context_cutoff <= 0:
@@ -169,7 +185,7 @@ class CFG:
     selector_max_new_tokens = 50_000
     selector_max_candidate_chars = 32_000
 
-    temperature = 0.7
+    temperature = 1.0
     proof_generation_temperatures = [
         1.0,
         1.0,
@@ -187,18 +203,27 @@ class CFG:
         1.0,
     ]
     top_p = 0.95
-    top_k = 64
+    top_k = -1
     min_new_tokens = 0
     # vLLM 0.25.1 rejects min_p when speculative decoding is active.
     min_p: Optional[float] = default_min_p()
 
-    num_gpus = 1
-    gpus = ""
-    tensor_parallel_size = 0
+    num_gpus = int(os.environ.get("AIMO_NUM_GPUS", "1"))
+    gpus = os.environ.get("AIMO_GPUS", "")
+    tensor_parallel_size = int(
+        os.environ.get("AIMO_TENSOR_PARALLEL_SIZE", "0")
+    )
+    data_parallel_size = int(os.environ.get("AIMO_DATA_PARALLEL_SIZE", "1"))
     dtype = "auto"
-    gpu_memory_utilization = 0.95
+    gpu_memory_utilization = float(
+        os.environ.get("AIMO_GPU_MEMORY_UTILIZATION", "0.92")
+    )
     max_num_seqs = 32
-    max_concurrent_requests = 32
+    requests_per_gpu = int(os.environ.get("AIMO_REQUESTS_PER_GPU", "32"))
+    # Zero selects requests_per_gpu * selected local GPUs.
+    max_concurrent_requests = int(
+        os.environ.get("AIMO_MAX_CONCURRENT_REQUESTS", "0")
+    )
     max_concurrent_problems = 1
 
     pipelines_per_problem = 14
@@ -380,6 +405,7 @@ class VLLMConfig:
     gpu_memory_utilization: float
     max_num_seqs: int
     tensor_parallel_size: int
+    data_parallel_size: int
     vllm_extra_args: str
     logdir: Path
     stream_interval: int = 10
@@ -430,6 +456,450 @@ class InputRecord:
     source_stem: str
     row_index: int
     question_column: str
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, default=str)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def merge_distributed_pipeline_results(
+    payloads: list[dict[str, Any]],
+    *,
+    pipelines_per_problem: int,
+    world_size: int,
+) -> dict[str, Any]:
+    expected_attempts = set(range(pipelines_per_problem))
+    assigned_attempts: set[int] = set()
+    candidates: list[dict[str, Any]] = []
+    failed_attempts: list[dict[str, Any]] = []
+    skipped_generations: list[dict[str, Any]] = []
+    cancelled_count = 0
+
+    if len(payloads) != world_size:
+        raise ValueError(
+            f"Expected {world_size} distributed payloads, got {len(payloads)}"
+        )
+    for expected_rank, payload in enumerate(sorted(payloads, key=lambda item: int(item["rank"]))):
+        rank = int(payload["rank"])
+        if rank != expected_rank:
+            raise ValueError(
+                f"Distributed payload ranks are incomplete: expected {expected_rank}, got {rank}"
+            )
+        rank_attempts = [int(value) for value in payload.get("assigned_attempts", [])]
+        overlap = assigned_attempts.intersection(rank_attempts)
+        if overlap:
+            raise ValueError(f"Candidate attempts assigned more than once: {sorted(overlap)}")
+        assigned_attempts.update(rank_attempts)
+
+        result = payload.get("pipeline_result") or {}
+        for candidate in result.get("candidates") or []:
+            attempt_idx = int(candidate.get("attempt_idx"))
+            if attempt_idx not in rank_attempts:
+                raise ValueError(
+                    f"Rank {rank} returned unassigned candidate {attempt_idx}"
+                )
+            candidates.append(candidate)
+        failed_attempts.extend(result.get("failed_attempts") or [])
+        skipped_generations.extend(result.get("skipped_generations") or [])
+        cancelled_count += int(result.get("cancelled_count") or 0)
+
+    if assigned_attempts != expected_attempts:
+        missing = sorted(expected_attempts - assigned_attempts)
+        extra = sorted(assigned_attempts - expected_attempts)
+        raise ValueError(
+            f"Distributed candidate assignment mismatch: missing={missing} extra={extra}"
+        )
+    candidate_attempts = [int(candidate.get("attempt_idx")) for candidate in candidates]
+    if len(candidate_attempts) != len(set(candidate_attempts)):
+        raise ValueError("Distributed ranks returned duplicate completed candidates")
+
+    candidates.sort(key=lambda candidate: int(candidate.get("attempt_idx")))
+    failed_attempts.sort(
+        key=lambda item: (
+            item.get("attempt_idx") is None,
+            int(item.get("attempt_idx") or -1),
+        )
+    )
+    strict_pass_candidates = [
+        candidate for candidate in candidates if candidate.get("strict_pass")
+    ]
+    return {
+        "candidates": candidates,
+        "initial_generations": [],
+        "failed_attempts": failed_attempts,
+        "skipped_generations": skipped_generations,
+        "strict_pass_candidate": (
+            strict_pass_candidates[0] if strict_pass_candidates else None
+        ),
+        "cancelled_count": cancelled_count,
+    }
+
+
+@dataclass
+class DistributedRuntime:
+    rank: int
+    world_size: int
+    master_addr: str
+    master_port: int
+    root: Path
+    timeout_seconds: int
+    poll_seconds: float
+    requested_run_id: str = ""
+    run_id: str = ""
+    session_dir: Optional[Path] = None
+    initialized: bool = False
+
+    @classmethod
+    def from_environment(cls) -> "DistributedRuntime":
+        rank_value = os.environ.get(
+            "AIMO_NODE_RANK", os.environ.get("GLOBAL_RANK", "0")
+        )
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank = int(rank_value)
+        if world_size < 1:
+            raise ValueError("WORLD_SIZE must be at least 1")
+        if not 0 <= rank < world_size:
+            raise ValueError(
+                f"Node rank must satisfy 0 <= rank < WORLD_SIZE, got {rank}/{world_size}"
+            )
+        master_addr = os.environ.get("MASTER_ADDR", "").strip()
+        master_port = int(os.environ.get("MASTER_PORT", "0") or 0)
+        if world_size > 1 and (not master_addr or master_port <= 0):
+            raise ValueError(
+                "Multi-node inference requires MASTER_ADDR and a positive MASTER_PORT"
+            )
+        return cls(
+            rank=rank,
+            world_size=world_size,
+            master_addr=master_addr,
+            master_port=master_port,
+            root=Path(
+                os.environ.get(
+                    "AIMO_DISTRIBUTED_ROOT",
+                    "/tmp/aimo-proof-pilot-inference/distributed",
+                )
+            ),
+            timeout_seconds=max(
+                60,
+                int(os.environ.get("AIMO_DISTRIBUTED_TIMEOUT_SECONDS", "172800")),
+            ),
+            poll_seconds=max(
+                0.1,
+                float(os.environ.get("AIMO_DISTRIBUTED_POLL_SECONDS", "1")),
+            ),
+            requested_run_id=os.environ.get("AIMO_DISTRIBUTED_RUN_ID", "").strip(),
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self.world_size > 1
+
+    @property
+    def is_primary(self) -> bool:
+        return self.rank == 0
+
+    def initialize(self, metadata: dict[str, Any]) -> None:
+        if not self.enabled:
+            self.initialized = True
+            return
+
+        import torch.distributed as dist
+
+        if not dist.is_available():
+            raise RuntimeError("torch.distributed is unavailable")
+        if dist.is_initialized():
+            raise RuntimeError(
+                "run.py must own the node-level control group; do not wrap it in torchrun"
+            )
+
+        init_method = f"tcp://{self.master_addr}:{self.master_port}"
+        try:
+            dist.init_process_group(
+                backend="gloo",
+                init_method=init_method,
+                rank=self.rank,
+                world_size=self.world_size,
+                timeout=timedelta(seconds=self.timeout_seconds),
+            )
+            generated_run_id = (
+                self.requested_run_id
+                or f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}_{uuid.uuid4().hex[:8]}"
+            )
+            run_id_payload = [generated_run_id if self.is_primary else None]
+            dist.broadcast_object_list(run_id_payload, src=0)
+            broadcast_run_id = str(run_id_payload[0] or "").strip()
+            run_id_error: Optional[str] = None
+            if self.requested_run_id and self.requested_run_id != broadcast_run_id:
+                run_id_error = (
+                    "AIMO_DISTRIBUTED_RUN_ID differs across nodes: "
+                    f"local={self.requested_run_id!r} rank0={broadcast_run_id!r}"
+                )
+            run_id_errors: list[Optional[str]] = [None] * self.world_size
+            dist.all_gather_object(run_id_errors, run_id_error)
+            if any(run_id_errors):
+                raise RuntimeError(
+                    "AIMO_DISTRIBUTED_RUN_ID differs across nodes: "
+                    f"{[error for error in run_id_errors if error]}"
+                )
+            sanitized_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", broadcast_run_id)
+            if not sanitized_run_id:
+                raise ValueError("AIMO_DISTRIBUTED_RUN_ID must contain a safe character")
+            self.run_id = sanitized_run_id
+            self.session_dir = self.root / "runs" / self.run_id
+
+            prepare_error: Optional[str] = None
+            if self.is_primary:
+                try:
+                    if self.session_dir.exists():
+                        overwrite = os.environ.get(
+                            "AIMO_DISTRIBUTED_OVERWRITE", ""
+                        ).strip().lower() in {"1", "true", "yes", "on"}
+                        if not overwrite:
+                            raise FileExistsError(
+                                f"Distributed run directory already exists: "
+                                f"{self.session_dir}. Use a new "
+                                "AIMO_DISTRIBUTED_RUN_ID or explicitly set "
+                                "AIMO_DISTRIBUTED_OVERWRITE=1."
+                            )
+                        shutil.rmtree(self.session_dir)
+                    self.session_dir.mkdir(parents=True, exist_ok=True)
+                    atomic_write_json(
+                        self.session_dir / "manifest.json",
+                        {
+                            "run_id": self.run_id,
+                            "world_size": self.world_size,
+                            "master_addr": self.master_addr,
+                            "master_port": self.master_port,
+                            "created_at": time.time(),
+                            "metadata": metadata,
+                        },
+                    )
+                    atomic_write_json(
+                        self.root / "latest.json",
+                        {
+                            "run_id": self.run_id,
+                            "session_dir": str(self.session_dir),
+                        },
+                    )
+                except Exception as exc:
+                    prepare_error = f"{type(exc).__name__}: {exc}"
+            prepare_error_payload = [prepare_error]
+            dist.broadcast_object_list(prepare_error_payload, src=0)
+            if prepare_error_payload[0]:
+                raise RuntimeError(
+                    "Could not prepare distributed run directory: "
+                    f"{prepare_error_payload[0]}"
+                )
+
+            metadata_json = json.dumps(metadata, sort_keys=True, default=str)
+            fingerprint = hashlib.sha256(metadata_json.encode("utf-8")).hexdigest()
+            startup_write_error: Optional[str] = None
+            try:
+                atomic_write_json(
+                    self.session_dir / "startup" / f"rank_{self.rank:04d}.json",
+                    {
+                        "rank": self.rank,
+                        "world_size": self.world_size,
+                        "hostname": socket.gethostname(),
+                        "pid": os.getpid(),
+                        "fingerprint": fingerprint,
+                        "metadata": metadata,
+                    },
+                )
+            except Exception as exc:
+                startup_write_error = f"{type(exc).__name__}: {exc}"
+            startup_write_errors: list[Optional[str]] = [None] * self.world_size
+            dist.all_gather_object(startup_write_errors, startup_write_error)
+            if any(startup_write_errors):
+                raise RuntimeError(
+                    "Could not write distributed startup records: "
+                    f"{[error for error in startup_write_errors if error]}"
+                )
+            startup_error: Optional[str] = None
+            if self.is_primary:
+                try:
+                    startup_records = [
+                        json.loads(
+                            (
+                                self.session_dir
+                                / "startup"
+                                / f"rank_{rank:04d}.json"
+                            ).read_text(encoding="utf-8")
+                        )
+                        for rank in range(self.world_size)
+                    ]
+                    fingerprints = {
+                        record["fingerprint"] for record in startup_records
+                    }
+                    if fingerprints != {fingerprint}:
+                        raise RuntimeError(
+                            "Multi-node inference configuration differs across ranks"
+                        )
+                    atomic_write_json(
+                        self.session_dir / "startup" / "ready.json",
+                        {"ranks": startup_records, "ready_at": time.time()},
+                    )
+                except Exception as exc:
+                    startup_error = f"{type(exc).__name__}: {exc}"
+            startup_error_payload = [startup_error]
+            dist.broadcast_object_list(startup_error_payload, src=0)
+            if startup_error_payload[0]:
+                raise RuntimeError(
+                    "Multi-node inference startup validation failed: "
+                    f"{startup_error_payload[0]}"
+                )
+        finally:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        self.initialized = True
+
+    def rank_logdir(self, configured_logdir: Path) -> Path:
+        if not self.enabled:
+            return configured_logdir
+        if self.session_dir is None:
+            raise RuntimeError("Distributed runtime is not initialized")
+        base = (
+            configured_logdir
+            if os.environ.get("AIMO_LOGDIR")
+            else self.session_dir / "logs"
+        )
+        return base / f"rank_{self.rank:04d}"
+
+    def output_path(self, configured_output: Path) -> Path:
+        if not self.enabled:
+            return configured_output
+        if self.session_dir is None:
+            raise RuntimeError("Distributed runtime is not initialized")
+        if os.environ.get("AIMO_OUTPUT_PATH"):
+            return configured_output
+        return self.session_dir / "submission.csv"
+
+    def assigned_attempt_indices(
+        self, pipelines_per_problem: int, *, rank: Optional[int] = None
+    ) -> list[int]:
+        owner = self.rank if rank is None else int(rank)
+        if not 0 <= owner < self.world_size:
+            raise ValueError(f"Invalid distributed owner rank {owner}")
+        return [
+            attempt_idx
+            for attempt_idx in range(pipelines_per_problem)
+            if attempt_idx % self.world_size == owner
+        ]
+
+    def _failure_paths(self) -> list[Path]:
+        if self.session_dir is None:
+            return []
+        return sorted((self.session_dir / "errors").glob("rank_*.json"))
+
+    def _raise_if_failed(self) -> None:
+        failures = self._failure_paths()
+        if not failures:
+            return
+        records = [json.loads(path.read_text(encoding="utf-8")) for path in failures]
+        raise RuntimeError(f"Distributed inference rank failure: {records}")
+
+    def _wait_for_paths(self, paths: list[Path], description: str) -> None:
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            self._raise_if_failed()
+            missing = [path for path in paths if not path.is_file()]
+            if not missing:
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for {description}; missing={missing}"
+                )
+            time.sleep(self.poll_seconds)
+
+    def synchronize_stage(self, stage: str) -> None:
+        if not self.enabled:
+            return
+        if self.session_dir is None:
+            raise RuntimeError("Distributed runtime is not initialized")
+        safe_stage = re.sub(r"[^A-Za-z0-9_.-]+", "_", stage)
+        stage_dir = self.session_dir / "stages" / safe_stage
+        atomic_write_json(
+            stage_dir / f"rank_{self.rank:04d}.json",
+            {"rank": self.rank, "hostname": socket.gethostname(), "time": time.time()},
+        )
+        self._wait_for_paths(
+            [stage_dir / f"rank_{rank:04d}.json" for rank in range(self.world_size)],
+            f"stage {safe_stage}",
+        )
+
+    def exchange_pipeline_result(
+        self,
+        *,
+        problem_ordinal: int,
+        problem_id: Any,
+        question: str,
+        pipelines_per_problem: int,
+        pipeline_result: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.enabled:
+            return pipeline_result
+        if self.session_dir is None:
+            raise RuntimeError("Distributed runtime is not initialized")
+        digest = hashlib.sha256(
+            f"{problem_id}\0{question}".encode("utf-8")
+        ).hexdigest()[:16]
+        problem_key = f"{problem_ordinal:04d}_{digest}"
+        problem_dir = self.session_dir / "problems" / problem_key
+        assigned_attempts = self.assigned_attempt_indices(pipelines_per_problem)
+        local_path = problem_dir / f"rank_{self.rank:04d}.json"
+        atomic_write_json(
+            local_path,
+            {
+                "run_id": self.run_id,
+                "rank": self.rank,
+                "world_size": self.world_size,
+                "problem_ordinal": problem_ordinal,
+                "problem_id": problem_id,
+                "question_hash": digest,
+                "assigned_attempts": assigned_attempts,
+                "pipeline_result": pipeline_result,
+            },
+        )
+        rank_paths = [
+            problem_dir / f"rank_{rank:04d}.json" for rank in range(self.world_size)
+        ]
+        self._wait_for_paths(rank_paths, f"problem {problem_id!r} candidate payloads")
+        if not self.is_primary:
+            return None
+        payloads = [
+            json.loads(path.read_text(encoding="utf-8")) for path in rank_paths
+        ]
+        return merge_distributed_pipeline_results(
+            payloads,
+            pipelines_per_problem=pipelines_per_problem,
+            world_size=self.world_size,
+        )
+
+    def report_failure(self, exc: BaseException) -> None:
+        if not self.enabled or self.session_dir is None:
+            return
+        try:
+            atomic_write_json(
+                self.session_dir / "errors" / f"rank_{self.rank:04d}.json",
+                {
+                    "rank": self.rank,
+                    "hostname": socket.gethostname(),
+                    "error": repr(exc),
+                    "traceback": traceback.format_exc(),
+                    "time": time.time(),
+                },
+            )
+        except Exception:
+            logging.exception("Failed to publish distributed rank error")
 
 
 def setup_logging(logdir: Path) -> None:
@@ -1787,7 +2257,10 @@ class VLLMServer:
 
     @property
     def tag(self) -> str:
-        return f"vllm[{self.index}] port={self.port} gpus={self.gpu_group}"
+        return (
+            f"vllm[{self.index}] port={self.port} gpus={self.gpu_group} "
+            f"tp={self.cfg.tensor_parallel_size} dp={self.cfg.data_parallel_size}"
+        )
 
     def is_port_open(self) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1807,6 +2280,8 @@ class VLLMServer:
             self.cfg.api_key,
             "--tensor-parallel-size",
             str(self.cfg.tensor_parallel_size),
+            "--data-parallel-size",
+            str(self.cfg.data_parallel_size),
             "--max-num-seqs",
             str(self.cfg.max_num_seqs),
             "--gpu-memory-utilization",
@@ -1836,6 +2311,21 @@ class VLLMServer:
             return
         cmd = self.build_command()
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.gpu_group}
+        # Each node owns an independent local vLLM TP/DP server. External
+        # node-level rendezvous variables must not make vLLM join that world.
+        for external_rank_key in (
+            "RANK",
+            "LOCAL_RANK",
+            "LOCAL_WORLD_SIZE",
+            "GROUP_RANK",
+            "ROLE_RANK",
+            "ROLE_WORLD_SIZE",
+            "GLOBAL_RANK",
+            "WORLD_SIZE",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+        ):
+            env.pop(external_rank_key, None)
         env.setdefault("VLLM_PLUGINS", "olmo3_sink")
         # vLLM 0.25 defaults to Model Runner V2, which does not yet support the
         # thinking_token_budget request field used by this inference pipeline.
@@ -3904,9 +4394,25 @@ async def run_streaming_candidates(
     problem_id: Any = "problem",
     progress: Optional[PipelineProgress] = None,
     timeout_s: Optional[float] = None,
+    attempt_indices: Optional[list[int]] = None,
 ) -> dict[str, Any]:
+    resolved_attempt_indices = (
+        list(range(pipelines_per_problem))
+        if attempt_indices is None
+        else [int(attempt_idx) for attempt_idx in attempt_indices]
+    )
+    if len(resolved_attempt_indices) != len(set(resolved_attempt_indices)):
+        raise ValueError("attempt_indices must not contain duplicates")
+    if any(
+        attempt_idx < 0 or attempt_idx >= pipelines_per_problem
+        for attempt_idx in resolved_attempt_indices
+    ):
+        raise ValueError(
+            "attempt_indices must be within the global candidate range "
+            f"[0, {pipelines_per_problem})"
+        )
     verification_throttle = VerificationThrottle(
-        pipelines_per_problem,
+        len(resolved_attempt_indices),
         cfg.verify_candidate_limit_while_generating,
         cfg.verify_request_limit_while_generating,
     )
@@ -3923,7 +4429,7 @@ async def run_streaming_candidates(
                 throttle=verification_throttle,
             )
         )
-        for attempt_idx in range(pipelines_per_problem)
+        for attempt_idx in resolved_attempt_indices
     ]
     candidates: list[dict[str, Any]] = []
     failed_attempts: list[dict[str, Any]] = []
@@ -3962,7 +4468,7 @@ async def run_streaming_candidates(
                     candidate.get("final_status"),
                     candidate.get("strict_pass"),
                     len(candidates),
-                    pipelines_per_problem,
+                    len(resolved_attempt_indices),
                 )
             if candidate.get("strict_pass") and cfg.stop_on_strict_pass:
                 strict_pass_candidate = candidate
@@ -4599,6 +5105,7 @@ class ProofRuntime:
         logdir: Path,
         gpu_group: str,
         tensor_parallel_size: int,
+        data_parallel_size: int,
         num_ctx: int,
         dtype: str,
         gpu_memory_utilization: float,
@@ -4658,6 +5165,7 @@ class ProofRuntime:
         stream_vllm: bool,
         stream_vllm_server_log: bool,
         verbose: bool,
+        distributed_runtime: DistributedRuntime,
     ) -> None:
         self.logdir = logdir
         self.gpu_group = gpu_group
@@ -4678,6 +5186,15 @@ class ProofRuntime:
         self.mock_llm = mock_llm
         self.stream_vllm = stream_vllm
         self.verbose = verbose
+        self.distributed = distributed_runtime
+        if (
+            self.distributed.enabled
+            and wait_for_all_generations_before_verify
+        ):
+            raise ValueError(
+                "wait_for_all_generations_before_verify is not supported with "
+                "multi-node candidate sharding"
+            )
         self.tokenizer = None if mock_llm else load_counting_tokenizer(model_path)
         self._init_lock = threading.Lock()
         self._predict_lock = threading.Lock()
@@ -4697,6 +5214,7 @@ class ProofRuntime:
             gpu_memory_utilization=gpu_memory_utilization,
             max_num_seqs=max_num_seqs,
             tensor_parallel_size=tensor_parallel_size,
+            data_parallel_size=data_parallel_size,
             vllm_extra_args=shlex.join(extra_args),
             logdir=logdir,
             stream_interval=stream_interval,
@@ -4815,24 +5333,33 @@ class ProofRuntime:
         self,
         problem_id: Any,
         question: str,
+        problem_ordinal: int = 0,
     ) -> dict[str, Any]:
         if self._scheduler is None:
             raise RuntimeError("Inference runtime was not initialized")
         started = time.monotonic()
+        assigned_attempts = (
+            self.distributed.assigned_attempt_indices(self.pipelines_per_problem)
+            if self.distributed.enabled
+            else list(range(self.pipelines_per_problem))
+        )
         progress = PipelineProgress(
             self.verbose,
             problem_id,
-            self.pipelines_per_problem,
+            len(assigned_attempts),
         )
         progress.log(
             "status=start candidates=%d verify_n=%d meta_n=%d refine_rounds=%d "
-            "stop_on_strict_pass=%s question_chars=%d",
+            "stop_on_strict_pass=%s question_chars=%d rank=%d/%d assigned=%s",
             self.pipelines_per_problem,
             self.pipeline_config.verify_n,
             self.pipeline_config.meta_n,
             self.pipeline_config.refine_rounds,
             self.pipeline_config.stop_on_strict_pass,
             len(question),
+            self.distributed.rank,
+            self.distributed.world_size,
+            assigned_attempts,
         )
         attempt_budget = max(
             30, self.problem_timeout_seconds - self.selection_reserve_seconds
@@ -4846,7 +5373,45 @@ class ProofRuntime:
                 problem_id=problem_id,
                 progress=progress,
                 timeout_s=float(attempt_budget),
+                attempt_indices=assigned_attempts,
             )
+            if self.distributed.enabled:
+                progress.log(
+                    "stage=distributed_exchange status=local_complete rank=%d "
+                    "valid=%d failed=%d assigned=%s",
+                    self.distributed.rank,
+                    len(pipeline_result["candidates"]),
+                    len(pipeline_result["failed_attempts"]),
+                    assigned_attempts,
+                )
+                pipeline_result = await asyncio.to_thread(
+                    self.distributed.exchange_pipeline_result,
+                    problem_ordinal=problem_ordinal,
+                    problem_id=problem_id,
+                    question=question,
+                    pipelines_per_problem=self.pipelines_per_problem,
+                    pipeline_result=pipeline_result,
+                )
+                if pipeline_result is None:
+                    elapsed = time.monotonic() - started
+                    progress.log(
+                        "stage=distributed_exchange status=worker_complete rank=%d "
+                        "elapsed=%.1fs",
+                        self.distributed.rank,
+                        elapsed,
+                    )
+                    return {
+                        "id": problem_id,
+                        "distributed_worker": True,
+                        "rank": self.distributed.rank,
+                        "assigned_attempts": assigned_attempts,
+                        "elapsed_s": elapsed,
+                    }
+                progress.log(
+                    "stage=distributed_exchange status=merged ranks=%d candidates=%d",
+                    self.distributed.world_size,
+                    len(pipeline_result["candidates"]),
+                )
             candidates = pipeline_result["candidates"]
             strict_pass_candidate = pipeline_result["strict_pass_candidate"]
             cancelled_count = pipeline_result["cancelled_count"]
@@ -4996,6 +5561,12 @@ class ProofRuntime:
     def predict(self, row_id: Any, problem: Any) -> Any:
         import polars as pl
 
+        if self.distributed.enabled:
+            raise RuntimeError(
+                "Distributed inference requires every rank to execute the same "
+                "standalone run.py input sequence; predict() is unsupported"
+            )
+
         with self._predict_lock:
             problem_id = row_id.item()
             question = str(problem.item())
@@ -5031,6 +5602,7 @@ def run_simple_csv(
     grader_records_path = runtime.logdir / "grader_input" / "records.jsonl"
     write_grader_input_records(grader_records_path, [])
     runtime.ensure_ready()
+    runtime.distributed.synchronize_stage("servers_ready")
     output_rows: dict[int, dict[str, Any]] = {}
     semaphore = asyncio.Semaphore(max(1, max_concurrent_problems))
 
@@ -5056,7 +5628,23 @@ def run_simple_csv(
             )
             started = time.monotonic()
             try:
-                result = await runtime.solve_problem(problem_id, question)
+                result = await runtime.solve_problem(
+                    problem_id,
+                    question,
+                    problem_ordinal=row_position,
+                )
+                if result.get("distributed_worker"):
+                    write_debug_row(runtime.logdir / "results.jsonl", result)
+                    return row_position, {
+                        "id": problem_id,
+                        "answer": "",
+                        "prediction": "",
+                        "final_status": "distributed_worker_complete",
+                        "final_score": None,
+                        "selected_pipeline": None,
+                        "elapsed_s": result.get("elapsed_s"),
+                        "error": "",
+                    }
                 output_row = {
                     "id": problem_id,
                     "answer": format_submission_answer(
@@ -5076,6 +5664,8 @@ def run_simple_csv(
                 raise
             except Exception as exc:
                 logging.exception("Failed row=%s id=%s", row_idx, problem_id)
+                if runtime.distributed.enabled:
+                    raise
                 output_row = {
                     "id": problem_id,
                     "answer": DEFAULT_FALLBACK_ANSWER,
@@ -5089,6 +5679,24 @@ def run_simple_csv(
             return row_position, output_row
 
     async def run_rows() -> None:
+        if runtime.distributed.enabled:
+            for row_position, (row_idx, row) in enumerate(df.iterrows()):
+                _, output_row = await process_row(row_position, int(row_idx), row)
+                if runtime.distributed.is_primary:
+                    output_rows[row_position] = output_row
+                    persist_outputs()
+                    print(
+                        f"Wrote row {len(output_rows)}/{len(df)} "
+                        f"id={output_row['id']} status={output_row['final_status']} "
+                        f"elapsed={output_row['elapsed_s'] or 0.0}",
+                    )
+                else:
+                    print(
+                        f"Rank {runtime.distributed.rank} completed distributed "
+                        f"row {row_position + 1}/{len(df)} id={output_row['id']}",
+                    )
+            return
+
         tasks = [
             asyncio.create_task(process_row(row_position, int(row_idx), row))
             for row_position, (row_idx, row) in enumerate(df.iterrows())
@@ -5105,22 +5713,135 @@ def run_simple_csv(
     runtime._loop.run_until_complete(run_rows())
 
 
-def run(cfg: type[CFG] = CFG) -> None:
-    setup_logging(cfg.logdir)
+def resolve_gpu_parallel_layout(cfg: Any) -> tuple[list[str], int, int]:
+    """Resolve one local vLLM server's TP x DP GPU layout."""
+    data_parallel_size = int(cfg.data_parallel_size)
+    tensor_parallel_size = int(cfg.tensor_parallel_size)
+    num_gpus = int(cfg.num_gpus)
+    if data_parallel_size < 1:
+        raise ValueError("AIMO_DATA_PARALLEL_SIZE must be at least 1")
+    if tensor_parallel_size < 0:
+        raise ValueError("AIMO_TENSOR_PARALLEL_SIZE cannot be negative")
+    if num_gpus < 1:
+        raise ValueError("AIMO_NUM_GPUS must be at least 1")
+
     selected_gpus = [item.strip() for item in cfg.gpus.split(",") if item.strip()]
-    if not selected_gpus:
-        selected_gpus = [str(index) for index in range(max(1, cfg.num_gpus))]
-    resolved_tp = (
-        cfg.tensor_parallel_size if cfg.tensor_parallel_size > 0 else len(selected_gpus)
-    )
-    if resolved_tp != len(selected_gpus):
+    if len(selected_gpus) != len(set(selected_gpus)):
+        raise ValueError("AIMO_GPUS must not contain duplicate GPU IDs")
+
+    if selected_gpus:
+        if tensor_parallel_size == 0:
+            if len(selected_gpus) % data_parallel_size != 0:
+                raise ValueError(
+                    "The number of AIMO_GPUS entries must be divisible by "
+                    "AIMO_DATA_PARALLEL_SIZE when TP is inferred"
+                )
+            tensor_parallel_size = len(selected_gpus) // data_parallel_size
+    elif tensor_parallel_size > 0:
+        expected_gpus = tensor_parallel_size * data_parallel_size
+        if num_gpus not in (1, expected_gpus):
+            raise ValueError(
+                "AIMO_NUM_GPUS conflicts with TP x DP: "
+                f"{num_gpus} != {tensor_parallel_size} x {data_parallel_size}"
+            )
+        selected_gpus = [str(index) for index in range(expected_gpus)]
+    elif num_gpus == 1 and data_parallel_size > 1:
+        tensor_parallel_size = 1
+        selected_gpus = [str(index) for index in range(data_parallel_size)]
+    else:
+        if num_gpus % data_parallel_size != 0:
+            raise ValueError(
+                "AIMO_NUM_GPUS must be divisible by AIMO_DATA_PARALLEL_SIZE "
+                "when TP is inferred"
+            )
+        tensor_parallel_size = num_gpus // data_parallel_size
+        selected_gpus = [str(index) for index in range(num_gpus)]
+
+    expected_gpus = tensor_parallel_size * data_parallel_size
+    if tensor_parallel_size < 1 or len(selected_gpus) != expected_gpus:
         raise ValueError(
-            "--tensor_parallel_size must equal the number of selected GPUs for the single vLLM server"
+            "Selected GPU count must equal TP x DP: "
+            f"{len(selected_gpus)} != {tensor_parallel_size} x "
+            f"{data_parallel_size}"
         )
+    return selected_gpus, tensor_parallel_size, data_parallel_size
+
+
+def resolve_max_concurrent_requests(cfg: Any, selected_gpu_count: int) -> int:
+    """Resolve the local request scheduler capacity from the GPU count."""
+    configured = int(cfg.max_concurrent_requests)
+    requests_per_gpu = int(cfg.requests_per_gpu)
+    if selected_gpu_count < 1:
+        raise ValueError("selected_gpu_count must be at least 1")
+    if configured < 0:
+        raise ValueError("AIMO_MAX_CONCURRENT_REQUESTS cannot be negative")
+    if requests_per_gpu < 1:
+        raise ValueError("AIMO_REQUESTS_PER_GPU must be at least 1")
+    if configured > 0:
+        return configured
+    return requests_per_gpu * selected_gpu_count
+
+
+def run(cfg: type[CFG] = CFG) -> None:
+    selected_gpus, resolved_tp, resolved_dp = resolve_gpu_parallel_layout(cfg)
+    resolved_max_concurrent_requests = resolve_max_concurrent_requests(
+        cfg,
+        len(selected_gpus),
+    )
+    distributed = DistributedRuntime.from_environment()
+    distributed.initialize(
+        {
+            "run_py_sha256": hashlib.sha256(
+                Path(__file__).read_bytes()
+            ).hexdigest(),
+            "model_path": str(cfg.model_path),
+            "input_csv": str(cfg.input_csv),
+            "max_rows": int(cfg.max_rows),
+            "num_ctx": int(cfg.num_ctx),
+            "proof_max_new_tokens": int(cfg.max_new_tokens),
+            "verifier_max_new_tokens": int(cfg.verifier_max_new_tokens),
+            "meta_max_new_tokens": int(cfg.meta_max_new_tokens),
+            "selector_max_new_tokens": int(cfg.selector_max_new_tokens),
+            "pipelines_per_problem": int(cfg.pipelines_per_problem),
+            "deepseek_math_v2_candidate_count": int(
+                cfg.deepseek_math_v2_candidate_count
+            ),
+            "proof_only_candidate_count": int(cfg.proof_only_candidate_count),
+            "verify_n": int(cfg.verify_n),
+            "meta_n": int(cfg.meta_n),
+            "meta_policy": str(cfg.meta_policy),
+            "strict_pass_meta": bool(cfg.strict_pass_meta),
+            "refine_rounds": int(cfg.refine_rounds),
+            "refine_review_n": int(cfg.refine_review_n),
+            "selector_mode": str(cfg.selector_mode),
+            "temperature": float(cfg.temperature),
+            "top_p": float(cfg.top_p),
+            "top_k": int(cfg.top_k),
+            "min_p": cfg.min_p,
+            "proof_generation_temperatures": list(
+                cfg.proof_generation_temperatures
+            ),
+            "proof_generation_thinking_budgets": list(
+                cfg.proof_generation_thinking_budgets
+            ),
+            "vllm_extra_args": str(cfg.vllm_extra_args),
+            "served_model_name": str(cfg.served_model_name),
+            "mock_llm": bool(cfg.mock_llm),
+            "tensor_parallel_size": resolved_tp,
+            "data_parallel_size": resolved_dp,
+            "selected_gpus": selected_gpus,
+            "max_concurrent_requests": resolved_max_concurrent_requests,
+        }
+    )
+    runtime_logdir = distributed.rank_logdir(cfg.logdir)
+    output_csv = distributed.output_path(cfg.output_csv)
+    setup_logging(runtime_logdir)
     logging.info(
         "Inference runtime: stream_vllm=%s stream_vllm_server_log=%s verbose=%s "
         "meta_policy=%s strict_pass_meta=%s max_concurrent_problems=%s "
-        "candidates=%s deepseek_math_v2_candidates=%s",
+        "candidates=%s deepseek_math_v2_candidates=%s gpus=%s tp=%s dp=%s "
+        "max_concurrent_requests=%s requests_per_gpu=%s "
+        "node_rank=%s/%s distributed_run=%s output=%s",
         cfg.stream_vllm,
         cfg.stream_vllm_server_log,
         cfg.verbose,
@@ -5129,84 +5850,112 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.max_concurrent_problems,
         cfg.pipelines_per_problem,
         cfg.deepseek_math_v2_candidate_count,
+        ",".join(selected_gpus),
+        resolved_tp,
+        resolved_dp,
+        resolved_max_concurrent_requests,
+        cfg.requests_per_gpu,
+        distributed.rank,
+        distributed.world_size,
+        distributed.run_id or "local",
+        output_csv,
     )
-    runtime = ProofRuntime(
-        model_path=cfg.model_path,
-        logdir=cfg.logdir,
-        gpu_group=",".join(selected_gpus),
-        tensor_parallel_size=resolved_tp,
-        num_ctx=cfg.num_ctx,
-        dtype=cfg.dtype,
-        gpu_memory_utilization=cfg.gpu_memory_utilization,
-        max_num_seqs=cfg.max_num_seqs,
-        max_concurrent_requests=cfg.max_concurrent_requests,
-        pipelines_per_problem=cfg.pipelines_per_problem,
-        deepseek_math_v2_candidate_count=cfg.deepseek_math_v2_candidate_count,
-        proof_only_candidate_count=cfg.proof_only_candidate_count,
-        skip_self_score_zero=cfg.skip_self_score_zero,
-        stop_on_strict_pass=cfg.stop_on_strict_pass,
-        verification_early_stop=cfg.verification_early_stop,
-        wait_for_all_generations_before_verify=cfg.wait_for_all_generations_before_verify,
-        verify_candidate_limit_while_generating=cfg.verify_candidate_limit_while_generating,
-        verify_request_limit_while_generating=cfg.verify_request_limit_while_generating,
-        verify_n=cfg.verify_n,
-        meta_n=cfg.meta_n,
-        meta_policy=cfg.meta_policy,
-        strict_pass_meta=cfg.strict_pass_meta,
-        refine_rounds=cfg.refine_rounds,
-        refine_review_n=cfg.refine_review_n,
-        min_valid_low=cfg.min_valid_low,
-        problem_timeout_seconds=cfg.problem_timeout_seconds,
-        selection_reserve_seconds=cfg.selection_reserve_seconds,
-        temperature=cfg.temperature,
-        top_p=cfg.top_p,
-        top_k=cfg.top_k,
-        min_new_tokens=cfg.min_new_tokens,
-        min_p=cfg.min_p,
-        proof_max_new_tokens=cfg.max_new_tokens,
-        proof_generation_temperatures=list(cfg.proof_generation_temperatures),
-        thinking_budget_enabled=cfg.thinking_budget_enabled,
-        proof_generation_thinking_budgets=list(cfg.proof_generation_thinking_budgets),
-        thinking_budget_force_text=cfg.thinking_budget_force_text,
-        deepseek_thinking_budget_force_text=cfg.deepseek_thinking_budget_force_text,
-        verifier_thinking_budget_tokens=cfg.verifier_thinking_budget_tokens,
-        verifier_thinking_budget_force_text=cfg.verifier_thinking_budget_force_text,
-        deepseek_verifier_thinking_budget_force_text=(
-            cfg.deepseek_verifier_thinking_budget_force_text
-        ),
-        meta_thinking_budget_tokens=cfg.meta_thinking_budget_tokens,
-        meta_thinking_budget_force_text=cfg.meta_thinking_budget_force_text,
-        verifier_max_new_tokens=cfg.verifier_max_new_tokens,
-        meta_max_new_tokens=cfg.meta_max_new_tokens,
-        selector_max_new_tokens=cfg.selector_max_new_tokens,
-        selector_max_candidate_chars=cfg.selector_max_candidate_chars,
-        selection_temperature=cfg.selection_temperature,
-        selector_mode=cfg.selector_mode,
-        selector_min_final_score=cfg.selector_min_final_score,
-        vllm_extra_args=cfg.vllm_extra_args,
-        stream_interval=cfg.stream_interval,
-        host=cfg.host,
-        port=cfg.port,
-        api_key=cfg.api_key,
-        served_model_name=cfg.served_model_name,
-        server_timeout=cfg.server_timeout,
-        no_serve=cfg.no_serve,
-        base_url=cfg.base_url,
-        mock_llm=cfg.mock_llm,
-        stream_vllm=cfg.stream_vllm,
-        stream_vllm_server_log=cfg.stream_vllm_server_log,
-        verbose=cfg.verbose,
-    )
+    runtime: Optional[ProofRuntime] = None
     try:
+        runtime = ProofRuntime(
+            model_path=cfg.model_path,
+            logdir=runtime_logdir,
+            gpu_group=",".join(selected_gpus),
+            tensor_parallel_size=resolved_tp,
+            data_parallel_size=resolved_dp,
+            num_ctx=cfg.num_ctx,
+            dtype=cfg.dtype,
+            gpu_memory_utilization=cfg.gpu_memory_utilization,
+            max_num_seqs=cfg.max_num_seqs,
+            max_concurrent_requests=resolved_max_concurrent_requests,
+            pipelines_per_problem=cfg.pipelines_per_problem,
+            deepseek_math_v2_candidate_count=cfg.deepseek_math_v2_candidate_count,
+            proof_only_candidate_count=cfg.proof_only_candidate_count,
+            skip_self_score_zero=cfg.skip_self_score_zero,
+            stop_on_strict_pass=cfg.stop_on_strict_pass,
+            verification_early_stop=cfg.verification_early_stop,
+            wait_for_all_generations_before_verify=(
+                cfg.wait_for_all_generations_before_verify
+            ),
+            verify_candidate_limit_while_generating=(
+                cfg.verify_candidate_limit_while_generating
+            ),
+            verify_request_limit_while_generating=(
+                cfg.verify_request_limit_while_generating
+            ),
+            verify_n=cfg.verify_n,
+            meta_n=cfg.meta_n,
+            meta_policy=cfg.meta_policy,
+            strict_pass_meta=cfg.strict_pass_meta,
+            refine_rounds=cfg.refine_rounds,
+            refine_review_n=cfg.refine_review_n,
+            min_valid_low=cfg.min_valid_low,
+            problem_timeout_seconds=cfg.problem_timeout_seconds,
+            selection_reserve_seconds=cfg.selection_reserve_seconds,
+            temperature=cfg.temperature,
+            top_p=cfg.top_p,
+            top_k=cfg.top_k,
+            min_new_tokens=cfg.min_new_tokens,
+            min_p=cfg.min_p,
+            proof_max_new_tokens=cfg.max_new_tokens,
+            proof_generation_temperatures=list(cfg.proof_generation_temperatures),
+            thinking_budget_enabled=cfg.thinking_budget_enabled,
+            proof_generation_thinking_budgets=list(
+                cfg.proof_generation_thinking_budgets
+            ),
+            thinking_budget_force_text=cfg.thinking_budget_force_text,
+            deepseek_thinking_budget_force_text=(
+                cfg.deepseek_thinking_budget_force_text
+            ),
+            verifier_thinking_budget_tokens=cfg.verifier_thinking_budget_tokens,
+            verifier_thinking_budget_force_text=(
+                cfg.verifier_thinking_budget_force_text
+            ),
+            deepseek_verifier_thinking_budget_force_text=(
+                cfg.deepseek_verifier_thinking_budget_force_text
+            ),
+            meta_thinking_budget_tokens=cfg.meta_thinking_budget_tokens,
+            meta_thinking_budget_force_text=cfg.meta_thinking_budget_force_text,
+            verifier_max_new_tokens=cfg.verifier_max_new_tokens,
+            meta_max_new_tokens=cfg.meta_max_new_tokens,
+            selector_max_new_tokens=cfg.selector_max_new_tokens,
+            selector_max_candidate_chars=cfg.selector_max_candidate_chars,
+            selection_temperature=cfg.selection_temperature,
+            selector_mode=cfg.selector_mode,
+            selector_min_final_score=cfg.selector_min_final_score,
+            vllm_extra_args=cfg.vllm_extra_args,
+            stream_interval=cfg.stream_interval,
+            host=cfg.host,
+            port=cfg.port,
+            api_key=cfg.api_key,
+            served_model_name=cfg.served_model_name,
+            server_timeout=cfg.server_timeout,
+            no_serve=cfg.no_serve,
+            base_url=cfg.base_url,
+            mock_llm=cfg.mock_llm,
+            stream_vllm=cfg.stream_vllm,
+            stream_vllm_server_log=cfg.stream_vllm_server_log,
+            verbose=cfg.verbose,
+            distributed_runtime=distributed,
+        )
         run_simple_csv(
             runtime,
             cfg.input_csv,
-            cfg.output_csv,
+            output_csv,
             cfg.max_rows,
             cfg.max_concurrent_problems,
         )
+    except BaseException as exc:
+        distributed.report_failure(exc)
+        raise
     finally:
-        runtime.close()
+        if runtime is not None:
+            runtime.close()
 
 
 if __name__ == "__main__":

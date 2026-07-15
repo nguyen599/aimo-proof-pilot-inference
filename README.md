@@ -5,6 +5,10 @@ strict GPT-5.6 Sol grader. The checked-in production configuration uses all
 eight H200 GPUs as four TP2 replicas, with BF16 target and draft weights,
 DFlash speculative decoding, and FlashAttention 3.
 
+The standalone vLLM `run.py` path also supports one process per node with a
+local TP/DP server on every node. See [RUN_PY_MULTINODE.md](RUN_PY_MULTINODE.md)
+for the eight-node `TP=2, DP=4` launch contract.
+
 Follow this document in order on a clean machine. Commands assume the repository
 is at `/workspace/aimo-proof-pilot-inference` and the prebuilt runtime is at
 `/workspace/pp`.
