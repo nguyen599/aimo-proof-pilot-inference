@@ -53,6 +53,11 @@ python -m evaluation.harness_vllm.run \
 The NII image already provides the CUDA/NCCL and shared `/tmp` cache
 environment. Do not repeat those exports in each rank wrapper.
 
+`run.py` gives each local vLLM child a private compile-cache namespace derived
+from the hostname, rank log directory, model, and TP/DP topology. This prevents
+Inductor/Triton artifacts from colliding across nodes even though NII shares
+`/tmp`. It does not replace the image's shared Hugging Face model cache.
+
 `max_concurrent_requests` defaults to `AIMO_REQUESTS_PER_GPU` multiplied by
 the selected local GPU count. The example therefore allows 256 local scheduler
 requests per node. Set `AIMO_MAX_CONCURRENT_REQUESTS` to a positive integer to

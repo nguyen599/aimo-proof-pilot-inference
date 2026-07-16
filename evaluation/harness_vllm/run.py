@@ -2309,12 +2309,43 @@ class VLLMServer:
             cmd.extend(extra)
         return cmd
 
-    def start(self) -> None:
-        if self.is_port_open():
-            logging.info("Port %s is active. Reusing existing vLLM server.", self.port)
-            return
-        cmd = self.build_command()
+    def build_environment(self) -> dict[str, str]:
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.gpu_group}
+        # NII mounts /tmp as a shared filesystem. The image-wide compile cache
+        # paths therefore collide when multiple nodes compile identical local
+        # TP/DP servers at the same time. Use a short per-node, per-run cache
+        # namespace while preserving the image's global model/download caches.
+        cache_identity = "|".join(
+            (
+                socket.gethostname(),
+                str(self.cfg.logdir.absolute()),
+                str(self.index),
+                self.cfg.model_path,
+                str(self.cfg.tensor_parallel_size),
+                str(self.cfg.data_parallel_size),
+            )
+        )
+        cache_key = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()[:16]
+        cache_root = (
+            Path(
+                os.environ.get(
+                    "AIMO_VLLM_RUNTIME_CACHE_ROOT",
+                    str(Path(os.environ.get("TMPDIR", "/tmp")) / "aimo-vllm-cache"),
+                )
+            )
+            / cache_key
+        )
+        cache_paths = {
+            "VLLM_CACHE_ROOT": cache_root / "vllm",
+            "TORCHINDUCTOR_CACHE_DIR": cache_root / "torchinductor",
+            "TRITON_CACHE_DIR": cache_root / "triton",
+            "CUDA_CACHE_PATH": cache_root / "cuda",
+            "XDG_CACHE_HOME": cache_root / "xdg",
+        }
+        for path in cache_paths.values():
+            path.mkdir(parents=True, exist_ok=True)
+        env.update({key: str(path) for key, path in cache_paths.items()})
+
         # Each node owns an independent local vLLM TP/DP server. External
         # node-level rendezvous variables must not make vLLM join that world.
         for external_rank_key in (
@@ -2334,11 +2365,22 @@ class VLLMServer:
         # vLLM 0.25 defaults to Model Runner V2, which does not yet support the
         # thinking_token_budget request field used by this inference pipeline.
         env.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
+        return env
+
+    def start(self) -> None:
+        if self.is_port_open():
+            logging.info("Port %s is active. Reusing existing vLLM server.", self.port)
+            return
+        cmd = self.build_command()
+        env = self.build_environment()
         log_path = self.cfg.logdir / f"vllm_server_{self.index}.log"
         self._log_path = log_path
         self._log_file = open(log_path, "w", encoding="utf-8", buffering=1)
         logging.info(
-            "Launching %s: %s", self.tag, " ".join(shlex.quote(part) for part in cmd)
+            "Launching %s with compile cache %s: %s",
+            self.tag,
+            env["TORCHINDUCTOR_CACHE_DIR"],
+            " ".join(shlex.quote(part) for part in cmd),
         )
         self._proc = subprocess.Popen(
             cmd,

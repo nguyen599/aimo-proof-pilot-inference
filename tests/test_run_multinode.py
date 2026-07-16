@@ -163,11 +163,68 @@ class DistributedRuntimeTests(unittest.TestCase):
             ):
                 server.start()
                 child_env = popen.call_args.kwargs["env"]
+                cache_dirs_exist = all(
+                    Path(child_env[key]).is_dir()
+                    for key in (
+                        "VLLM_CACHE_ROOT",
+                        "TORCHINDUCTOR_CACHE_DIR",
+                        "TRITON_CACHE_DIR",
+                        "CUDA_CACHE_PATH",
+                        "XDG_CACHE_HOME",
+                    )
+                )
                 server.stop()
 
         for key in ("GLOBAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
             self.assertNotIn(key, child_env)
         self.assertEqual(child_env["CUDA_VISIBLE_DEVICES"], "0,1,2,3,4,5,6,7")
+        cache_paths = [
+            Path(child_env[key])
+            for key in (
+                "VLLM_CACHE_ROOT",
+                "TORCHINDUCTOR_CACHE_DIR",
+                "TRITON_CACHE_DIR",
+                "CUDA_CACHE_PATH",
+                "XDG_CACHE_HOME",
+            )
+        ]
+        self.assertEqual(len({path.parent for path in cache_paths}), 1)
+        self.assertTrue(cache_dirs_exist)
+
+    def test_local_vllm_compile_cache_is_isolated_by_node_and_run(self):
+        def environment(logdir: Path, hostname: str) -> dict[str, str]:
+            cfg = SimpleNamespace(
+                model_path="/model",
+                served_model_name="proof-model",
+                api_key="key",
+                tensor_parallel_size=2,
+                data_parallel_size=4,
+                max_num_seqs=32,
+                gpu_memory_utilization=0.95,
+                host="127.0.0.1",
+                dtype="auto",
+                num_ctx=262_144,
+                stream_interval=100,
+                vllm_extra_args="",
+                logdir=logdir,
+            )
+            with patch.object(socket, "gethostname", return_value=hostname):
+                return run.VLLMServer(
+                    cfg,
+                    port=8000,
+                    gpu_group="0,1,2,3,4,5,6,7",
+                    index=0,
+                ).build_environment()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            node6_run1 = environment(root / "run1" / "rank_0000", "hnode149")
+            node7_run1 = environment(root / "run1" / "rank_0001", "hnode161")
+            node6_run2 = environment(root / "run2" / "rank_0000", "hnode149")
+
+        cache_key = "TORCHINDUCTOR_CACHE_DIR"
+        self.assertNotEqual(node6_run1[cache_key], node7_run1[cache_key])
+        self.assertNotEqual(node6_run1[cache_key], node6_run2[cache_key])
 
     def test_two_rank_mock_run_writes_one_primary_output(self):
         try:
