@@ -88,3 +88,18 @@ generation from the original problem plus handoff. Record:
 
 This experiment determines whether the handoff improves proof completion rate,
 rather than only producing cleaner summaries.
+
+Implementation:
+
+- `evaluate_thinking_handoff_restart.py` consumes one selected
+  prompt/temperature group from the short handoff sweep.
+- It inserts the handoff into the original rendered problem prompt before the
+  assistant generation marker, then starts a fresh round-1 completion.
+- It stops an unfinished reasoning stream at 122,000 tokens without applying
+  the old strongest-partial force text. If `</think>` was genuinely emitted
+  before that boundary, it lets the visible proof continue up to 126,000 total
+  completion tokens.
+- It records the raw prompt, handoff, output, finish reason, real cutoff state,
+  parseable proof state, proof length, latency, and throughput for every case.
+- The focused handoff suite passes with 11 tests after adding rendered-prompt
+  insertion coverage.

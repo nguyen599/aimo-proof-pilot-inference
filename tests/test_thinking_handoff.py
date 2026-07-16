@@ -23,6 +23,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     append_restart_instruction,
     build_handoff_instruction,
     build_user_turn_prompt_ids,
+    insert_restart_instruction_into_rendered_prompt,
     parse_handoff_response,
     parse_saved_proof_generation_call,
     remove_final_partial_force_text,
@@ -123,9 +124,7 @@ class SavedCallParserTests(unittest.TestCase):
     def test_continuation_parser_preserves_prompt_trailing_newline(self):
         prompt = "decoded prompt with significant suffix\n"
         prompt_tokens, max_tokens, parsed = _parse_segment(
-            "prompt_tokens: 17\n"
-            "max_tokens: 23\n\n"
-            f"{prompt}\n\n"
+            f"prompt_tokens: 17\nmax_tokens: 23\n\n{prompt}\n\n"
         )
         self.assertEqual(prompt_tokens, 17)
         self.assertEqual(max_tokens, 23)
@@ -140,9 +139,7 @@ class SavedCallParserTests(unittest.TestCase):
         self.assertEqual(len(paths), 17)
         for path in paths:
             record = parse_saved_proof_generation_call(path)
-            pre_force = remove_final_partial_force_text(
-                record.continuation_prompt
-            )
+            pre_force = remove_final_partial_force_text(record.continuation_prompt)
             self.assertEqual(record.stage, "proof_generation")
             self.assertGreater(record.continuation_prompt_tokens, 120_000)
             self.assertNotIn(FINAL_PARTIAL_FORCE_MARKER, pre_force)
@@ -254,6 +251,31 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertIn("<previous_attempt_handoff>", restarted[-1]["content"])
         self.assertIn("restart round 1", restarted[-1]["content"])
 
+    def test_restart_instruction_can_be_inserted_into_saved_rendered_prompt(self):
+        rendered = (
+            "<｜begin▁of▁sentence｜><｜User｜>Problem text<｜Assistant｜><think>\n"
+        )
+        restarted = insert_restart_instruction_into_rendered_prompt(
+            rendered,
+            VALID_HANDOFF,
+            1,
+        )
+        self.assertTrue(restarted.startswith("<｜begin▁of▁sentence｜><｜User｜>"))
+        self.assertTrue(restarted.endswith("<｜Assistant｜><think>\n"))
+        self.assertIn("<previous_attempt_handoff>", restarted)
+        self.assertLess(
+            restarted.index("<previous_attempt_handoff>"),
+            restarted.index("<｜Assistant｜>"),
+        )
+
+    def test_restart_instruction_rejects_unknown_rendered_prompt(self):
+        with self.assertRaisesRegex(ValueError, "assistant marker"):
+            insert_restart_instruction_into_rendered_prompt(
+                "plain prompt",
+                VALID_HANDOFF,
+                1,
+            )
+
 
 class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_budget_hit_handoff_restarts_before_only_verification_round(self):
@@ -295,10 +317,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
                 if stage == "proof_handoff":
                     return {
                         "success": True,
-                        "text": (
-                            HANDOFF_ASSISTANT_PREFIX
-                            + VALID_HANDOFF_AFTER_PREFIX
-                        ),
+                        "text": (HANDOFF_ASSISTANT_PREFIX + VALID_HANDOFF_AFTER_PREFIX),
                         "finish_reason": "stop",
                         "usage": {},
                         "_completion_context_ids": [1, 2, 3, 4],

@@ -26,6 +26,12 @@ HANDOFF_REQUIRED_SECTIONS = (
 )
 HANDOFF_VARIANTS = ("evidence_first", "lemma_ledger", "continuation_frontier")
 DEFAULT_HANDOFF_VARIANT = HANDOFF_VARIANTS[0]
+RENDERED_ASSISTANT_MARKERS = (
+    "<｜Assistant｜>",
+    "<|assistant|>",
+    "<|start_header_id|>assistant<|end_header_id|>",
+    "<|im_start|>assistant",
+)
 
 _SECTION_HEADER = re.compile(r"^===== (?P<title>.+?) =====$", re.MULTILINE)
 _HANDOFF_BLOCK = re.compile(r"(?is)<handoff>\s*(.*?)\s*</handoff>")
@@ -76,9 +82,7 @@ def _parse_segment(section: str) -> tuple[int, int, str]:
     metadata_lines = metadata.splitlines()
     if not separator or len(metadata_lines) != 2:
         raise ValueError("continuation section is missing metadata")
-    prompt_tokens = int(
-        metadata_lines[0].removeprefix("prompt_tokens:").strip()
-    )
+    prompt_tokens = int(metadata_lines[0].removeprefix("prompt_tokens:").strip())
     max_tokens = int(metadata_lines[1].removeprefix("max_tokens:").strip())
     # The logger appends one newline after the decoded prompt, and the next
     # section begins with another newline. Remove exactly those delimiters so
@@ -149,7 +153,9 @@ def remove_final_partial_force_text(text: str) -> str:
 
     marker_index = text.rfind(FINAL_PARTIAL_FORCE_MARKER)
     if marker_index < 0:
-        raise ValueError("the saved continuation does not contain the final force marker")
+        raise ValueError(
+            "the saved continuation does not contain the final force marker"
+        )
     close_index = text.rfind("</think>", 0, marker_index)
     if close_index < 0:
         raise ValueError("the saved continuation lacks the forced </think> marker")
@@ -319,6 +325,32 @@ Verify every carried claim before relying on it. Do not merely repeat the previo
 <previous_attempt_handoff>
 {handoff_text}
 </previous_attempt_handoff>"""
+
+
+def insert_restart_instruction_into_rendered_prompt(
+    rendered_prompt: str,
+    handoff_text: str,
+    restart_round: int,
+) -> str:
+    """Insert a restart note into the final user turn of a rendered prompt."""
+    marker_positions = [
+        (rendered_prompt.rfind(marker), marker) for marker in RENDERED_ASSISTANT_MARKERS
+    ]
+    marker_index, marker = max(marker_positions, key=lambda item: item[0])
+    if marker_index < 0:
+        raise ValueError(
+            "rendered proof prompt does not contain a recognized assistant marker"
+        )
+    instruction = build_restart_instruction(handoff_text, restart_round)
+    restarted = (
+        rendered_prompt[:marker_index]
+        + "\n\n"
+        + instruction
+        + rendered_prompt[marker_index:]
+    )
+    if restarted.count(instruction) != 1 or marker not in restarted:
+        raise ValueError("failed to insert restart instruction into rendered prompt")
+    return restarted
 
 
 def append_restart_instruction(
