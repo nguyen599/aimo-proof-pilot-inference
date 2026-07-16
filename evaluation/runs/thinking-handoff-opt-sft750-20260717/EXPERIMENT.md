@@ -31,6 +31,9 @@ focused tests.
 Results:
 
 - Parsed all 17 checked-in proof calls containing the old forced-partial marker.
+- All 17 calls reached the round-0 unfinished-thinking cutoff. Only 6/17 old
+  forced-partial continuations emitted structurally parseable final sections;
+  this is a formatting baseline, not evidence of a complete proof.
 - Confirmed the marker is absent after reconstruction.
 - Confirmed a budget hit with one round remaining calls:
   proof generation, handoff, fresh proof generation, then verification.
@@ -73,6 +76,53 @@ Planned matrix:
 Record XML validity, fidelity, mathematical information retained, failed-route
 precision, bottleneck quality, next-step usefulness, completion tokens, and
 latency. Results will be appended below.
+
+### Server launch attempt 1
+
+Both NII nodes used vLLM 0.25.1 with the fixed runtime above. Target and draft
+weights loaded, but startup failed during CUDA-graph memory profiling:
+
+```text
+Failed: Cuda error /workspace/csrc/custom_all_reduce.cuh:455
+'an illegal memory access was encountered'
+```
+
+Node 6 also reported one secondary Inductor autotuning failure while the DP
+engines were aborting:
+
+```text
+Failed to run autotuning code block: CUDA driver error: file not found
+```
+
+No handoff requests were submitted. The retry preserves compiled execution,
+CUDA graphs, `TP=2`, `DP=4`, FP8 target/KV, and DFlash, but adds
+`--disable-custom-all-reduce` and uses new per-node compile-cache directories.
+
+### Live smoke 1: unconstrained handoff length
+
+The retry started successfully on both nodes. One `evidence_first`,
+temperature-0.7 handoff was generated from a 122,227-token prompt:
+
+```text
+finish_reason=length
+completion_tokens=4096
+is_valid=false
+missing_sections=established,promising,failed,uncertain,bottleneck,next_steps
+```
+
+This was not a turn-transition or prefix failure. The output correctly began
+with `</think><handoff><established>`, but it used all 4,096 tokens in the first
+section. It repeatedly restated the problem and used phrases such as "the
+previous attempt attempted" instead of compressing the mathematical state.
+
+The next prompt revision keeps 4,096 as a safety ceiling but requires:
+
+- fewer than 1,200 words total;
+- hard bullet limits for every list section;
+- at most two sentences per bullet;
+- one bottleneck paragraph of at most 120 words;
+- no full problem restatement, duplicated facts, or attempt narration;
+- all XML tags to be closed.
 
 ## Experiment 3: fresh round-1 proof completion
 

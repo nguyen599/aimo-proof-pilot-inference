@@ -211,6 +211,14 @@ class SavedCallParserTests(unittest.TestCase):
 
 
 class HandoffPromptTests(unittest.TestCase):
+    def test_handoff_prompt_has_strict_compression_contract(self):
+        instruction = build_handoff_instruction("evidence_first")
+
+        self.assertIn("below 1,200 words", instruction)
+        self.assertIn("Do not restate the full problem", instruction)
+        self.assertIn("at most 6 bullets in established", instruction)
+        self.assertIn("Close every XML tag", instruction)
+
     def test_transition_is_a_real_new_user_turn(self):
         tokenizer = FakeTokenizer()
         instruction = build_handoff_instruction("continuation_frontier")

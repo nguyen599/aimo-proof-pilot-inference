@@ -263,6 +263,16 @@ def build_handoff_instruction(variant: str = DEFAULT_HANDOFF_VARIANT) -> str:
 
 Do not continue solving the problem and do not pretend that the proof is complete. Compress the previous attempt into a faithful handoff for a fresh solver. Preserve useful formulas, definitions, reductions, and partial lemmas. Clearly label every unproved claim. Explain why abandoned approaches failed. {variant_guidance}
 
+Strict compression rules:
+- Keep the entire handoff below 1,200 words.
+- Do not restate the full problem or copy its output-format instructions.
+- Never repeat the same fact, route, or caveat in multiple sections.
+- Avoid narration such as "the previous attempt attempted"; state the mathematical fact directly.
+- Use at most 6 bullets in established, 5 in promising, 4 in failed, 4 in uncertain, and 5 in next_steps.
+- Keep every bullet to at most 2 sentences.
+- Keep bottleneck to one paragraph of at most 120 words.
+- If a section has no useful content, state that in one short sentence instead of inventing content.
+
 Output exactly these XML sections and no text outside them:
 
 <handoff>
@@ -274,7 +284,7 @@ Output exactly these XML sections and no text outside them:
 <next_steps>A short prioritized plan for a fresh independent attempt.</next_steps>
 </handoff>
 
-Be concise, factual, and useful. Do not include a final solution, self-evaluation, or score."""
+Close every XML tag. Be concise, factual, and useful. Do not include a final solution, self-evaluation, or score."""
 
 
 def build_handoff_repair_instruction() -> str:
