@@ -24,40 +24,16 @@ ranks never write the final CSV.
 
 ## Launch
 
-Run the same command once on every node. Set `GLOBAL_RANK` to `0` through `7`;
-all other values must match. Do not export `RANK` and do not wrap this command
-in `torchrun`: vLLM owns the local GPU worker processes.
+Run the same command once on every node. Set `NODE_RANK` to `0` through `7`;
+all other values must match. Do not wrap this command in `torchrun`: vLLM owns
+the local GPU worker processes. Environment variables remain supported as
+defaults, but explicit CLI options are easier to audit in saved launch logs.
 
 ```bash
-export GLOBAL_RANK="${GLOBAL_RANK:?set the node rank from 0 through 7}"
-export WORLD_SIZE=8
-export MASTER_ADDR="${MASTER_ADDR:?set the rank-0 host or IP}"
-export MASTER_PORT="${MASTER_PORT:-29500}"
-unset RANK LOCAL_RANK LOCAL_WORLD_SIZE
-
 export NVIDIA_VISIBLE_DEVICES=all
 export NCCL_IB_HCA=mlx5_ibn1,mlx5_ibn2,mlx5_ibn3,mlx5_ibn4,mlx5_ibn5,mlx5_ibn6,mlx5_ibn7,mlx5_ibn8
 export NCCL_IB_PCI_RELAXED_ORDERING=1
 export NCCL_CROSS_NIC=1
-export AIMO_NUM_GPUS=8
-export AIMO_GPUS=0,1,2,3,4,5,6,7
-export AIMO_TENSOR_PARALLEL_SIZE=2
-export AIMO_DATA_PARALLEL_SIZE=4
-export AIMO_REQUESTS_PER_GPU=32
-export AIMO_PIPELINES_PER_PROBLEM=16
-export AIMO_MAX_CONCURRENT_PROBLEMS=2
-export AIMO_REFINE_ROUNDS=1
-
-# Use the same unique ID and shared writable directory on all nodes.
-export AIMO_DISTRIBUTED_RUN_ID="imo-2025-final-v1"
-export AIMO_DISTRIBUTED_ROOT=/tmp/aimo-proof-pilot-inference/distributed
-
-export AIMO_MODEL_PATH=/tmp/models/olmo3-opd-sft-200
-export AIMO_DFLASH_MODEL_PATH=/tmp/models/dflash-32b-draft-v2test-phaseL
-export AIMO_INPUT_PATH=/tmp/aimo-proof-pilot-inference/test.csv
-
-# In distributed mode, omitting these keeps all generated files under /tmp.
-unset AIMO_LOGDIR AIMO_OUTPUT_PATH
 
 export TMP=/tmp
 export TMPDIR=/tmp
@@ -74,7 +50,24 @@ mkdir -p \
   /tmp/xdg_cache/huggingface/xet/logs \
   /tmp/hf_xet
 
-python -m evaluation.harness_vllm.run
+python -m evaluation.harness_vllm.run \
+  --node-rank "${NODE_RANK:?set the node rank from 0 through 7}" \
+  --world-size 8 \
+  --master-addr "${MASTER_ADDR:?set the rank-0 host or IP}" \
+  --master-port "${MASTER_PORT:-29500}" \
+  --distributed-run-id "imo-2025-final-v1" \
+  --distributed-root /tmp/aimo-proof-pilot-inference/distributed \
+  --model-path /tmp/models/olmo3-opd-sft-200 \
+  --dflash-model-path /tmp/models/dflash-32b-draft-v2test-phaseL \
+  --input-path /tmp/aimo-proof-pilot-inference/test.csv \
+  --num-gpus 8 \
+  --gpus 0,1,2,3,4,5,6,7 \
+  --tensor-parallel-size 2 \
+  --data-parallel-size 4 \
+  --requests-per-gpu 32 \
+  --pipelines-per-problem 16 \
+  --max-concurrent-problems 2 \
+  --refine-rounds 1
 ```
 
 `max_concurrent_requests` defaults to `AIMO_REQUESTS_PER_GPU` multiplied by

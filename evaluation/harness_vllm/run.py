@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import atexit
 import asyncio
 import contextlib
@@ -5773,6 +5774,208 @@ def resolve_max_concurrent_requests(cfg: Any, selected_gpu_count: int) -> int:
     return requests_per_gpu * selected_gpu_count
 
 
+def build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the proof-pipeline vLLM harness. Explicit CLI values override "
+            "the environment-backed CFG defaults."
+        )
+    )
+
+    paths = parser.add_argument_group("paths")
+    paths.add_argument("--model-path", type=Path)
+    paths.add_argument("--input-path", type=Path)
+    paths.add_argument("--output-path", type=Path)
+    paths.add_argument("--logdir", type=Path)
+
+    distributed = parser.add_argument_group("distributed controller")
+    distributed.add_argument("--node-rank", type=int)
+    distributed.add_argument("--world-size", type=int)
+    distributed.add_argument("--master-addr")
+    distributed.add_argument("--master-port", type=int)
+    distributed.add_argument("--distributed-run-id")
+    distributed.add_argument("--distributed-root", type=Path)
+    distributed.add_argument("--distributed-timeout-seconds", type=int)
+    distributed.add_argument("--distributed-poll-seconds", type=float)
+    distributed.add_argument(
+        "--distributed-overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+
+    server = parser.add_argument_group("local vLLM server")
+    server.add_argument("--num-gpus", type=int)
+    server.add_argument("--gpus")
+    server.add_argument("--tensor-parallel-size", type=int)
+    server.add_argument("--data-parallel-size", type=int)
+    server.add_argument("--dtype")
+    server.add_argument("--gpu-memory-utilization", type=float)
+    server.add_argument("--max-num-seqs", type=int)
+    server.add_argument("--requests-per-gpu", type=int)
+    server.add_argument("--max-concurrent-requests", type=int)
+    server.add_argument("--max-num-batched-tokens", type=int)
+    server.add_argument("--vllm-extra-args")
+    dflash = server.add_mutually_exclusive_group()
+    dflash.add_argument("--dflash-model-path", type=Path)
+    dflash.add_argument("--no-dflash", action="store_true", default=None)
+    server.add_argument("--dflash-num-speculative-tokens", type=int)
+    server.add_argument("--dflash-context-cutoff", type=int)
+    server.add_argument("--host")
+    server.add_argument("--port", type=int)
+    server.add_argument("--served-model-name")
+    server.add_argument("--server-timeout", type=int)
+    server.add_argument("--base-url")
+    server.add_argument("--no-serve", action="store_true", default=None)
+
+    pipeline = parser.add_argument_group("proof pipeline")
+    pipeline.add_argument("--num-ctx", type=int)
+    pipeline.add_argument("--max-new-tokens", type=int)
+    pipeline.add_argument("--verifier-max-new-tokens", type=int)
+    pipeline.add_argument("--meta-max-new-tokens", type=int)
+    pipeline.add_argument("--selector-max-new-tokens", type=int)
+    pipeline.add_argument("--pipelines-per-problem", type=int)
+    pipeline.add_argument("--max-concurrent-problems", type=int)
+    pipeline.add_argument("--deepseek-math-v2-candidate-count", type=int)
+    pipeline.add_argument("--verify-n", type=int)
+    pipeline.add_argument("--meta-n", type=int)
+    pipeline.add_argument("--refine-rounds", type=int)
+    pipeline.add_argument("--refine-review-n", type=int)
+    pipeline.add_argument("--problem-timeout-seconds", type=int)
+    pipeline.add_argument("--selection-reserve-seconds", type=int)
+    pipeline.add_argument("--selector-mode", choices=("llm", "score"))
+    pipeline.add_argument("--temperature", type=float)
+    pipeline.add_argument("--top-p", type=float)
+    pipeline.add_argument("--top-k", type=int)
+    pipeline.add_argument("--min-p", type=float)
+
+    runtime = parser.add_argument_group("runtime")
+    runtime.add_argument("--max-rows", type=int)
+    runtime.add_argument("--stream-interval", type=int)
+    runtime.add_argument(
+        "--stream-vllm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    runtime.add_argument(
+        "--stream-vllm-server-log",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    runtime.add_argument(
+        "--verbose",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    runtime.add_argument("--mock-llm", action="store_true", default=None)
+    return parser
+
+
+def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
+    field_map = {
+        "model_path": "model_path",
+        "input_path": "input_csv",
+        "output_path": "output_csv",
+        "logdir": "logdir",
+        "num_gpus": "num_gpus",
+        "gpus": "gpus",
+        "tensor_parallel_size": "tensor_parallel_size",
+        "data_parallel_size": "data_parallel_size",
+        "dtype": "dtype",
+        "gpu_memory_utilization": "gpu_memory_utilization",
+        "max_num_seqs": "max_num_seqs",
+        "requests_per_gpu": "requests_per_gpu",
+        "max_concurrent_requests": "max_concurrent_requests",
+        "host": "host",
+        "port": "port",
+        "served_model_name": "served_model_name",
+        "server_timeout": "server_timeout",
+        "base_url": "base_url",
+        "no_serve": "no_serve",
+        "num_ctx": "num_ctx",
+        "max_new_tokens": "max_new_tokens",
+        "verifier_max_new_tokens": "verifier_max_new_tokens",
+        "meta_max_new_tokens": "meta_max_new_tokens",
+        "selector_max_new_tokens": "selector_max_new_tokens",
+        "pipelines_per_problem": "pipelines_per_problem",
+        "max_concurrent_problems": "max_concurrent_problems",
+        "deepseek_math_v2_candidate_count": "deepseek_math_v2_candidate_count",
+        "verify_n": "verify_n",
+        "meta_n": "meta_n",
+        "refine_rounds": "refine_rounds",
+        "refine_review_n": "refine_review_n",
+        "problem_timeout_seconds": "problem_timeout_seconds",
+        "selection_reserve_seconds": "selection_reserve_seconds",
+        "selector_mode": "selector_mode",
+        "temperature": "temperature",
+        "top_p": "top_p",
+        "top_k": "top_k",
+        "min_p": "min_p",
+        "max_rows": "max_rows",
+        "stream_interval": "stream_interval",
+        "stream_vllm": "stream_vllm",
+        "stream_vllm_server_log": "stream_vllm_server_log",
+        "verbose": "verbose",
+        "mock_llm": "mock_llm",
+    }
+    for argument_name, field_name in field_map.items():
+        value = getattr(args, argument_name)
+        if value is not None:
+            setattr(cfg, field_name, value)
+    if args.output_path is not None:
+        os.environ["AIMO_OUTPUT_PATH"] = str(args.output_path)
+    if args.logdir is not None:
+        os.environ["AIMO_LOGDIR"] = str(args.logdir)
+
+    environment_map = {
+        "node_rank": "AIMO_NODE_RANK",
+        "world_size": "WORLD_SIZE",
+        "master_addr": "MASTER_ADDR",
+        "master_port": "MASTER_PORT",
+        "distributed_run_id": "AIMO_DISTRIBUTED_RUN_ID",
+        "distributed_root": "AIMO_DISTRIBUTED_ROOT",
+        "distributed_timeout_seconds": "AIMO_DISTRIBUTED_TIMEOUT_SECONDS",
+        "distributed_poll_seconds": "AIMO_DISTRIBUTED_POLL_SECONDS",
+    }
+    for argument_name, environment_name in environment_map.items():
+        value = getattr(args, argument_name)
+        if value is not None:
+            os.environ[environment_name] = str(value)
+    if args.distributed_overwrite is not None:
+        os.environ["AIMO_DISTRIBUTED_OVERWRITE"] = (
+            "1" if args.distributed_overwrite else "0"
+        )
+
+    rebuild_vllm_args = False
+    if args.no_dflash:
+        os.environ.pop("AIMO_DFLASH_MODEL_PATH", None)
+        rebuild_vllm_args = True
+    elif args.dflash_model_path is not None:
+        os.environ["AIMO_DFLASH_MODEL_PATH"] = str(args.dflash_model_path)
+        rebuild_vllm_args = True
+    for argument_name, environment_name in (
+        ("dflash_num_speculative_tokens", "AIMO_DFLASH_NUM_SPECULATIVE_TOKENS"),
+        ("dflash_context_cutoff", "AIMO_DFLASH_CONTEXT_CUTOFF"),
+        ("max_num_batched_tokens", "AIMO_MAX_NUM_BATCHED_TOKENS"),
+    ):
+        value = getattr(args, argument_name)
+        if value is not None:
+            os.environ[environment_name] = str(value)
+            rebuild_vllm_args = True
+    if rebuild_vllm_args:
+        cfg.vllm_extra_args = default_vllm_extra_args()
+        if args.min_p is None:
+            cfg.min_p = default_min_p()
+    if args.vllm_extra_args is not None:
+        cfg.vllm_extra_args = args.vllm_extra_args
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    parser = build_cli_parser()
+    args = parser.parse_args(argv)
+    apply_cli_overrides(CFG, args)
+    run(CFG)
+
+
 def run(cfg: type[CFG] = CFG) -> None:
     if int(cfg.max_concurrent_problems) < 1:
         raise ValueError("AIMO_MAX_CONCURRENT_PROBLEMS must be at least 1")
@@ -5956,4 +6159,4 @@ def run(cfg: type[CFG] = CFG) -> None:
 
 
 if __name__ == "__main__":
-    run()
+    main()

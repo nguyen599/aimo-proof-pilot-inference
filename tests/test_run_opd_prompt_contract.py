@@ -19,6 +19,89 @@ from evaluation.harness_vllm import run  # noqa: E402
 
 
 class RunOpdPromptContractTests(unittest.TestCase):
+    def test_cli_overrides_cfg_and_distributed_environment(self):
+        cfg = SimpleNamespace(
+            model_path=Path("/old-model"),
+            input_csv=Path("/old-input.csv"),
+            pipelines_per_problem=14,
+            max_concurrent_problems=1,
+            refine_rounds=1,
+        )
+        args = run.build_cli_parser().parse_args(
+            [
+                "--model-path",
+                "/models/current",
+                "--input-path",
+                "/data/imo.parquet",
+                "--output-path",
+                "/output/submission.csv",
+                "--logdir",
+                "/output/logs",
+                "--pipelines-per-problem",
+                "16",
+                "--max-concurrent-problems",
+                "2",
+                "--refine-rounds",
+                "1",
+                "--node-rank",
+                "1",
+                "--world-size",
+                "2",
+                "--master-addr",
+                "10.0.0.1",
+                "--master-port",
+                "29500",
+            ]
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            run.apply_cli_overrides(cfg, args)
+            self.assertEqual(os.environ["AIMO_NODE_RANK"], "1")
+            self.assertEqual(os.environ["WORLD_SIZE"], "2")
+            self.assertEqual(os.environ["MASTER_ADDR"], "10.0.0.1")
+            self.assertEqual(os.environ["MASTER_PORT"], "29500")
+            self.assertEqual(
+                os.environ["AIMO_OUTPUT_PATH"], "/output/submission.csv"
+            )
+            self.assertEqual(os.environ["AIMO_LOGDIR"], "/output/logs")
+
+        self.assertEqual(cfg.model_path, Path("/models/current"))
+        self.assertEqual(cfg.input_csv, Path("/data/imo.parquet"))
+        self.assertEqual(cfg.pipelines_per_problem, 16)
+        self.assertEqual(cfg.max_concurrent_problems, 2)
+        self.assertEqual(cfg.refine_rounds, 1)
+
+    def test_cli_dflash_options_rebuild_vllm_args(self):
+        cfg = SimpleNamespace(vllm_extra_args="", min_p=0.01)
+        args = run.build_cli_parser().parse_args(
+            [
+                "--dflash-model-path",
+                "/models/draft",
+                "--dflash-num-speculative-tokens",
+                "8",
+                "--dflash-context-cutoff",
+                "32768",
+                "--max-num-batched-tokens",
+                "24576",
+            ]
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            run.apply_cli_overrides(cfg, args)
+
+        vllm_args = shlex.split(cfg.vllm_extra_args)
+        speculative_config = json.loads(
+            vllm_args[vllm_args.index("--speculative-config") + 1]
+        )
+        self.assertEqual(speculative_config["model"], "/models/draft")
+        self.assertEqual(speculative_config["num_speculative_tokens"], 8)
+        self.assertEqual(speculative_config["disable_above_context_len"], 32768)
+        self.assertEqual(
+            vllm_args[vllm_args.index("--max-num-batched-tokens") + 1],
+            "24576",
+        )
+        self.assertIsNone(cfg.min_p)
+
     def test_parquet_input_is_supported(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "problems.parquet"
