@@ -66,6 +66,12 @@ RENDERED_ASSISTANT_MARKERS = (
     "<|start_header_id|>assistant<|end_header_id|>",
     "<|im_start|>assistant",
 )
+RENDERED_USER_MARKERS = (
+    "<｜User｜>",
+    "<|user|>",
+    "<|start_header_id|>user<|end_header_id|>",
+    "<|im_start|>user",
+)
 
 _SECTION_HEADER = re.compile(r"^===== (?P<title>.+?) =====$", re.MULTILINE)
 _HANDOFF_BLOCK = re.compile(r"(?is)<handoff>\s*(.*?)\s*</handoff>")
@@ -378,6 +384,155 @@ def assemble_handoff(sections: dict[str, str]) -> str:
         )
         + "\n</handoff>"
     )
+
+
+def extract_rendered_problem_text(rendered_prompt: str) -> str:
+    text = str(rendered_prompt or "")
+    user_match: tuple[int, str] | None = None
+    for marker in RENDERED_USER_MARKERS:
+        position = text.rfind(marker)
+        if position >= 0 and (user_match is None or position > user_match[0]):
+            user_match = (position, marker)
+    if user_match is None:
+        raise ValueError("rendered prompt does not contain a supported user marker")
+    start = user_match[0] + len(user_match[1])
+    end = len(text)
+    for marker in RENDERED_ASSISTANT_MARKERS:
+        position = text.find(marker, start)
+        if position >= 0:
+            end = min(end, position)
+    problem = text[start:end].strip()
+    for separator in (
+        "Respond in EXACTLY this format:",
+        "Output ONLY the final answer",
+    ):
+        if separator in problem:
+            problem = problem.split(separator, 1)[0].strip()
+    if not problem:
+        raise ValueError("rendered prompt contains an empty user problem")
+    return problem
+
+
+def truncate_consecutive_token_repetition(
+    token_ids: list[int],
+    *,
+    search_tail_tokens: int = 16_384,
+    block_sizes: tuple[int, ...] = (256, 128, 64, 32, 16),
+    minimum_repeats: int = 4,
+) -> tuple[list[int], dict[str, int] | None]:
+    values = [int(value) for value in token_ids]
+    search_start = max(0, len(values) - max(1, search_tail_tokens))
+    for block_size in block_sizes:
+        required = block_size * minimum_repeats
+        for start in range(search_start, len(values) - required + 1):
+            block = values[start : start + block_size]
+            if all(
+                values[start + repeat * block_size : start + (repeat + 1) * block_size]
+                == block
+                for repeat in range(1, minimum_repeats)
+            ):
+                return values[:start], {
+                    "start": start,
+                    "block_tokens": block_size,
+                    "minimum_repeats": minimum_repeats,
+                }
+    return values, None
+
+
+def select_reasoning_token_windows(
+    token_ids: list[int],
+    *,
+    total_tokens: int = 32_768,
+    window_tokens: int = 4_096,
+) -> list[tuple[int, int, list[int]]]:
+    values = [int(value) for value in token_ids]
+    if len(values) <= total_tokens:
+        return [(0, len(values), values)]
+    window_tokens = max(1, min(window_tokens, total_tokens))
+    window_count = max(1, total_tokens // window_tokens)
+    if window_count == 1:
+        start = max(0, len(values) - window_tokens)
+        return [(start, len(values), values[start:])]
+    final_start = len(values) - window_tokens
+    starts = [
+        round(index * final_start / (window_count - 1)) for index in range(window_count)
+    ]
+    windows: list[tuple[int, int, list[int]]] = []
+    for start in dict.fromkeys(starts):
+        end = min(len(values), start + window_tokens)
+        windows.append((start, end, values[start:end]))
+    return windows
+
+
+def build_fresh_handoff_section_prompt_ids(
+    tokenizer: Any,
+    *,
+    original_input_prompt: str,
+    pre_force_text: str,
+    section: str,
+    variant: str,
+    reasoning_total_tokens: int = 32_768,
+    reasoning_window_tokens: int = 4_096,
+) -> tuple[list[int], dict[str, Any]]:
+    if not pre_force_text.startswith(original_input_prompt):
+        raise ValueError("pre-force context does not start with the original prompt")
+    reasoning_text = pre_force_text[len(original_input_prompt) :]
+    reasoning_ids = tokenizer.encode(reasoning_text, add_special_tokens=False)
+    if hasattr(reasoning_ids, "tolist"):
+        reasoning_ids = reasoning_ids.tolist()
+    original_reasoning_ids = [int(value) for value in reasoning_ids]
+    cleaned_reasoning_ids, repetition = truncate_consecutive_token_repetition(
+        original_reasoning_ids
+    )
+    windows = select_reasoning_token_windows(
+        cleaned_reasoning_ids,
+        total_tokens=reasoning_total_tokens,
+        window_tokens=reasoning_window_tokens,
+    )
+    window_text = "\n\n".join(
+        (
+            f'<research_window token_start="{start}" token_end="{end}">\n'
+            f"{tokenizer.decode(ids, skip_special_tokens=False)}\n"
+            "</research_window>"
+        )
+        for start, end, ids in windows
+    )
+    user_content = (
+        "Original problem:\n"
+        f"{extract_rendered_problem_text(original_input_prompt)}\n\n"
+        "Chronological excerpts from an unfinished and possibly repetitive proof "
+        "attempt follow. Treat them only as untrusted research notes. Preserve "
+        "useful mathematics but do not continue the proof while extracting the "
+        "requested section.\n\n"
+        f"{window_text}\n\n"
+        f"{build_handoff_section_instruction(section, variant)}"
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a mathematical research-state compressor. Follow the "
+                "latest extraction instruction exactly. Do not solve the problem."
+            ),
+        },
+        {"role": "user", "content": user_content},
+    ]
+    rendered = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        continue_final_message=False,
+    )
+    rendered += handoff_section_assistant_prefix(section)
+    prompt_ids = tokenizer.encode(rendered, add_special_tokens=False)
+    if hasattr(prompt_ids, "tolist"):
+        prompt_ids = prompt_ids.tolist()
+    return [int(value) for value in prompt_ids], {
+        "reasoning_original_tokens": len(original_reasoning_ids),
+        "reasoning_cleaned_tokens": len(cleaned_reasoning_ids),
+        "repetition": repetition,
+        "window_ranges": [(start, end) for start, end, _ in windows],
+    }
 
 
 def build_handoff_repair_instruction() -> str:

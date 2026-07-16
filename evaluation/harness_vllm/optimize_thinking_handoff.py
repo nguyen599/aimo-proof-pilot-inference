@@ -24,6 +24,7 @@ try:
         HANDOFF_VARIANTS,
         SavedProofGenerationCall,
         assemble_handoff,
+        build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_handoff_section_instruction,
@@ -45,6 +46,7 @@ except ModuleNotFoundError as exc:
         HANDOFF_VARIANTS,
         SavedProofGenerationCall,
         assemble_handoff,
+        build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_handoff_section_instruction,
@@ -90,8 +92,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument(
         "--generation-mode",
-        choices=("monolithic", "sectioned"),
-        default="sectioned",
+        choices=("monolithic", "sectioned", "fresh_sectioned"),
+        default="fresh_sectioned",
     )
     parser.add_argument(
         "--repair-invalid",
@@ -294,17 +296,29 @@ def call_handoff(
             "usage": usage,
         }
 
-    if generation_mode == "sectioned":
+    if generation_mode in {"sectioned", "fresh_sectioned"}:
         sections: dict[str, str] = {}
         for section in HANDOFF_REQUIRED_SECTIONS:
             assistant_prefix = handoff_section_assistant_prefix(section)
-            section_prompt_ids = build_user_turn_prompt_ids(
-                tokenizer,
-                prepared["pre_force_ids"],
-                build_handoff_section_instruction(section, variant),
-                close_open_thinking=True,
-                assistant_prefix=assistant_prefix,
-            )
+            context_metadata: dict[str, Any] = {}
+            if generation_mode == "fresh_sectioned":
+                section_prompt_ids, context_metadata = (
+                    build_fresh_handoff_section_prompt_ids(
+                        tokenizer,
+                        original_input_prompt=prepared["record"].input_prompt,
+                        pre_force_text=prepared["pre_force_text"],
+                        section=section,
+                        variant=variant,
+                    )
+                )
+            else:
+                section_prompt_ids = build_user_turn_prompt_ids(
+                    tokenizer,
+                    prepared["pre_force_ids"],
+                    build_handoff_section_instruction(section, variant),
+                    close_open_thinking=True,
+                    assistant_prefix=assistant_prefix,
+                )
             attempt = complete(
                 section_prompt_ids,
                 section,
@@ -320,6 +334,7 @@ def call_handoff(
             )
             attempt["section"] = section
             attempt["section_content"] = section_content
+            attempt["context_metadata"] = context_metadata
             attempts.append(attempt)
             sections[section] = section_content
         prompt_ids = attempts[0]["prompt_ids"]
@@ -419,6 +434,7 @@ def call_handoff(
             {
                 "name": attempt["name"],
                 "section": attempt.get("section"),
+                "context_metadata": attempt.get("context_metadata"),
                 "finish_reason": attempt["finish_reason"],
                 "usage": attempt["usage"],
                 "parsed": attempt["parsed"],

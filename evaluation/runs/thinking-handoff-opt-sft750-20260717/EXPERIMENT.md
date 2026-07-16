@@ -181,6 +181,46 @@ tokens and prevents one category from consuming the whole budget. All section
 requests retain the full original reasoning context; vLLM prefix caching can
 reuse their common 122K-token prefix.
 
+### Live smoke 4: bounded sections in the original conversation
+
+The six calls completed in 37.2 seconds and produced structurally valid XML:
+
+```text
+aggregate prompt tokens=732745
+aggregate completion tokens=2838
+valid=true
+```
+
+This established that prefix caching makes six extraction calls practical, but
+manual review rejected the handoff quality:
+
+- five of six sections reached their token cap;
+- `established`, `promising`, and `uncertain` restated the problem and mixed in
+  new speculative solving;
+- `failed` repeated generic failure statements;
+- `bottleneck` echoed its extraction instruction;
+- `next_steps` was generic and unfinished.
+
+The likely cause is role framing. The 122K-token attempt remains the model's own
+previous assistant turn, so even a new user instruction leaves a strong
+continuation bias.
+
+### Fresh-context section extraction
+
+The next smoke reframes the attempt as quoted, untrusted research notes in a
+new conversation. It:
+
+1. extracts the original problem without the final-answer XML contract;
+2. removes an exact consecutive repeated-token suffix when detected;
+3. samples eight chronological 4,096-token reasoning windows, at most 32,768
+   tokens total;
+4. places the focused section instruction after those windows;
+5. starts a fresh assistant turn with the section tag already opened.
+
+This reduces each extraction prompt from roughly 122K to roughly 33K tokens,
+keeps early, middle, and late research visible, and moves the current
+instruction into a clean role hierarchy.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof

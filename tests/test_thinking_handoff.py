@@ -25,6 +25,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     _parse_segment,
     append_restart_instruction,
     assemble_handoff,
+    build_fresh_handoff_section_prompt_ids,
     build_handoff_instruction,
     build_handoff_section_instruction,
     build_user_turn_prompt_ids,
@@ -32,6 +33,8 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     parse_handoff_response,
     parse_saved_proof_generation_call,
     remove_final_partial_force_text,
+    select_reasoning_token_windows,
+    truncate_consecutive_token_repetition,
 )
 
 
@@ -216,6 +219,47 @@ class SavedCallParserTests(unittest.TestCase):
 
 
 class HandoffPromptTests(unittest.TestCase):
+    def test_fresh_section_prompt_quotes_sampled_reasoning(self):
+        original = (
+            "<｜begin▁of▁sentence｜>System<｜User｜>Problem: prove X.\n\n"
+            "Respond in EXACTLY this format:\n<solution>...</solution>"
+            "<｜Assistant｜><think>\n"
+        )
+        prompt_ids, metadata = build_fresh_handoff_section_prompt_ids(
+            FakeTokenizer(),
+            original_input_prompt=original,
+            pre_force_text=original + "useful unfinished reasoning",
+            section="next_steps",
+            variant="continuation_frontier",
+            reasoning_total_tokens=16,
+            reasoning_window_tokens=8,
+        )
+        rendered = FakeTokenizer.decode(prompt_ids)
+
+        self.assertIn("Problem: prove X.", rendered)
+        self.assertNotIn("Respond in EXACTLY this format", rendered)
+        self.assertIn("<research_window", rendered)
+        self.assertIn("latest extraction instruction", rendered)
+        self.assertEqual(metadata["reasoning_original_tokens"], 27)
+
+    def test_repetition_truncation_and_window_sampling(self):
+        cleaned, repetition = truncate_consecutive_token_repetition(
+            [1, 2] + [3, 4] * 4,
+            block_sizes=(2,),
+            minimum_repeats=4,
+        )
+        self.assertEqual(cleaned, [1, 2])
+        self.assertEqual(repetition["block_tokens"], 2)
+
+        windows = select_reasoning_token_windows(
+            list(range(100)),
+            total_tokens=20,
+            window_tokens=10,
+        )
+        self.assertEqual(
+            [(start, end) for start, end, _ in windows], [(0, 10), (90, 100)]
+        )
+
     def test_optimizer_builds_sectioned_handoff(self):
         responses = [
             SimpleNamespace(
