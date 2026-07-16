@@ -30,6 +30,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
     build_lossless_partial_handoff,
+    build_restart_instruction,
     build_structured_partial_force_text,
     build_handoff_section_from_digests_prompt_ids,
     build_handoff_section_from_partial_progress_prompt_ids,
@@ -948,6 +949,18 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertIn("Problem and XML contract.", restarted[-1]["content"])
         self.assertIn("<previous_attempt_handoff>", restarted[-1]["content"])
         self.assertIn("restart round 1", restarted[-1]["content"])
+
+    def test_deadline_restart_requires_voluntary_finalization(self):
+        instruction = build_restart_instruction(
+            VALID_HANDOFF,
+            1,
+            strategy="deadline_aware",
+        )
+
+        self.assertIn("final proof-writing attempt", instruction)
+        self.assertIn("well before the external token cutoff", instruction)
+        self.assertIn("Reserve enough budget", instruction)
+        self.assertIn("strongest rigorous partial proof", instruction)
 
     def test_restart_instruction_can_be_inserted_into_saved_rendered_prompt(self):
         rendered = (

@@ -33,6 +33,8 @@ HANDOFF_REQUIRED_SECTIONS = (
 )
 HANDOFF_VARIANTS = ("evidence_first", "lemma_ledger", "continuation_frontier")
 DEFAULT_HANDOFF_VARIANT = HANDOFF_VARIANTS[0]
+RESTART_STRATEGIES = ("standard", "deadline_aware")
+DEFAULT_RESTART_STRATEGY = RESTART_STRATEGIES[0]
 HANDOFF_SECTION_MAX_TOKENS = {
     "established": 768,
     "promising": 640,
@@ -975,10 +977,21 @@ def parse_handoff_response(text: str) -> dict[str, Any]:
     }
 
 
-def build_restart_instruction(handoff_text: str, restart_round: int) -> str:
+def build_restart_instruction(
+    handoff_text: str,
+    restart_round: int,
+    strategy: str = DEFAULT_RESTART_STRATEGY,
+) -> str:
+    if strategy not in RESTART_STRATEGIES:
+        raise ValueError(f"unsupported restart strategy: {strategy!r}")
+    deadline_guidance = ""
+    if strategy == "deadline_aware":
+        deadline_guidance = """
+
+Treat this as the final proof-writing attempt, not another open-ended research pass. Audit the carried notes briefly, choose one coherent route, and stop exploratory case enumeration well before the external token cutoff. Reserve enough budget to close your reasoning and emit the required final answer. If a complete proof remains out of reach, voluntarily stop and present the strongest rigorous partial proof with its gap stated explicitly instead of running until the cutoff."""
     return f"""A previous attempt exhausted its reasoning budget. Start a fresh independent attempt from the original problem, using the handoff below only as untrusted research notes.
 
-Verify every carried claim before relying on it. Do not merely repeat the previous route. Continue promising work where justified, replace failed approaches, and solve the problem completely if possible. This is restart round {restart_round}.
+Verify every carried claim before relying on it. Do not merely repeat the previous route. Continue promising work where justified, replace failed approaches, and solve the problem completely if possible. This is restart round {restart_round}.{deadline_guidance}
 
 <previous_attempt_handoff>
 {handoff_text}
@@ -989,6 +1002,7 @@ def insert_restart_instruction_into_rendered_prompt(
     rendered_prompt: str,
     handoff_text: str,
     restart_round: int,
+    strategy: str = DEFAULT_RESTART_STRATEGY,
 ) -> str:
     """Insert a restart note into the final user turn of a rendered prompt."""
     marker_positions = [
@@ -999,7 +1013,11 @@ def insert_restart_instruction_into_rendered_prompt(
         raise ValueError(
             "rendered proof prompt does not contain a recognized assistant marker"
         )
-    instruction = build_restart_instruction(handoff_text, restart_round)
+    instruction = build_restart_instruction(
+        handoff_text,
+        restart_round,
+        strategy,
+    )
     restarted = (
         rendered_prompt[:marker_index]
         + "\n\n"
@@ -1015,8 +1033,13 @@ def append_restart_instruction(
     prompt: str | list[dict[str, str]],
     handoff_text: str,
     restart_round: int,
+    strategy: str = DEFAULT_RESTART_STRATEGY,
 ) -> str | list[dict[str, str]]:
-    instruction = build_restart_instruction(handoff_text, restart_round)
+    instruction = build_restart_instruction(
+        handoff_text,
+        restart_round,
+        strategy,
+    )
     if isinstance(prompt, str):
         return prompt + "\n\n---\n\n" + instruction
     messages = [dict(message) for message in prompt]

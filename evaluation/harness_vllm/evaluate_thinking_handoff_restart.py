@@ -17,6 +17,7 @@ try:
         parse_generation_response,
     )
     from evaluation.harness_vllm.thinking_handoff import (
+        RESTART_STRATEGIES,
         insert_restart_instruction_into_rendered_prompt,
         parse_saved_proof_generation_call,
     )
@@ -25,6 +26,7 @@ except ModuleNotFoundError as exc:
         raise
     from run import merge_streamed_token_ids, parse_generation_response
     from thinking_handoff import (  # type: ignore[no-redef]
+        RESTART_STRATEGIES,
         insert_restart_instruction_into_rendered_prompt,
         parse_saved_proof_generation_call,
     )
@@ -47,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", required=True)
     parser.add_argument("--temperature", type=float, required=True)
     parser.add_argument("--proof-temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--restart-strategy",
+        choices=RESTART_STRATEGIES,
+        default="standard",
+    )
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--thinking-budget-tokens", type=int, default=122_000)
     parser.add_argument("--max-tokens", type=int, default=126_000)
@@ -173,6 +180,7 @@ def evaluate_restart(
     api_key: str,
     served_model_name: str,
     proof_temperature: float,
+    restart_strategy: str,
     top_p: float,
     thinking_budget_tokens: int,
     max_tokens: int,
@@ -187,6 +195,7 @@ def evaluate_restart(
         record.input_prompt,
         handoff_text,
         restart_round=1,
+        strategy=restart_strategy,
     )
     prompt_ids = tokenizer.encode(rendered_prompt, add_special_tokens=False)
     if hasattr(prompt_ids, "tolist"):
@@ -254,6 +263,7 @@ def evaluate_restart(
                 f"variant: {handoff_result['variant']}",
                 f"handoff_temperature: {handoff_result['temperature']}",
                 f"proof_temperature: {proof_temperature:g}",
+                f"restart_strategy: {restart_strategy}",
                 f"base_url: {base_url}",
                 f"prompt_tokens: {len(prompt_ids)}",
                 f"completion_tokens: {len(generated_ids)}",
@@ -281,6 +291,7 @@ def evaluate_restart(
         "variant": handoff_result["variant"],
         "handoff_temperature": handoff_result["temperature"],
         "proof_temperature": proof_temperature,
+        "restart_strategy": restart_strategy,
         "base_url": base_url,
         "prompt_tokens": len(prompt_ids),
         "completion_tokens": len(generated_ids),
@@ -380,6 +391,7 @@ def main() -> None:
             record.input_prompt,
             str(handoff["parsed"]["text"]),
             restart_round=1,
+            strategy=args.restart_strategy,
         )
         ids = tokenizer.encode(restarted, add_special_tokens=False)
         dry_run_rows.append(
@@ -416,6 +428,7 @@ def main() -> None:
                 api_key=args.api_key,
                 served_model_name=args.served_model_name,
                 proof_temperature=args.proof_temperature,
+                restart_strategy=args.restart_strategy,
                 top_p=args.top_p,
                 thinking_budget_tokens=args.thinking_budget_tokens,
                 max_tokens=args.max_tokens,
@@ -435,6 +448,7 @@ def main() -> None:
                     "variant": handoff["variant"],
                     "handoff_temperature": handoff["temperature"],
                     "proof_temperature": args.proof_temperature,
+                    "restart_strategy": args.restart_strategy,
                     "base_url": base_url,
                     "error": repr(exc),
                 }

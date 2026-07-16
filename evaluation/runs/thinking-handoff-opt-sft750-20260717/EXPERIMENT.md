@@ -402,6 +402,35 @@ handoff candidate from this comparison. The fresh-round experiment compares it
 against an empty restart control to distinguish useful carried state from the
 benefit of merely resetting context.
 
+### Live comparison: structured force directly from cutoff context
+
+A final prompt design was tested without regenerating the original proof. It
+removed the old force suffix from the saved 122K-token context, appended a
+strict extract-only ledger prefix with `VERIFIED`, `UNVERIFIED`, `FAILED`,
+`BOTTLENECK`, and `NEXT` headings, and sampled at three temperatures:
+
+| Temperature | Completion tokens | Finish | Result |
+|---:|---:|---|---|
+| 1.0 | 4 | stop | immediately emitted `</solution>` |
+| 0.7 | 4,096 | length | resumed proof search and hit the cap |
+| 0.6 | 304 | stop | emitted a generic incomplete solution and score 0 |
+
+None followed the requested research-ledger contract:
+
+- temperature `1.0` treated the forced prefix as a complete answer and closed
+  it without transferring state;
+- temperature `0.7` restated the problem and continued a long small-`n`
+  enumeration instead of summarizing;
+- temperature `0.6` produced a generic list of observations, guessed that the
+  answer might be `0` through `n`, and explicitly admitted that no proof was
+  present.
+
+The cutoff context is therefore too strongly conditioned toward completing the
+original assistant answer for a structured force prompt to be reliable. The
+old bounded strongest-partial continuation is imperfect but materially more
+relevant. Preserve it losslessly, mark it untrusted, and perform all auditing
+inside a fresh proof attempt.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof
