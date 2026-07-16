@@ -331,6 +331,39 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(parsed["proof"], "A complete proof.")
         self.assertEqual(parsed["self_score"], 1.0)
 
+    def test_generation_parser_ignores_xml_example_before_orphan_think_close(self):
+        parsed = run.parse_generation_response(
+            "Now I need to output:\n"
+            "<solution>The complete rigorous proof.</solution>\n"
+            "<self_evaluation>Briefly note fragile steps.</self_evaluation>\n"
+            "<score>S</score>\n"
+            "I will now write the actual answer.</think>\n"
+            "<solution>The actual rigorous proof.</solution>\n"
+            "<self_evaluation>The actual proof is checked.</self_evaluation>\n"
+            "<score>1</score>"
+        )
+
+        self.assertTrue(parsed["is_valid_candidate_response"])
+        self.assertEqual(parsed["proof"], "The actual rigorous proof.")
+        self.assertEqual(
+            parsed["self_evaluation"],
+            "The actual proof is checked.",
+        )
+        self.assertEqual(parsed["self_score"], 1.0)
+
+    def test_generation_parser_rejects_incomplete_final_output_after_thinking(self):
+        parsed = run.parse_generation_response(
+            "<solution>Prompt-format example.</solution>\n"
+            "<self_evaluation>Example evaluation.</self_evaluation>\n"
+            "<score>1</score>\n"
+            "</think>\n"
+            "<solution>The actual proof is unfinished"
+        )
+
+        self.assertFalse(parsed["is_valid_candidate_response"])
+        self.assertEqual(parsed["proof"], "")
+        self.assertIsNone(parsed["self_score"])
+
     def test_deepseek_prompt_and_generation_parser_use_markdown_contract(self):
         prompt = run.build_deepseek_proof_generation_prompt("Prove the claim.")
         parsed = run.parse_deepseek_generation_response(
@@ -449,6 +482,22 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(valid["score"], 0.0)
         self.assertFalse(malformed["is_valid_verifier_response"])
         self.assertIsNone(malformed["score"])
+
+    def test_verifier_parser_ignores_xml_example_before_orphan_think_close(self):
+        parsed = run.parse_verifier_response(
+            "<evaluation>Example evaluation.</evaluation>\n"
+            "<suggestions>Example suggestion.</suggestions>\n"
+            "<score>1</score>\n"
+            "</think>\n"
+            "<evaluation>The candidate has a fatal gap.</evaluation>\n"
+            "<suggestions>Prove the missing lemma.</suggestions>\n"
+            "<score>0</score>"
+        )
+
+        self.assertTrue(parsed["is_valid_verifier_response"])
+        self.assertEqual(parsed["evaluation"], "The candidate has a fatal gap.")
+        self.assertEqual(parsed["suggestions"], "Prove the missing lemma.")
+        self.assertEqual(parsed["score"], 0.0)
 
     def test_refiner_receives_xml_candidate_and_reviews(self):
         messages = run.build_opd_proof_refinement_prompt(

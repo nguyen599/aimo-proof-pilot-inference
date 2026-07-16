@@ -1500,6 +1500,21 @@ def output_after_last_thinking_block(text: str) -> tuple[str, bool]:
     return raw[matches[-1].end() :].strip(), True
 
 
+def final_visible_output(text: str) -> str:
+    visible_text, _ = output_after_last_thinking_block(text)
+    return visible_text
+
+
+def last_pattern_match(
+    pattern: re.Pattern[str],
+    text: str,
+    *,
+    after: int = 0,
+) -> Optional[re.Match[str]]:
+    matches = [match for match in pattern.finditer(text) if match.start() >= after]
+    return matches[-1] if matches else None
+
+
 def extract_hidden_reasoning(text: str) -> str:
     raw = str(text or "")
     close_match = re.search(r"(?is)</think>", raw)
@@ -1804,7 +1819,7 @@ def parse_deepseek_generation_response(
     *,
     require_self_evaluation: bool = True,
 ) -> dict[str, Any]:
-    visible_text = strip_reasoning_blocks(text)
+    visible_text = final_visible_output(text)
     proof, self_evaluation, has_solution_section, has_self_evaluation_section = (
         _extract_deepseek_generation_sections(visible_text)
     )
@@ -1828,10 +1843,24 @@ def parse_generation_response(
     *,
     require_self_evaluation: bool = True,
 ) -> dict[str, Any]:
-    visible_text = strip_reasoning_blocks(text)
-    solution_match = _XML_SOLUTION_PATTERN.search(visible_text)
-    self_evaluation_match = _XML_SELF_EVALUATION_PATTERN.search(visible_text)
-    score_match = _XML_SCORE_PATTERN.search(visible_text)
+    visible_text = final_visible_output(text)
+    solution_match = last_pattern_match(_XML_SOLUTION_PATTERN, visible_text)
+    solution_end = solution_match.end() if solution_match else 0
+    self_evaluation_match = last_pattern_match(
+        _XML_SELF_EVALUATION_PATTERN,
+        visible_text,
+        after=solution_end,
+    )
+    score_start = (
+        self_evaluation_match.end()
+        if self_evaluation_match is not None
+        else solution_end
+    )
+    score_match = last_pattern_match(
+        _XML_SCORE_PATTERN,
+        visible_text,
+        after=score_start,
+    )
     proof = solution_match.group(1).strip() if solution_match else ""
     self_evaluation = (
         self_evaluation_match.group(1).strip() if self_evaluation_match else ""
@@ -1888,10 +1917,20 @@ def require_valid_candidate_response(
 
 
 def parse_verifier_response(text: str) -> dict[str, Any]:
-    visible_text = strip_reasoning_blocks(text)
-    evaluation_match = _XML_EVALUATION_PATTERN.search(visible_text)
-    suggestions_match = _XML_SUGGESTIONS_PATTERN.search(visible_text)
-    score_match = _XML_SCORE_PATTERN.search(visible_text)
+    visible_text = final_visible_output(text)
+    evaluation_match = last_pattern_match(_XML_EVALUATION_PATTERN, visible_text)
+    evaluation_end = evaluation_match.end() if evaluation_match else 0
+    suggestions_match = last_pattern_match(
+        _XML_SUGGESTIONS_PATTERN,
+        visible_text,
+        after=evaluation_end,
+    )
+    score_start = suggestions_match.end() if suggestions_match else evaluation_end
+    score_match = last_pattern_match(
+        _XML_SCORE_PATTERN,
+        visible_text,
+        after=score_start,
+    )
     evaluation = evaluation_match.group(1).strip() if evaluation_match else ""
     suggestions = suggestions_match.group(1).strip() if suggestions_match else ""
     score = float(score_match.group(1)) if score_match else None
@@ -1923,7 +1962,7 @@ def parse_verifier_response(text: str) -> dict[str, Any]:
 
 
 def parse_deepseek_verifier_response(text: str) -> dict[str, Any]:
-    visible_text = strip_reasoning_blocks(text)
+    visible_text = final_visible_output(text)
     evaluation, marker_found, marker_kind = extract_after_last_section_marker(
         visible_text,
         _VERIFIER_EVALUATION_MARKERS,
@@ -1973,7 +2012,7 @@ def parse_deepseek_verifier_response(text: str) -> dict[str, Any]:
 
 
 def parse_meta_verifier_response(text: str) -> dict[str, Any]:
-    visible_text = strip_reasoning_blocks(text)
+    visible_text = final_visible_output(text)
     analysis, marker_found, marker_kind = extract_after_last_section_marker(
         visible_text,
         _META_ANALYSIS_MARKERS,
@@ -2003,8 +2042,8 @@ def parse_meta_verifier_response(text: str) -> dict[str, Any]:
 
 
 def parse_selected_index(text: str, candidate_count: int) -> Optional[int]:
-    visible_text = strip_reasoning_blocks(text)
-    match = _SELECTED_ID_PATTERN.search(visible_text)
+    visible_text = final_visible_output(text)
+    match = last_pattern_match(_SELECTED_ID_PATTERN, visible_text)
     if not match:
         return None
     selected = int(match.group(2))
