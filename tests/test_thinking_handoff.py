@@ -131,6 +131,7 @@ def pipeline_cfg(**overrides):
         "thinking_budget_refine_tokens": 0,
         "thinking_budget_refine_final_round_tokens": 0,
         "thinking_budget_refine_max_restarts": 1,
+        "thinking_budget_refine_final_temperature": None,
         "verify_n": 1,
         "meta_n": 0,
         "meta_policy": "all-reviews",
@@ -1418,6 +1419,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
                 thinking_budget_refine_tokens=10,
                 thinking_budget_refine_final_round_tokens=10,
                 thinking_budget_refine_max_restarts=1,
+                thinking_budget_refine_final_temperature=0.6,
             ),
         )
         candidate = result["candidate"]
@@ -1442,6 +1444,15 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
+        refinement_calls = [
+            kwargs
+            for stage, _, kwargs in scheduler.calls
+            if stage == "proof_refine"
+        ]
+        self.assertEqual(
+            [call["temperature"] for call in refinement_calls],
+            [None, 0.6],
+        )
 
     async def test_resume_refinement_handoff_runs_only_final_repair_and_verifier(self):
         class FakeScheduler:
@@ -1513,6 +1524,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
                     scheduler=scheduler,
                     cfg=pipeline_cfg(
                         thinking_budget_refine_final_round_tokens=10,
+                        thinking_budget_refine_final_temperature=0.6,
                     ),
                 )
             )
@@ -1524,6 +1536,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(details["verification_ran"])
         self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
+        self.assertEqual(scheduler.calls[0][2]["temperature"], 0.6)
 
     async def test_lossless_partial_handoff_reserves_final_output_budget(self):
         class FakeScheduler:

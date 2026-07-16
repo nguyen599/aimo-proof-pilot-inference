@@ -114,6 +114,12 @@ def environment_flag(name: str, default: bool) -> bool:
         return False
     raise ValueError(f"{name} must be a boolean value, got {value!r}")
 
+
+def environment_optional_float(name: str) -> Optional[float]:
+    value = os.environ.get(name, "").strip()
+    return float(value) if value else None
+
+
 DEFAULT_VLLM_EXTRA_ARGS = (
     "--generation-config vllm --quantization fp8 --kv-cache-dtype fp8 --block-size 256 "
     "--uvicorn-log-level warning"
@@ -253,6 +259,9 @@ class CFG:
     )
     thinking_budget_refine_max_restarts = int(
         os.environ.get("AIMO_THINKING_BUDGET_REFINE_MAX_RESTARTS", "1")
+    )
+    thinking_budget_refine_final_temperature = environment_optional_float(
+        "AIMO_THINKING_BUDGET_REFINE_FINAL_TEMPERATURE"
     )
     deepseek_thinking_budget_force_text = (
         "\nWe should now write the final solution due time limit.\n"
@@ -534,6 +543,7 @@ class PipelineConfig:
     thinking_budget_refine_tokens: int
     thinking_budget_refine_final_round_tokens: int
     thinking_budget_refine_max_restarts: int
+    thinking_budget_refine_final_temperature: Optional[float]
     deepseek_thinking_budget_force_text: str
     verifier_thinking_budget_tokens: int
     verifier_thinking_budget_force_text: str
@@ -4722,20 +4732,34 @@ async def run_refinement_with_budget_restart(
             if can_restart
             else RESTART_FINALIZE_FORCE_TEXT
         )
+        final_temperature = getattr(
+            cfg,
+            "thinking_budget_refine_final_temperature",
+            None,
+        )
+        request_temperature = (
+            float(final_temperature)
+            if restart_idx > 0
+            and not can_restart
+            and final_temperature is not None
+            else None
+        )
         if progress is not None:
             progress.log(
                 "candidate=%d round=%d stage=refinement_attempt status=start "
-                "restart=%d/%d budget=%s budget_action=%s",
+                "restart=%d/%d budget=%s budget_action=%s temperature=%s",
                 attempt_idx,
                 round_idx,
                 restart_idx,
                 max_restarts,
                 budget_tokens,
                 "stop" if can_restart else "finalize",
+                request_temperature,
             )
         response = await scheduler.call(
             "proof_refine",
             active_prompt,
+            temperature=request_temperature,
             progress=progress,
             detail=(
                 f"candidate={attempt_idx} round={round_idx} "
@@ -6016,6 +6040,7 @@ class ProofRuntime:
         thinking_budget_refine_tokens: int,
         thinking_budget_refine_final_round_tokens: int,
         thinking_budget_refine_max_restarts: int,
+        thinking_budget_refine_final_temperature: Optional[float],
         deepseek_thinking_budget_force_text: str,
         verifier_thinking_budget_tokens: int,
         verifier_thinking_budget_force_text: str,
@@ -6198,6 +6223,11 @@ class ProofRuntime:
             thinking_budget_refine_max_restarts=max(
                 0,
                 int(thinking_budget_refine_max_restarts),
+            ),
+            thinking_budget_refine_final_temperature=(
+                None
+                if thinking_budget_refine_final_temperature is None
+                else float(thinking_budget_refine_final_temperature)
             ),
             deepseek_thinking_budget_force_text=(
                 deepseek_thinking_budget_force_text
@@ -6806,6 +6836,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--thinking-budget-refine-tokens", type=int)
     pipeline.add_argument("--thinking-budget-refine-final-round-tokens", type=int)
     pipeline.add_argument("--thinking-budget-refine-max-restarts", type=int)
+    pipeline.add_argument(
+        "--thinking-budget-refine-final-temperature",
+        type=float,
+    )
     pipeline.add_argument("--problem-timeout-seconds", type=int)
     pipeline.add_argument("--selection-reserve-seconds", type=int)
     pipeline.add_argument("--selector-mode", choices=("llm", "score"))
@@ -6898,6 +6932,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         ),
         "thinking_budget_refine_max_restarts": (
             "thinking_budget_refine_max_restarts"
+        ),
+        "thinking_budget_refine_final_temperature": (
+            "thinking_budget_refine_final_temperature"
         ),
         "problem_timeout_seconds": "problem_timeout_seconds",
         "selection_reserve_seconds": "selection_reserve_seconds",
@@ -7042,6 +7079,13 @@ def run(cfg: type[CFG] = CFG) -> None:
             "Refinement handoff requires positive initial/final budgets and "
             "at least one restart"
         )
+    if (
+        cfg.thinking_budget_refine_final_temperature is not None
+        and float(cfg.thinking_budget_refine_final_temperature) < 0
+    ):
+        raise ValueError(
+            "AIMO_THINKING_BUDGET_REFINE_FINAL_TEMPERATURE cannot be negative"
+        )
     selected_gpus, resolved_tp, resolved_dp = resolve_gpu_parallel_layout(cfg)
     resolved_max_concurrent_requests = resolve_max_concurrent_requests(
         cfg,
@@ -7119,6 +7163,11 @@ def run(cfg: type[CFG] = CFG) -> None:
             "thinking_budget_refine_max_restarts": int(
                 cfg.thinking_budget_refine_max_restarts
             ),
+            "thinking_budget_refine_final_temperature": (
+                None
+                if cfg.thinking_budget_refine_final_temperature is None
+                else float(cfg.thinking_budget_refine_final_temperature)
+            ),
             "vllm_extra_args": str(cfg.vllm_extra_args),
             "served_model_name": str(cfg.served_model_name),
             "mock_llm": bool(cfg.mock_llm),
@@ -7141,6 +7190,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         "restart_strategy=%s final_round_budget=%s handoff_tokens=%s "
         "handoff_temperature=%s refine_handoff=%s refine_budget=%s "
         "refine_final_budget=%s refine_max_restarts=%s "
+        "refine_final_temperature=%s "
         "node_rank=%s/%s distributed_run=%s output=%s",
         cfg.stream_vllm,
         cfg.stream_vllm_server_log,
@@ -7167,6 +7217,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.thinking_budget_refine_tokens,
         cfg.thinking_budget_refine_final_round_tokens,
         cfg.thinking_budget_refine_max_restarts,
+        cfg.thinking_budget_refine_final_temperature,
         distributed.rank,
         distributed.world_size,
         distributed.run_id or "local",
@@ -7252,6 +7303,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             ),
             thinking_budget_refine_max_restarts=(
                 cfg.thinking_budget_refine_max_restarts
+            ),
+            thinking_budget_refine_final_temperature=(
+                cfg.thinking_budget_refine_final_temperature
             ),
             deepseek_thinking_budget_force_text=(
                 cfg.deepseek_thinking_budget_force_text

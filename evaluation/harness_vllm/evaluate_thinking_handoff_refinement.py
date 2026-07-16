@@ -99,6 +99,14 @@ def parse_args() -> argparse.Namespace:
         default=50_000,
     )
     parser.add_argument("--thinking-budget-refine-max-restarts", type=int, default=1)
+    parser.add_argument(
+        "--thinking-budget-refine-final-temperature",
+        type=float,
+        help=(
+            "Sampling temperature used only for the final refinement after a "
+            "thinking-budget handoff. By default it inherits --temperature."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--request-timeout-seconds", type=float, default=7200.0)
@@ -182,6 +190,7 @@ async def resume_final_refinement(
     response = await scheduler.call(
         "proof_refine",
         prompt,
+        temperature=cfg.thinking_budget_refine_final_temperature,
         detail="candidate=0 round=1 resumed_handoff=1",
         thinking_budget_tokens=int(
             cfg.thinking_budget_refine_final_round_tokens
@@ -385,6 +394,11 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             0,
             int(args.thinking_budget_refine_max_restarts),
         ),
+        thinking_budget_refine_final_temperature=(
+            None
+            if args.thinking_budget_refine_final_temperature is None
+            else float(args.thinking_budget_refine_final_temperature)
+        ),
         verifier_thinking_budget_tokens=min(
             int(CFG.verifier_thinking_budget_tokens),
             max(1, int(args.verifier_max_tokens) - 1),
@@ -439,6 +453,9 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "thinking_budget_refine_max_restarts": (
                 cfg.thinking_budget_refine_max_restarts
+            ),
+            "thinking_budget_refine_final_temperature": (
+                cfg.thinking_budget_refine_final_temperature
             ),
             "temperature": args.temperature,
             "top_p": args.top_p,

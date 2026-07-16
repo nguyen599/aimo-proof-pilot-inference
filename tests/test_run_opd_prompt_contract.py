@@ -43,6 +43,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "2",
                 "--refine-rounds",
                 "1",
+                "--thinking-budget-refine-final-temperature",
+                "0.6",
                 "--node-rank",
                 "1",
                 "--world-size",
@@ -70,6 +72,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.pipelines_per_problem, 16)
         self.assertEqual(cfg.max_concurrent_problems, 2)
         self.assertEqual(cfg.refine_rounds, 1)
+        self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
 
     def test_cli_dflash_options_rebuild_vllm_args(self):
         cfg = SimpleNamespace(vllm_extra_args="", min_p=0.01)

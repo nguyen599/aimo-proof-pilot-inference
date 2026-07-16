@@ -870,6 +870,48 @@ run final refinements at temperatures 0.7 and 0.6. The two runs reuse the same
 saved handoff and critiques. They test whether lower sampling variance improves
 voluntary closure or verifier score without changing token allocation.
 
+#### Live result
+
+| Final refinement temperature | Completion tokens | Finish reason | Parser-valid | Aggregate verifier score | Manually rigorous |
+|---:|---:|---|---:|---:|---:|
+| 1.0 | 57,647 | `stop` | yes | 0.0 | 0/1 |
+| 0.7 | 65,000 | `length` | no | not run | 0/1 |
+| 0.6 | 24,678 | `stop` | yes | 0.0625 | 0/1 |
+
+Temperature `0.6` was the most token-efficient format completion on this one
+hard case. Its 13,407-character proof received verifier scores
+`0, 0.5, 0, 0` and meta-verifier scores `0, 0.5, 1, 1`. It still contained
+fatal gaps:
+
+- It did not prove the claimed extremal bound for mixtures of non-sunny line
+  orientations.
+- It replaced an arbitrary line cover by horizontal rows without a valid
+  reduction.
+- Its `k=2` argument assumed the complement was exactly a smaller lattice
+  triangle.
+- Its `n >= 6` case implicitly assumed `n-k >= 2` for every `k >= 4`.
+- It omitted `n=4`.
+- Its special `n=3, k=3` construction called a slope `-1` line sunny.
+- It cited a "standard geometric argument" in place of the missing key proof.
+
+The sweep therefore improved XML completion from `1/3` at the original
+50,000-token final boundary to `2/3` at the 20,000-token boundary, but rigorous
+proof completion remained `0/3`. Temperature `0.6` is exposed as an
+independent final-refinement setting so it does not alter proof generation,
+initial refinement, verification, or meta-verification sampling. It remains
+opt-in pending a multi-problem completion-rate study.
+
+Use:
+
+```bash
+python evaluation/harness_vllm/run.py \
+  ... \
+  --thinking-budget-refine-handoff-enabled \
+  --thinking-budget-refine-tokens 50000 \
+  --thinking-budget-refine-final-round-tokens 20000 \
+  --thinking-budget-refine-final-temperature 0.6
+```
+
 ## Current validation
 
 - Targeted Ruff checks pass.
