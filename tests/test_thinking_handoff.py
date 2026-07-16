@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from evaluation.harness_vllm import run  # noqa: E402
+from evaluation.harness_vllm import evaluate_thinking_handoff_refinement  # noqa: E402
 from evaluation.harness_vllm import evaluate_thinking_handoff_restart  # noqa: E402
 from evaluation.harness_vllm.optimize_thinking_handoff import (  # noqa: E402
     call_handoff,
@@ -1438,6 +1440,88 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
             candidate["proof_refine_handoff_output"][0]["finish_reason"],
             "partial_passthrough",
         )
+        self.assertEqual(candidate["selected_verification_round"], 1)
+        self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
+
+    async def test_resume_refinement_handoff_runs_only_final_repair_and_verifier(self):
+        class FakeScheduler:
+            def __init__(self):
+                self.calls = []
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append((stage, prompt, kwargs))
+                if stage == "proof_refine":
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A repaired complete proof.</solution>"
+                            "<self_evaluation>The missing lemma is proved.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_verify":
+                    return {
+                        "success": True,
+                        "text": (
+                            "<evaluation>The repair is complete.</evaluation>"
+                            "<suggestions>No repair needed.</suggestions>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                raise AssertionError(stage)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_path = Path(tmpdir) / "result.json"
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "candidate": {
+                            "final_score": 0.0,
+                            "final_status": "validated_low_score",
+                            "proof_solution": "A proof with a gap.",
+                            "validated_critiques": [
+                                {
+                                    "score": 0.0,
+                                    "verifier_index": 0,
+                                    "evaluation": "The lower-bound lemma is missing.",
+                                }
+                            ],
+                            "proof_refine_handoffs": [
+                                {"text": VALID_HANDOFF}
+                            ],
+                            "proof_refine_output": [],
+                            "proof_verify_output": [],
+                            "proof_meta_verify_output": [],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            scheduler = FakeScheduler()
+            candidate, details = (
+                await evaluate_thinking_handoff_refinement.resume_final_refinement(
+                    path=result_path,
+                    question="Prove the claim.",
+                    initial_parsed={
+                        "proof": "A proof with a gap.",
+                        "self_evaluation": "The lower-bound lemma may be missing.",
+                    },
+                    scheduler=scheduler,
+                    cfg=pipeline_cfg(
+                        thinking_budget_refine_final_round_tokens=10,
+                    ),
+                )
+            )
+
+        self.assertEqual(
+            [stage for stage, _, _ in scheduler.calls],
+            ["proof_refine", "proof_verify"],
+        )
+        self.assertTrue(details["verification_ran"])
         self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
 

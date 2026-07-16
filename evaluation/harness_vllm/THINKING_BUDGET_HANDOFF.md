@@ -129,3 +129,19 @@ forces the transition to XML while reserving the remaining completion tokens
 for the repaired proof. The feature is disabled by default. Audit fields are
 `proof_refine_attempt_output`, `proof_refine_handoff_output`,
 `proof_refine_handoffs`, and `refine_budget_restart_count`.
+
+To retest only the final repair from a saved refinement handoff, without
+repeating the initial verification and first stopped refinement:
+
+```bash
+python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
+  ... \
+  --resume-refinement-result /tmp/previous-replay/result.json \
+  --thinking-budget-refine-handoff-enabled \
+  --thinking-budget-refine-final-round-tokens 20000
+```
+
+Resume mode rebuilds the original refinement prompt, attaches the saved
+lossless handoff and selected validated critiques, and runs one final repair.
+It invokes the verifier and meta-verifier only when that repair is
+parser-valid, then keeps the higher-scoring verified round.

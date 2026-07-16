@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,13 +14,18 @@ try:
     from evaluation.harness_vllm.run import (
         CFG,
         PROMPT_FAMILY_OPD,
+        RESTART_FINALIZE_FORCE_TEXT,
         ChatScheduler,
         SamplingConfig,
+        build_opd_proof_refinement_prompt,
+        format_refinement_critique,
         make_output,
         parse_generation_response,
+        run_verification_round,
         run_single_attempt,
     )
     from evaluation.harness_vllm.thinking_handoff import (
+        append_restart_instruction,
         extract_rendered_problem_text,
         parse_saved_proof_generation_call,
     )
@@ -29,13 +35,18 @@ except ModuleNotFoundError as exc:
     from run import (  # type: ignore[no-redef]
         CFG,
         PROMPT_FAMILY_OPD,
+        RESTART_FINALIZE_FORCE_TEXT,
         ChatScheduler,
         SamplingConfig,
+        build_opd_proof_refinement_prompt,
+        format_refinement_critique,
         make_output,
         parse_generation_response,
+        run_verification_round,
         run_single_attempt,
     )
     from thinking_handoff import (  # type: ignore[no-redef]
+        append_restart_instruction,
         extract_rendered_problem_text,
         parse_saved_proof_generation_call,
     )
@@ -56,6 +67,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default="vllm-local")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--result-index", type=int, default=0)
+    parser.add_argument(
+        "--resume-refinement-result",
+        type=Path,
+        help=(
+            "Reuse the verifier critiques and lossless refinement handoff from "
+            "a previous result.json, then run only the final refinement and "
+            "its verification."
+        ),
+    )
     parser.add_argument("--verify-n", type=int, default=4)
     parser.add_argument("--meta-n", type=int, default=1)
     parser.add_argument(
@@ -113,6 +133,141 @@ def normalize_problem(rendered_prompt: str) -> str:
     if problem.startswith("Problem:\n"):
         problem = problem.removeprefix("Problem:\n").strip()
     return problem
+
+
+def score_value(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return -1.0
+
+
+async def resume_final_refinement(
+    *,
+    path: Path,
+    question: str,
+    initial_parsed: dict[str, Any],
+    scheduler: ChatScheduler,
+    cfg: SimpleNamespace,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    previous = json.loads(path.read_text(encoding="utf-8"))
+    candidate = copy.deepcopy(previous["candidate"])
+    handoffs = candidate.get("proof_refine_handoffs") or []
+    if not handoffs or not handoffs[-1].get("text"):
+        raise ValueError(f"resume result has no refinement handoff: {path}")
+    ranked_critiques = sorted(
+        candidate.get("validated_critiques") or [],
+        key=lambda critique: (
+            score_value(critique.get("score")),
+            int(critique.get("verifier_index") or 0),
+        ),
+    )
+    selected_critiques = ranked_critiques[: max(1, int(cfg.refine_review_n))]
+    if not selected_critiques:
+        raise ValueError(f"resume result has no validated critiques: {path}")
+
+    base_prompt = build_opd_proof_refinement_prompt(
+        question,
+        "P0",
+        str(initial_parsed.get("proof") or ""),
+        str(initial_parsed.get("self_evaluation") or ""),
+        selected_critiques,
+    )
+    prompt = append_restart_instruction(
+        base_prompt,
+        str(handoffs[-1]["text"]),
+        1,
+        strategy="deadline_aware",
+    )
+    response = await scheduler.call(
+        "proof_refine",
+        prompt,
+        detail="candidate=0 round=1 resumed_handoff=1",
+        thinking_budget_tokens=int(
+            cfg.thinking_budget_refine_final_round_tokens
+        ),
+        thinking_budget_force_text=RESTART_FINALIZE_FORCE_TEXT,
+        thinking_budget_action="finalize",
+    )
+    parsed = parse_generation_response(response.get("text", ""))
+    critiques = [
+        format_refinement_critique(critique) for critique in selected_critiques
+    ]
+    output = make_output(
+        "proof_refine",
+        response,
+        parsed,
+        round_idx=1,
+        used_critiques=critiques,
+        resumed_handoff=True,
+        invalid=not parsed["is_valid_candidate_response"],
+        prompt_family=PROMPT_FAMILY_OPD,
+    )
+    candidate.setdefault("proof_refine_output", []).append(output)
+    candidate["resumed_refinement_output"] = output
+    resume_details: dict[str, Any] = {
+        "source_result": str(path),
+        "selected_critiques": selected_critiques,
+        "refinement_output": output,
+        "verification_ran": False,
+    }
+    if not parsed["is_valid_candidate_response"]:
+        return candidate, resume_details
+
+    (
+        _verifier_results,
+        verifier_outputs,
+        _meta_results_by_verifier,
+        meta_outputs,
+        aggregation,
+    ) = await run_verification_round(
+        question,
+        str(parsed["proof"]),
+        str(parsed.get("self_evaluation") or ""),
+        0,
+        1,
+        scheduler,
+        cfg,
+        prompt_family=PROMPT_FAMILY_OPD,
+    )
+    candidate.setdefault("proof_verify_output", []).extend(verifier_outputs)
+    candidate.setdefault("proof_meta_verify_output", []).extend(meta_outputs)
+    resume_details["verification_ran"] = True
+    resume_details["aggregation"] = aggregation
+
+    if score_value(aggregation.get("final_score")) >= score_value(
+        candidate.get("final_score")
+    ):
+        candidate.update(
+            {
+                "proof_solution": parsed["proof"],
+                "self_evaluation": parsed.get("self_evaluation"),
+                "self_score": parsed.get("self_score"),
+                "validated_critiques": aggregation.get(
+                    "validated_critiques", []
+                ),
+                "verifier_score_summaries": aggregation.get(
+                    "verifier_score_summaries", []
+                ),
+                "final_score": aggregation.get("final_score"),
+                "final_status": aggregation.get("final_status"),
+                "low_scores_seen": aggregation.get("low_scores_seen"),
+                "strict_pass": aggregation.get("strict_pass", False),
+                "all_verifiers_passed": aggregation.get(
+                    "all_verifiers_passed", False
+                ),
+                "meta_valid_count": aggregation.get("meta_valid_count", 0),
+                "meta_checked_count": aggregation.get("meta_checked_count", 0),
+                "meta_summary_by_verifier": aggregation.get(
+                    "meta_summary_by_verifier", {}
+                ),
+                "selected_verification_round": 1,
+                "rollback_from_round": None,
+            }
+        )
+    else:
+        candidate["rollback_from_round"] = 1
+    return candidate, resume_details
 
 
 async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
@@ -244,14 +399,24 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         ),
         meta_thinking_budget_force_text=CFG.meta_thinking_budget_force_text,
     )
-    candidate = await run_single_attempt(
-        question,
-        0,
-        1,
-        scheduler,
-        cfg,
-        initial_generation=initial_generation,
-    )
+    resume_details = None
+    if args.resume_refinement_result is not None:
+        candidate, resume_details = await resume_final_refinement(
+            path=args.resume_refinement_result,
+            question=question,
+            initial_parsed=parsed,
+            scheduler=scheduler,
+            cfg=cfg,
+        )
+    else:
+        candidate = await run_single_attempt(
+            question,
+            0,
+            1,
+            scheduler,
+            cfg,
+            initial_generation=initial_generation,
+        )
     return {
         "source": source,
         "restart_results": str(args.restart_results),
@@ -284,6 +449,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "proof_chars": len(str(parsed.get("proof") or "")),
             "self_score": parsed.get("self_score"),
         },
+        "resume_refinement": resume_details,
         "candidate": candidate,
     }
 
@@ -312,6 +478,22 @@ def main() -> None:
             "selected_verification_round"
         ),
         "rollback_from_round": result["candidate"].get("rollback_from_round"),
+        "resumed_refinement": result.get("resume_refinement") is not None,
+        "resumed_refinement_valid": (
+            (
+                result.get("resume_refinement", {})
+                .get("refinement_output", {})
+                .get("parsed", {})
+                .get("is_valid_candidate_response")
+            )
+            if result.get("resume_refinement")
+            else None
+        ),
+        "resumed_refinement_verified": (
+            result.get("resume_refinement", {}).get("verification_ran")
+            if result.get("resume_refinement")
+            else None
+        ),
     }
     atomic_write_json(args.output_dir / "summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

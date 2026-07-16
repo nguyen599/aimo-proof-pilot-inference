@@ -755,9 +755,51 @@ proof_refine
 proof_verify
 ```
 
+#### Live result: 50,000-token refinement restart
+
+The exact sunny-lines replay completed successfully at the process level, but
+the repaired proof remained parser-invalid:
+
+| Metric | Result |
+|---|---:|
+| Initial refinement completion tokens | 50,089 |
+| Initial refinement finish reason | `thinking_budget_reached` |
+| Lossless handoff characters | 41,721 |
+| Fresh refinement completion tokens | 65,000 |
+| Fresh refinement forced boundary | 50,000 |
+| Visible-proof reserve | about 15,000 tokens |
+| Fresh refinement finish reason | `length` |
+| Closed `solution` section | no |
+| Re-verification calls | 0 |
+| Selected verification round | 0 |
+| Final aggregate score | 0.0 |
+
+The fresh call obeyed the control: it left hidden reasoning at the configured
+boundary and started a structured proof. It emitted an opening `<solution>`
+tag but did not close the solution before the 65,000-token request limit. This
+isolates the remaining failure to token allocation rather than handoff
+dispatch or force-text application.
+
+### Experiment 6: resume with an earlier final boundary
+
+Reuse the exact saved 41,721-character handoff and the same validated
+critiques, but force the final refinement out of thinking after 20,000 tokens:
+
+| Setting | Value |
+|---|---:|
+| Final completion allowance | 65,000 |
+| Final thinking boundary | 20,000 |
+| Approximate visible-proof reserve | 45,000 tokens |
+| Temperature | 1.0 |
+| Top-p | 0.95 |
+
+The resume harness skips the initial verifier, first refinement, and handoff
+generation. This makes the comparison test only whether a larger visible
+answer reserve improves parser completion and verified mathematical quality.
+
 ## Current validation
 
 - Targeted Ruff checks pass.
 - Python compilation checks pass.
-- Focused handoff suite: 35 tests passed.
-- Full repository suite: 140 tests passed, 36 subtests passed.
+- Focused handoff suite: 36 tests passed.
+- Full repository suite: 141 tests passed, 36 subtests passed.
