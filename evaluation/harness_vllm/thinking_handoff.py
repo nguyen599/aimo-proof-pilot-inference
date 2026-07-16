@@ -22,6 +22,12 @@ STRUCTURED_PARTIAL_FORCE_PREFIX = (
     "independent attempt. Recover only mathematical state already present in "
     "your reasoning; do not derive new claims or guess the final answer.\n\n"
 )
+RESTART_FINALIZE_FORCE_TEXT = (
+    "\nWe must stop exploratory reasoning now and write the final answer. "
+    "Synthesize the strongest rigorous proof supported by the work above, "
+    "resolve remaining gaps where possible, and state any unavoidable gap "
+    "honestly. Do not continue searching.\n</think>\n\n<solution>\n"
+)
 HANDOFF_ASSISTANT_PREFIX = "\n</think>\n\n<handoff>\n"
 HANDOFF_REQUIRED_SECTIONS = (
     "established",

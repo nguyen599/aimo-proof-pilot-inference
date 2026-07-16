@@ -12,6 +12,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from evaluation.harness_vllm import run  # noqa: E402
+from evaluation.harness_vllm import evaluate_thinking_handoff_restart  # noqa: E402
 from evaluation.harness_vllm.optimize_thinking_handoff import (  # noqa: E402
     call_handoff,
     discover_cases,
@@ -961,6 +962,113 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertIn("well before the external token cutoff", instruction)
         self.assertIn("Reserve enough budget", instruction)
         self.assertIn("strongest rigorous partial proof", instruction)
+
+    def test_restart_finalization_force_reserves_visible_solution(self):
+        force_text = (
+            evaluate_thinking_handoff_restart.RESTART_FINALIZE_FORCE_TEXT
+        )
+
+        self.assertIn("stop exploratory reasoning now", force_text)
+        self.assertIn("</think>", force_text)
+        self.assertIn("<solution>", force_text)
+        self.assertIn("Do not continue searching", force_text)
+
+    def test_restart_finalization_uses_only_remaining_completion_budget(self):
+        first_ids = FakeTokenizer.encode("unfinished")
+        final_text = (
+            "A rigorous proof.</solution>"
+            "<self_evaluation>The proof is complete.</self_evaluation>"
+            "<score>1</score>"
+        )
+        final_ids = FakeTokenizer.encode(final_text)
+        record = SavedProofGenerationCall(
+            path=Path("rank0/llm_calls/1/cand_0_proof_gen_r0.txt"),
+            stage="proof_generation",
+            detail="candidate=0 round=0",
+            prompt_tokens=1,
+            max_tokens=10,
+            input_prompt=(
+                "<｜begin▁of▁sentence｜><｜User｜>Problem text"
+                "<｜Assistant｜><think>\n"
+            ),
+            continuation_prompt="",
+            continuation_prompt_tokens=0,
+            continuation_max_tokens=0,
+            output_text="",
+            finish_reason="length",
+            usage={},
+        )
+        handoff_result = {
+            "source": "rank0/llm_calls/1/cand_0_proof_gen_r0.txt",
+            "run_id": "test",
+            "variant": "partial_passthrough",
+            "temperature": 0.0,
+            "parsed": {"text": VALID_HANDOFF},
+        }
+        max_tokens = 512
+        force_ids = FakeTokenizer.encode(
+            evaluate_thinking_handoff_restart.RESTART_FINALIZE_FORCE_TEXT
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with (
+                patch.object(
+                    evaluate_thinking_handoff_restart,
+                    "parse_saved_proof_generation_call",
+                    return_value=record,
+                ),
+                patch.object(
+                    evaluate_thinking_handoff_restart,
+                    "OpenAI",
+                    return_value=object(),
+                ),
+                patch.object(
+                    evaluate_thinking_handoff_restart,
+                    "stream_segment",
+                    side_effect=[
+                        {
+                            "generated_ids": first_ids,
+                            "finish_reason": None,
+                            "stopped_by_budget": True,
+                        },
+                        {
+                            "generated_ids": final_ids,
+                            "finish_reason": "stop",
+                            "stopped_by_budget": False,
+                        },
+                    ],
+                ) as stream_segment,
+            ):
+                result = evaluate_thinking_handoff_restart.evaluate_restart(
+                    handoff_result=handoff_result,
+                    logs_root=Path(tmpdir),
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://127.0.0.1:8000",
+                    api_key="test",
+                    served_model_name="test",
+                    proof_temperature=1.0,
+                    restart_strategy="deadline_aware",
+                    force_finalize_at_budget=True,
+                    top_p=0.95,
+                    thinking_budget_tokens=len(first_ids),
+                    max_tokens=max_tokens,
+                    request_timeout_seconds=30,
+                    output_dir=Path(tmpdir),
+                )
+
+        second_call = stream_segment.call_args_list[1].kwargs
+        self.assertEqual(
+            second_call["max_tokens"],
+            max_tokens - len(first_ids) - len(force_ids),
+        )
+        self.assertEqual(
+            second_call["prompt_ids"][-len(force_ids) :],
+            force_ids,
+        )
+        self.assertTrue(result["budget_forced_finalization"])
+        self.assertEqual(result["forced_finalization_tokens"], len(final_ids))
+        self.assertTrue(result["valid_proof"])
+        self.assertTrue(result["verification_can_start"])
 
     def test_restart_instruction_can_be_inserted_into_saved_rendered_prompt(self):
         rendered = (

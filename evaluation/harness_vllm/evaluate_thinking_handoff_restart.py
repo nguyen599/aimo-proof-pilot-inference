@@ -17,6 +17,7 @@ try:
         parse_generation_response,
     )
     from evaluation.harness_vllm.thinking_handoff import (
+        RESTART_FINALIZE_FORCE_TEXT,
         RESTART_STRATEGIES,
         insert_restart_instruction_into_rendered_prompt,
         parse_saved_proof_generation_call,
@@ -26,6 +27,7 @@ except ModuleNotFoundError as exc:
         raise
     from run import merge_streamed_token_ids, parse_generation_response
     from thinking_handoff import (  # type: ignore[no-redef]
+        RESTART_FINALIZE_FORCE_TEXT,
         RESTART_STRATEGIES,
         insert_restart_instruction_into_rendered_prompt,
         parse_saved_proof_generation_call,
@@ -53,6 +55,15 @@ def parse_args() -> argparse.Namespace:
         "--restart-strategy",
         choices=RESTART_STRATEGIES,
         default="standard",
+    )
+    parser.add_argument(
+        "--force-finalize-at-budget",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "At the thinking budget, append a forced </think>/<solution> "
+            "transition and spend the remaining completion budget on final output."
+        ),
     )
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--thinking-budget-tokens", type=int, default=122_000)
@@ -181,6 +192,7 @@ def evaluate_restart(
     served_model_name: str,
     proof_temperature: float,
     restart_strategy: str,
+    force_finalize_at_budget: bool,
     top_p: float,
     thinking_budget_tokens: int,
     max_tokens: int,
@@ -230,6 +242,8 @@ def evaluate_restart(
         first["stopped_by_budget"] and not thinking_closed_at_budget
     )
     finish_reason = first["finish_reason"]
+    budget_forced_finalization = False
+    forced_finalization_tokens = 0
 
     if first["stopped_by_budget"] and thinking_closed_at_budget:
         remaining_tokens = max_tokens - len(generated_ids)
@@ -245,6 +259,30 @@ def evaluate_restart(
             )
             generated_ids.extend(second["generated_ids"])
             finish_reason = second["finish_reason"]
+    elif hit_unfinished_thinking_budget and force_finalize_at_budget:
+        force_ids = tokenizer.encode(
+            RESTART_FINALIZE_FORCE_TEXT,
+            add_special_tokens=False,
+        )
+        if hasattr(force_ids, "tolist"):
+            force_ids = force_ids.tolist()
+        force_ids = [int(value) for value in force_ids]
+        remaining_tokens = max_tokens - len(generated_ids) - len(force_ids)
+        if remaining_tokens > 0:
+            generated_ids.extend(force_ids)
+            second = stream_segment(
+                client=client,
+                model=served_model_name,
+                prompt_ids=prompt_ids + generated_ids,
+                temperature=proof_temperature,
+                top_p=top_p,
+                max_tokens=remaining_tokens,
+                stop_after_tokens=None,
+            )
+            generated_ids.extend(second["generated_ids"])
+            finish_reason = second["finish_reason"]
+            budget_forced_finalization = True
+            forced_finalization_tokens = len(second["generated_ids"])
 
     output_text = tokenizer.decode(generated_ids, skip_special_tokens=False)
     parsed = parse_generation_response(
@@ -264,6 +302,9 @@ def evaluate_restart(
                 f"handoff_temperature: {handoff_result['temperature']}",
                 f"proof_temperature: {proof_temperature:g}",
                 f"restart_strategy: {restart_strategy}",
+                f"force_finalize_at_budget: {force_finalize_at_budget}",
+                f"budget_forced_finalization: {budget_forced_finalization}",
+                f"forced_finalization_tokens: {forced_finalization_tokens}",
                 f"base_url: {base_url}",
                 f"prompt_tokens: {len(prompt_ids)}",
                 f"completion_tokens: {len(generated_ids)}",
@@ -292,6 +333,9 @@ def evaluate_restart(
         "handoff_temperature": handoff_result["temperature"],
         "proof_temperature": proof_temperature,
         "restart_strategy": restart_strategy,
+        "force_finalize_at_budget": force_finalize_at_budget,
+        "budget_forced_finalization": budget_forced_finalization,
+        "forced_finalization_tokens": forced_finalization_tokens,
         "base_url": base_url,
         "prompt_tokens": len(prompt_ids),
         "completion_tokens": len(generated_ids),
@@ -339,6 +383,9 @@ def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
         ),
         "verification_can_start_count": sum(
             bool(item.get("verification_can_start")) for item in completed
+        ),
+        "budget_forced_finalization_count": sum(
+            bool(item.get("budget_forced_finalization")) for item in completed
         ),
         "mean_completion_tokens": (
             sum(int(item.get("completion_tokens") or 0) for item in completed)
@@ -429,6 +476,7 @@ def main() -> None:
                 served_model_name=args.served_model_name,
                 proof_temperature=args.proof_temperature,
                 restart_strategy=args.restart_strategy,
+                force_finalize_at_budget=args.force_finalize_at_budget,
                 top_p=args.top_p,
                 thinking_budget_tokens=args.thinking_budget_tokens,
                 max_tokens=args.max_tokens,
@@ -449,6 +497,7 @@ def main() -> None:
                     "handoff_temperature": handoff["temperature"],
                     "proof_temperature": args.proof_temperature,
                     "restart_strategy": args.restart_strategy,
+                    "force_finalize_at_budget": args.force_finalize_at_budget,
                     "base_url": base_url,
                     "error": repr(exc),
                 }
