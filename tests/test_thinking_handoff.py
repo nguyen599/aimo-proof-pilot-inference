@@ -25,6 +25,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     _parse_segment,
     append_restart_instruction,
     assemble_handoff,
+    build_empty_restart_handoff,
     build_fresh_handoff_section_prompt_ids,
     build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
@@ -624,6 +625,19 @@ class HandoffPromptTests(unittest.TestCase):
             "&lt;handoff>x&lt;/handoff>",
         )
 
+    def test_empty_restart_handoff_carries_no_mathematical_state(self):
+        parsed = parse_handoff_response(build_empty_restart_handoff())
+
+        self.assertTrue(parsed["is_valid"])
+        self.assertIn(
+            "No mathematical state is carried",
+            parsed["sections"]["established"],
+        )
+        self.assertIn(
+            "fresh independent proof",
+            parsed["sections"]["next_steps"],
+        )
+
     def test_optimizer_builds_lossless_partial_handoff_without_model_call(self):
         class FakeOpenAI:
             def __init__(self, **kwargs):
@@ -667,6 +681,47 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertEqual(result["usage"]["completion_tokens"], 0)
         self.assertTrue(result["attempts"][0]["context_metadata"]["lossless"])
         self.assertIn(partial, result["parsed"]["sections"]["promising"])
+
+    def test_optimizer_builds_empty_restart_baseline_without_model_call(self):
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "record": SimpleNamespace(output_text="unused"),
+                        "pre_force_ids": [],
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": True,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant="evidence_first",
+                    temperature=0.7,
+                    max_tokens=4096,
+                    generation_mode="empty_baseline",
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                )
+
+        self.assertTrue(result["parsed"]["is_valid"])
+        self.assertEqual(result["finish_reason"], "empty_baseline")
+        self.assertEqual(result["prompt_tokens"], 0)
+        self.assertEqual(
+            result["attempts"][0]["context_metadata"]["baseline"],
+            "fresh_restart_without_mathematical_handoff",
+        )
 
     def test_optimizer_repairs_one_invalid_handoff(self):
         responses = [

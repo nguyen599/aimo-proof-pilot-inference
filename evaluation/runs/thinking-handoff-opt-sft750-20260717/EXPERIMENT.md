@@ -374,6 +374,34 @@ forced partial report losslessly as explicitly untrusted context, with
 deterministic guard sections around it. The fresh solver, rather than another
 summarizer, is responsible for auditing its claims.
 
+### Live comparison: reducer temperatures versus lossless passthrough
+
+The same forced partial report was tested with reducer temperatures `1.0`,
+`0.7`, and `0.6`, plus a deterministic lossless passthrough:
+
+| Mode | Temperature | Completion tokens | Latency | Structural result |
+|---|---:|---:|---:|---|
+| partial section reducer | 1.0 | 1,151 | 6.2 s | valid XML |
+| partial section reducer | 0.7 | 1,230 | 11.2 s | valid XML |
+| partial section reducer | 0.6 | 1,248 | 6.5 s | valid XML |
+| lossless passthrough | n/a | 0 | 0.03 s | valid XML |
+
+All reducer temperatures are rejected:
+
+- temperature `1.0` states unproved sunny-line capacity bounds as established;
+- temperature `0.7` starts an `established` bullet by claiming `n=4, k=1`,
+  then retracts it inside the same bullet;
+- temperature `0.6` contradicts itself between `established` and `failed` on
+  whether `n=3, k=1` is possible;
+- each temperature hit the completion cap in at least five of six sections and
+  ended several mathematical statements mid-sentence.
+
+The lossless mode preserved all 12,947 report characters inside an explicitly
+untrusted block and made no new mathematical claim. It is the only acceptable
+handoff candidate from this comparison. The fresh-round experiment compares it
+against an empty restart control to distinguish useful carried state from the
+benefit of merely resetting context.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof

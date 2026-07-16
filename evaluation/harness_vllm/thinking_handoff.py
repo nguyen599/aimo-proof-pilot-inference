@@ -282,6 +282,30 @@ def build_lossless_partial_handoff(partial_progress: str) -> str:
     )
 
 
+def build_empty_restart_handoff() -> str:
+    """Build a control handoff that resets context without carrying mathematics."""
+
+    return assemble_handoff(
+        {
+            "established": (
+                "No mathematical state is carried from the previous attempt."
+            ),
+            "promising": (
+                "No previous construction, calculation, or lemma is provided."
+            ),
+            "failed": (
+                "The previous attempt exhausted its reasoning budget before a "
+                "complete proof."
+            ),
+            "uncertain": ("There are no carried claims to trust or reject."),
+            "bottleneck": ("The original problem remains unsolved."),
+            "next_steps": (
+                "Start a fresh independent proof from the original problem."
+            ),
+        }
+    )
+
+
 def _render_chat_template(
     tokenizer: Any,
     messages: list[dict[str, str]],

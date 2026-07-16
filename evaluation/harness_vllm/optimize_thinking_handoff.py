@@ -25,6 +25,7 @@ try:
         MAP_REDUCE_SECTION_MAX_TOKENS,
         SavedProofGenerationCall,
         assemble_handoff,
+        build_empty_restart_handoff,
         build_lossless_partial_handoff,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
@@ -55,6 +56,7 @@ except ModuleNotFoundError as exc:
         MAP_REDUCE_SECTION_MAX_TOKENS,
         SavedProofGenerationCall,
         assemble_handoff,
+        build_empty_restart_handoff,
         build_lossless_partial_handoff,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
@@ -115,6 +117,7 @@ def parse_args() -> argparse.Namespace:
             "map_reduce",
             "partial_sectioned",
             "partial_passthrough",
+            "empty_baseline",
         ),
         default="fresh_sectioned",
     )
@@ -346,7 +349,31 @@ def call_handoff(
             ),
         }
 
-    if generation_mode == "partial_passthrough":
+    if generation_mode == "empty_baseline":
+        prompt_ids = []
+        raw_output = build_empty_restart_handoff()
+        parsed = parse_handoff_response(raw_output)
+        finish_reason = "empty_baseline"
+        attempts.append(
+            {
+                "name": "empty_baseline",
+                "prompt_ids": prompt_ids,
+                "completion_text": "",
+                "raw_output": raw_output,
+                "parsed": parsed,
+                "finish_reason": finish_reason,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "temperature": temperature,
+                "context_metadata": {
+                    "baseline": "fresh_restart_without_mathematical_handoff",
+                },
+            }
+        )
+    elif generation_mode == "partial_passthrough":
         partial_progress = extract_forced_partial_progress(
             prepared["record"].output_text
         )
