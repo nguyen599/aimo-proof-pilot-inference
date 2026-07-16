@@ -3562,6 +3562,37 @@ def format_refinement_critique(critique: dict[str, Any]) -> str:
     )
 
 
+def append_refinement_restart_obligations(
+    prompt: str | list[dict[str, str]],
+    selected_critiques: list[dict[str, Any]],
+) -> str | list[dict[str, str]]:
+    if not selected_critiques:
+        return prompt
+    obligations = "\n\n".join(
+        f"Repair obligation {index}:\n{format_refinement_critique(critique)}"
+        for index, critique in enumerate(selected_critiques, start=1)
+    )
+    reminder = (
+        "MANDATORY FINAL REPAIR OBLIGATIONS\n"
+        "These verifier findings are repeated after the handoff so they cannot "
+        "be displaced by the transferred notes. Resolve each obligation with "
+        "an explicit proof or correction before claiming a complete solution. "
+        "Do not repeat a rejected claim. If any obligation remains unresolved, "
+        "state that gap in the solution and self-evaluation and assign score 0 "
+        "or 0.5.\n\n"
+        f"{obligations}"
+    )
+    if isinstance(prompt, str):
+        return prompt.rstrip() + "\n\n" + reminder
+    messages = [dict(message) for message in prompt]
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("refinement prompt must end in a user message")
+    messages[-1]["content"] = (
+        messages[-1]["content"].rstrip() + "\n\n" + reminder
+    )
+    return messages
+
+
 async def cancel_pending_tasks(
     tasks: list[asyncio.Task[Any]] | set[asyncio.Task[Any]],
 ) -> int:
@@ -4793,6 +4824,10 @@ async def run_refinement_with_budget_restart(
                         "thinking_budget_restart_strategy",
                         DEFAULT_RESTART_STRATEGY,
                     ),
+                )
+                active_prompt = append_refinement_restart_obligations(
+                    active_prompt,
+                    selected_critiques,
                 )
                 if progress is not None:
                     progress.log(

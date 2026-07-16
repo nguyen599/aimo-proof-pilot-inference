@@ -797,6 +797,50 @@ The resume harness skips the initial verifier, first refinement, and handoff
 generation. This makes the comparison test only whether a larger visible
 answer reserve improves parser completion and verified mathematical quality.
 
+#### Live result: 20,000-token final boundary
+
+The earlier boundary fixed completion but not correctness:
+
+| Metric | Result |
+|---|---:|
+| Completion tokens | 57,647 |
+| Forced thinking boundary | 20,000 |
+| Finish reason | `stop` |
+| Parser-valid XML | yes |
+| Refined proof characters | 6,272 |
+| Model self-score | 1 |
+| Verifier scores | 0, 0, 0, 0 |
+| Validated low-score critiques | 3/4 |
+| Meta scores | 1, 0.5, 1, 1 |
+| Final aggregate score | 0.0 |
+| Selected verification round | 1 |
+| Manually rigorous proof | 0/1 |
+
+All verifier and meta calls ended with `stop`, not `length`. The four
+verifiers independently found fatal errors:
+
+- The claimed reduction from arbitrary non-sunny lines to the first
+  horizontal rows is unsupported and includes a false set-containment claim.
+- The assertion that a non-integer-slope line meets the lattice triangle in at
+  most two points is false.
+- The proposed `k=3` construction misses required points.
+- The proof does not analyze `k=2`, despite claiming an exhaustive answer.
+
+The result demonstrates a format-completion gain: this sample changed from an
+unclosed refinement at a 50,000-token boundary to a closed, re-verifiable
+refinement at 20,000. It does not demonstrate a solved-proof gain. The model
+also assigned itself score 1 despite the explicit finalizer instruction to
+report unresolved gaps honestly.
+
+### Experiment 7: restate critiques after the handoff
+
+In the failed 20,000-token run, the selected verifier critiques appeared
+before the 41,721-character handoff. The final proof then repeated the exact
+claims those critiques rejected. The next prompt-ordering experiment repeats
+the selected critiques after the handoff as mandatory repair obligations,
+immediately before the fresh refinement begins. The final call must either
+repair each item or mark it unresolved and avoid claiming a complete proof.
+
 ## Current validation
 
 - Targeted Ruff checks pass.

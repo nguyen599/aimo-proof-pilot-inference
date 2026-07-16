@@ -145,3 +145,10 @@ Resume mode rebuilds the original refinement prompt, attaches the saved
 lossless handoff and selected validated critiques, and runs one final repair.
 It invokes the verifier and meta-verifier only when that repair is
 parser-valid, then keeps the higher-scoring verified round.
+
+For refinement restarts, the selected critiques are also repeated after the
+handoff as mandatory repair obligations. This keeps concrete verifier findings
+near the generation boundary instead of burying them before a long transferred
+research report. The model must repair each item or report it as unresolved;
+the downstream verifier remains the authority on whether that instruction was
+actually followed.
