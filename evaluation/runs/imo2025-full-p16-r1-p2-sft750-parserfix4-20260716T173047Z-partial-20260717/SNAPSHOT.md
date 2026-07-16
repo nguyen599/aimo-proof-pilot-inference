@@ -17,7 +17,8 @@ Configuration:
 At snapshot time, all **32/32 proof candidates** had completed. The copied
 completed-call set also contains 52 verifier, 52 meta-verifier,
 and 8 refinement traces. Rank 0 alive: `yes`; rank 1 alive:
-`no`. The inference process was not stopped or restarted.
+`yes`. Liveness was verified on each rank's owning node because process IDs are
+node-local. The inference process was not stopped or restarted.
 
 Live parser validation before publication inspected 52 verifier prompts: zero
 contained the old `The complete rigorous proof.` placeholder and zero had a
