@@ -645,8 +645,44 @@ rather than becoming a production default.
   lossless research record, rather than moving the same-context force boundary
   again.
 
+## Experiment 4: preserve verifier-guided refinement
+
+Code review found that `solve_round_idx` served two purposes: it counted
+thinking-budget restarts and was also returned as `consumed_refine_rounds`.
+Consequently, with `refine_rounds=1`, one context-reset restart left no
+verifier-guided proof refinement after the restarted proof. The 100,000-token
+run was verified only after its sole refinement allowance had already been
+spent on the restart.
+
+The opt-in `thinking_budget_handoff_preserve_refine_rounds` setting separates
+these budgets without changing existing defaults:
+
+- the handoff still permits at most the configured number of restart attempts;
+- `budget_restart_count` records the real restart count;
+- preserved refinement starts verification at round 0;
+- a low verifier score with a validated critique can trigger `proof_refine`;
+- the refined proof is verified again at round 1.
+
+Focused validation executes this exact sequence:
+
+```text
+proof_generation
+proof_handoff
+proof_generation
+proof_verify
+proof_refine
+proof_verify
+```
+
+The live experiment will use the lossless handoff, deadline-aware restart,
+100,000-token final reasoning boundary, one verifier-guided refine round, and
+the same SFT-750 runtime. This tests whether verification can repair the
+parser-valid but mathematically incorrect restarted proof instead of spending
+the only refinement allowance on context reset.
+
 ## Current validation
 
 - Targeted Ruff checks pass.
 - Python compilation checks pass.
-- Full repository suite: 138 tests passed, 36 subtests passed.
+- Focused handoff suite: 34 tests passed.
+- Full repository suite: 139 tests passed, 36 subtests passed.

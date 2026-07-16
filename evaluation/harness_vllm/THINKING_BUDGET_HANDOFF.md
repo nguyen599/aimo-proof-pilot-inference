@@ -27,6 +27,7 @@ deterministically and no additional summarizer call is made.
 python evaluation/harness_vllm/run.py \
   --thinking-budget-handoff-enabled \
   --thinking-budget-handoff-mode lossless_partial \
+  --thinking-budget-handoff-preserve-refine-rounds \
   --thinking-budget-restart-strategy deadline_aware \
   --thinking-budget-final-round-tokens 100000 \
   --thinking-budget-handoff-max-tokens 4096 \
@@ -46,6 +47,14 @@ handoffs. `--thinking-budget-final-round-tokens 0` preserves the previous final
 round behavior; a positive value reserves the rest of `--max-new-tokens` for
 visible output. Disable the feature with
 `--no-thinking-budget-handoff-enabled`.
+
+By default, each budget restart consumes one configured refinement round to
+preserve the original behavior. Enable
+`--thinking-budget-handoff-preserve-refine-rounds` to count the restart
+separately. With one restart and `--refine-rounds 1`, the restarted proof can
+then receive verification, one verifier-guided refinement, and re-verification.
+The reported `budget_restart_count` remains the actual number of context
+restarts in both modes.
 
 The 100,000-token value above is an experiment configuration for a
 126,000-token completion allowance, not a universal ratio. See

@@ -118,6 +118,7 @@ def pipeline_cfg(**overrides):
         "deepseek_thinking_budget_force_text": "## Solution\n",
         "thinking_budget_force_text": run.FINAL_PARTIAL_FORCE_TEXT,
         "thinking_budget_handoff_enabled": True,
+        "thinking_budget_handoff_preserve_refine_rounds": False,
         "thinking_budget_handoff_max_tokens": 4096,
         "thinking_budget_handoff_temperature": 0.7,
         "thinking_budget_handoff_prompt_variant": "evidence_first",
@@ -1211,6 +1212,110 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
             candidate["proof_solution"],
             "A complete restarted proof.",
         )
+
+    async def test_budget_restart_can_preserve_verifier_refinement_round(self):
+        class FakeScheduler:
+            tokenizer = FakeTokenizer()
+
+            def __init__(self):
+                self.calls = []
+                self.generation_count = 0
+                self.verification_count = 0
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append((stage, prompt, kwargs))
+                if stage == "proof_generation":
+                    self.generation_count += 1
+                    if self.generation_count == 1:
+                        return {
+                            "success": True,
+                            "text": "<think>unfinished research",
+                            "finish_reason": "thinking_budget_reached",
+                            "usage": {
+                                "completion_tokens": 10,
+                                "estimated_prompt_tokens": 5,
+                                "thinking_budget_applied": True,
+                                "thinking_budget_action": "stop",
+                                "thinking_budget_force_skipped_closed": False,
+                            },
+                            "_thinking_budget_context_ids": [1, 2, 3],
+                        }
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A restarted proof with a gap.</solution>"
+                            "<self_evaluation>The proof may have a gap.</self_evaluation>"
+                            "<score>0.5</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_handoff":
+                    return {
+                        "success": True,
+                        "text": (HANDOFF_ASSISTANT_PREFIX + VALID_HANDOFF_AFTER_PREFIX),
+                        "finish_reason": "stop",
+                        "usage": {},
+                        "_completion_context_ids": [1, 2, 3, 4],
+                    }
+                if stage == "proof_verify":
+                    self.verification_count += 1
+                    score = 0 if self.verification_count == 1 else 1
+                    suggestion = (
+                        "Prove the omitted lower-bound lemma."
+                        if score == 0
+                        else "No repair needed."
+                    )
+                    return {
+                        "success": True,
+                        "text": (
+                            f"<evaluation>Verifier score {score}.</evaluation>"
+                            f"<suggestions>{suggestion}</suggestions>"
+                            f"<score>{score}</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_refine":
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A repaired complete proof.</solution>"
+                            "<self_evaluation>The omitted lemma is proved.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                raise AssertionError(stage)
+
+        scheduler = FakeScheduler()
+        result = await run.run_candidate_pipeline(
+            "Prove the claim.",
+            0,
+            1,
+            scheduler,
+            pipeline_cfg(
+                thinking_budget_handoff_preserve_refine_rounds=True,
+            ),
+        )
+        candidate = result["candidate"]
+
+        self.assertEqual(
+            [stage for stage, _, _ in scheduler.calls],
+            [
+                "proof_generation",
+                "proof_handoff",
+                "proof_generation",
+                "proof_verify",
+                "proof_refine",
+                "proof_verify",
+            ],
+        )
+        self.assertEqual(candidate["budget_restart_count"], 1)
+        self.assertEqual(candidate["selected_verification_round"], 1)
+        self.assertEqual(len(candidate["proof_refine_output"]), 1)
+        self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
 
     async def test_lossless_partial_handoff_reserves_final_output_budget(self):
         class FakeScheduler:

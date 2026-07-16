@@ -216,6 +216,10 @@ class CFG:
         "AIMO_THINKING_BUDGET_HANDOFF_ENABLED",
         True,
     )
+    thinking_budget_handoff_preserve_refine_rounds = environment_flag(
+        "AIMO_THINKING_BUDGET_HANDOFF_PRESERVE_REFINE_ROUNDS",
+        False,
+    )
     thinking_budget_handoff_max_tokens = int(
         os.environ.get("AIMO_THINKING_BUDGET_HANDOFF_MAX_TOKENS", "4096")
     )
@@ -506,6 +510,7 @@ class PipelineConfig:
     proof_generation_thinking_budgets: list[int]
     thinking_budget_force_text: str
     thinking_budget_handoff_enabled: bool
+    thinking_budget_handoff_preserve_refine_rounds: bool
     thinking_budget_handoff_max_tokens: int
     thinking_budget_handoff_temperature: float
     thinking_budget_handoff_prompt_variant: str
@@ -3996,7 +4001,9 @@ def make_generation_only_candidate(
         "proof_handoff_output": initial_generation.get("handoff_outputs", []),
         "proof_handoffs": initial_generation.get("handoffs", []),
         "budget_restart_count": int(
-            initial_generation.get("consumed_refine_rounds") or 0
+            initial_generation.get("budget_restart_count")
+            or initial_generation.get("consumed_refine_rounds")
+            or 0
         ),
         "proof_verify_output": [],
         "proof_meta_verify_output": [],
@@ -4307,6 +4314,17 @@ async def generate_single_attempt(
                 generation_parsed.get("self_score"),
                 len(handoffs),
             )
+        consumed_refine_rounds = (
+            0
+            if bool(
+                getattr(
+                    cfg,
+                    "thinking_budget_handoff_preserve_refine_rounds",
+                    False,
+                )
+            )
+            else solve_round_idx
+        )
         return {
             "attempt_idx": attempt_idx,
             "prompt_family": prompt_family,
@@ -4314,7 +4332,8 @@ async def generate_single_attempt(
             "generation_outputs": generation_outputs,
             "handoff_outputs": handoff_outputs,
             "handoffs": handoffs,
-            "consumed_refine_rounds": solve_round_idx,
+            "budget_restart_count": solve_round_idx,
+            "consumed_refine_rounds": consumed_refine_rounds,
             "generation_parsed": generation_parsed,
             "generation_mode": generation_mode,
             "proof": proof,
@@ -4869,7 +4888,10 @@ async def run_single_attempt(
         ),
         "proof_handoff_output": initial_generation.get("handoff_outputs", []),
         "proof_handoffs": initial_generation.get("handoffs", []),
-        "budget_restart_count": consumed_refine_rounds,
+        "budget_restart_count": int(
+            initial_generation.get("budget_restart_count")
+            or consumed_refine_rounds
+        ),
         "proof_verify_output": proof_verify_output,
         "proof_meta_verify_output": proof_meta_verify_output,
         "proof_refine_output": proof_refine_output,
@@ -5740,6 +5762,7 @@ class ProofRuntime:
         proof_generation_thinking_budgets: list[int],
         thinking_budget_force_text: str,
         thinking_budget_handoff_enabled: bool,
+        thinking_budget_handoff_preserve_refine_rounds: bool,
         thinking_budget_handoff_max_tokens: int,
         thinking_budget_handoff_temperature: float,
         thinking_budget_handoff_prompt_variant: str,
@@ -5894,6 +5917,9 @@ class ProofRuntime:
             thinking_budget_force_text=thinking_budget_force_text,
             thinking_budget_handoff_enabled=bool(
                 thinking_budget_handoff_enabled
+            ),
+            thinking_budget_handoff_preserve_refine_rounds=bool(
+                thinking_budget_handoff_preserve_refine_rounds
             ),
             thinking_budget_handoff_max_tokens=max(
                 1,
@@ -6490,6 +6516,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
     )
+    pipeline.add_argument(
+        "--thinking-budget-handoff-preserve-refine-rounds",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     pipeline.add_argument("--thinking-budget-handoff-max-tokens", type=int)
     pipeline.add_argument("--thinking-budget-handoff-temperature", type=float)
     pipeline.add_argument(
@@ -6569,6 +6600,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "refine_rounds": "refine_rounds",
         "refine_review_n": "refine_review_n",
         "thinking_budget_handoff_enabled": "thinking_budget_handoff_enabled",
+        "thinking_budget_handoff_preserve_refine_rounds": (
+            "thinking_budget_handoff_preserve_refine_rounds"
+        ),
         "thinking_budget_handoff_max_tokens": (
             "thinking_budget_handoff_max_tokens"
         ),
@@ -6741,6 +6775,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             "thinking_budget_handoff_enabled": bool(
                 cfg.thinking_budget_handoff_enabled
             ),
+            "thinking_budget_handoff_preserve_refine_rounds": bool(
+                cfg.thinking_budget_handoff_preserve_refine_rounds
+            ),
             "thinking_budget_handoff_max_tokens": int(
                 cfg.thinking_budget_handoff_max_tokens
             ),
@@ -6776,7 +6813,8 @@ def run(cfg: type[CFG] = CFG) -> None:
         "meta_policy=%s strict_pass_meta=%s max_concurrent_problems=%s "
         "candidates=%s deepseek_math_v2_candidates=%s gpus=%s tp=%s dp=%s "
         "max_concurrent_requests=%s requests_per_gpu=%s "
-        "thinking_handoff=%s handoff_variant=%s handoff_mode=%s "
+        "thinking_handoff=%s preserve_refine_rounds=%s "
+        "handoff_variant=%s handoff_mode=%s "
         "restart_strategy=%s final_round_budget=%s handoff_tokens=%s "
         "handoff_temperature=%s "
         "node_rank=%s/%s distributed_run=%s output=%s",
@@ -6794,6 +6832,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         resolved_max_concurrent_requests,
         cfg.requests_per_gpu,
         cfg.thinking_budget_handoff_enabled,
+        cfg.thinking_budget_handoff_preserve_refine_rounds,
         cfg.thinking_budget_handoff_prompt_variant,
         cfg.thinking_budget_handoff_mode,
         cfg.thinking_budget_restart_strategy,
@@ -6856,6 +6895,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             thinking_budget_force_text=cfg.thinking_budget_force_text,
             thinking_budget_handoff_enabled=(
                 cfg.thinking_budget_handoff_enabled
+            ),
+            thinking_budget_handoff_preserve_refine_rounds=(
+                cfg.thinking_budget_handoff_preserve_refine_rounds
             ),
             thinking_budget_handoff_max_tokens=(
                 cfg.thinking_budget_handoff_max_tokens
