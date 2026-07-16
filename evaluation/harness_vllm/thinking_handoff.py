@@ -26,6 +26,40 @@ HANDOFF_REQUIRED_SECTIONS = (
 )
 HANDOFF_VARIANTS = ("evidence_first", "lemma_ledger", "continuation_frontier")
 DEFAULT_HANDOFF_VARIANT = HANDOFF_VARIANTS[0]
+HANDOFF_SECTION_MAX_TOKENS = {
+    "established": 768,
+    "promising": 640,
+    "failed": 512,
+    "uncertain": 384,
+    "bottleneck": 256,
+    "next_steps": 384,
+}
+HANDOFF_SECTION_DESCRIPTIONS = {
+    "established": (
+        "Only facts, exact equations, reductions, or partial lemmas that were "
+        "actually justified in the previous attempt. Use at most 6 bullets."
+    ),
+    "promising": (
+        "Promising constructions, reductions, equations, or observations worth "
+        "continuing. Use at most 5 bullets."
+    ),
+    "failed": (
+        "Routes already tried, with the precise obstruction or missing step. "
+        "Use at most 4 bullets."
+    ),
+    "uncertain": (
+        "Potentially useful claims or patterns that were not proved. Label the "
+        "uncertainty explicitly and use at most 4 bullets."
+    ),
+    "bottleneck": (
+        "The narrowest unresolved point preventing a complete proof. Use one "
+        "paragraph of at most 120 words."
+    ),
+    "next_steps": (
+        "A prioritized continuation plan for a fresh independent solver. Use at "
+        "most 5 concrete bullets."
+    ),
+}
 RENDERED_ASSISTANT_MARKERS = (
     "<｜Assistant｜>",
     "<|assistant|>",
@@ -245,20 +279,7 @@ def build_handoff_instruction(variant: str = DEFAULT_HANDOFF_VARIANT) -> str:
     if variant not in HANDOFF_VARIANTS:
         raise ValueError(f"unsupported handoff prompt variant: {variant!r}")
 
-    variant_guidance = {
-        "evidence_first": (
-            "Prioritize rigorously established facts and exact equations. Remove "
-            "repetition and speculation unless it identifies a concrete dead end."
-        ),
-        "lemma_ledger": (
-            "Organize the mathematical state as a lemma ledger: distinguish proved "
-            "claims, plausible but unproved claims, and disproved or abandoned routes."
-        ),
-        "continuation_frontier": (
-            "Optimize for the next solver: identify the narrowest unresolved frontier "
-            "and give a ranked, concrete continuation plan with reusable notation."
-        ),
-    }[variant]
+    variant_guidance = handoff_variant_guidance(variant)
     return f"""The previous proof attempt exhausted its reasoning budget before producing a final proof.
 
 Do not continue solving the problem and do not pretend that the proof is complete. Compress the previous attempt into a faithful handoff for a fresh solver. Preserve useful formulas, definitions, reductions, and partial lemmas. Clearly label every unproved claim. Explain why abandoned approaches failed. {variant_guidance}
@@ -285,6 +306,78 @@ Output exactly these XML sections and no text outside them:
 </handoff>
 
 Close every XML tag. Be concise, factual, and useful. Do not include a final solution, self-evaluation, or score."""
+
+
+def handoff_variant_guidance(variant: str) -> str:
+    if variant not in HANDOFF_VARIANTS:
+        raise ValueError(f"unsupported handoff prompt variant: {variant!r}")
+    return {
+        "evidence_first": (
+            "Prioritize rigorously established facts and exact equations. Remove "
+            "repetition and speculation unless it identifies a concrete dead end."
+        ),
+        "lemma_ledger": (
+            "Organize the mathematical state as a lemma ledger: distinguish proved "
+            "claims, plausible but unproved claims, and disproved or abandoned routes."
+        ),
+        "continuation_frontier": (
+            "Optimize for the next solver: identify the narrowest unresolved frontier "
+            "and give a ranked, concrete continuation plan with reusable notation."
+        ),
+    }[variant]
+
+
+def build_handoff_section_instruction(
+    section: str,
+    variant: str = DEFAULT_HANDOFF_VARIANT,
+) -> str:
+    if section not in HANDOFF_REQUIRED_SECTIONS:
+        raise ValueError(f"unsupported handoff section: {section!r}")
+    guidance = handoff_variant_guidance(variant)
+    description = HANDOFF_SECTION_DESCRIPTIONS[section]
+    return f"""The previous proof attempt exhausted its reasoning budget before producing a final proof.
+
+Extract only the `{section}` portion of a faithful handoff for a fresh solver. Do not continue solving the problem. Do not restate the full problem, repeat ideas, invent claims, or discuss output formatting.
+
+Section requirement: {description}
+Global emphasis: {guidance}
+
+Output only the section contents. Do not emit XML tags, a heading, a final solution, a self-evaluation, or a score. Stop as soon as this section is complete."""
+
+
+def handoff_section_assistant_prefix(section: str) -> str:
+    if section not in HANDOFF_REQUIRED_SECTIONS:
+        raise ValueError(f"unsupported handoff section: {section!r}")
+    return f"\n</think>\n\n<{section}>\n"
+
+
+def normalize_handoff_section(text: str, section: str) -> str:
+    if section not in HANDOFF_REQUIRED_SECTIONS:
+        raise ValueError(f"unsupported handoff section: {section!r}")
+    content = str(text or "")
+    closing_tag = f"</{section}>"
+    if closing_tag in content:
+        content = content.split(closing_tag, 1)[0]
+    content = re.sub(r"(?is)</?handoff>", "", content)
+    content = re.sub(
+        rf"(?is)</?{re.escape(section)}>",
+        "",
+        content,
+    ).strip()
+    if content:
+        return content
+    return "No useful information for this section was preserved."
+
+
+def assemble_handoff(sections: dict[str, str]) -> str:
+    return (
+        "<handoff>\n"
+        + "\n".join(
+            f"<{section}>{normalize_handoff_section(sections.get(section, ''), section)}</{section}>"
+            for section in HANDOFF_REQUIRED_SECTIONS
+        )
+        + "\n</handoff>"
+    )
 
 
 def build_handoff_repair_instruction() -> str:

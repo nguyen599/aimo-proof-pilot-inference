@@ -19,11 +19,17 @@ try:
     from evaluation.harness_vllm.thinking_handoff import (
         FINAL_PARTIAL_FORCE_MARKER,
         HANDOFF_ASSISTANT_PREFIX,
+        HANDOFF_REQUIRED_SECTIONS,
+        HANDOFF_SECTION_MAX_TOKENS,
         HANDOFF_VARIANTS,
         SavedProofGenerationCall,
+        assemble_handoff,
         build_handoff_instruction,
         build_handoff_repair_instruction,
+        build_handoff_section_instruction,
         build_user_turn_prompt_ids,
+        handoff_section_assistant_prefix,
+        normalize_handoff_section,
         parse_handoff_response,
         parse_saved_proof_generation_call,
         remove_final_partial_force_text,
@@ -34,11 +40,17 @@ except ModuleNotFoundError as exc:
     from thinking_handoff import (  # type: ignore[no-redef]
         FINAL_PARTIAL_FORCE_MARKER,
         HANDOFF_ASSISTANT_PREFIX,
+        HANDOFF_REQUIRED_SECTIONS,
+        HANDOFF_SECTION_MAX_TOKENS,
         HANDOFF_VARIANTS,
         SavedProofGenerationCall,
+        assemble_handoff,
         build_handoff_instruction,
         build_handoff_repair_instruction,
+        build_handoff_section_instruction,
         build_user_turn_prompt_ids,
+        handoff_section_assistant_prefix,
+        normalize_handoff_section,
         parse_handoff_response,
         parse_saved_proof_generation_call,
         remove_final_partial_force_text,
@@ -76,6 +88,11 @@ def parse_args() -> argparse.Namespace:
         default=[],
     )
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--generation-mode",
+        choices=("monolithic", "sectioned"),
+        default="sectioned",
+    )
     parser.add_argument(
         "--repair-invalid",
         action=argparse.BooleanOptionalAction,
@@ -228,19 +245,13 @@ def call_handoff(
     variant: str,
     temperature: float,
     max_tokens: int,
+    generation_mode: str,
     repair_invalid: bool,
     top_p: float,
     request_timeout_seconds: float,
     output_dir: Path,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    instruction = build_handoff_instruction(variant)
-    prompt_ids = build_user_turn_prompt_ids(
-        tokenizer,
-        prepared["pre_force_ids"],
-        instruction,
-        close_open_thinking=True,
-    )
     client = OpenAI(
         base_url=base_url.rstrip("/") + "/v1"
         if not base_url.rstrip("/").endswith("/v1")
@@ -251,17 +262,23 @@ def call_handoff(
     )
     attempts: list[dict[str, Any]] = []
 
-    def complete(active_prompt_ids: list[int], attempt_name: str) -> dict[str, Any]:
+    def complete(
+        active_prompt_ids: list[int],
+        attempt_name: str,
+        *,
+        assistant_prefix: str = HANDOFF_ASSISTANT_PREFIX,
+        attempt_max_tokens: int = max_tokens,
+    ) -> dict[str, Any]:
         response = client.completions.create(
             model=served_model_name,
             prompt=active_prompt_ids,
             temperature=temperature,
             top_p=top_p,
-            max_tokens=max_tokens,
+            max_tokens=attempt_max_tokens,
         )
         choice = response.choices[0]
         completion_text = choice.text or ""
-        raw_output = HANDOFF_ASSISTANT_PREFIX + completion_text
+        raw_output = assistant_prefix + completion_text
         usage = {
             key: getattr(response.usage, key)
             for key in ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -277,26 +294,68 @@ def call_handoff(
             "usage": usage,
         }
 
-    attempts.append(complete(prompt_ids, "initial"))
-    if repair_invalid and not attempts[-1]["parsed"]["is_valid"]:
-        completion_ids = tokenizer.encode(
-            attempts[-1]["completion_text"],
-            add_special_tokens=False,
-        )
-        if hasattr(completion_ids, "tolist"):
-            completion_ids = completion_ids.tolist()
-        previous_context_ids = prompt_ids + [int(value) for value in completion_ids]
-        repair_prompt_ids = build_user_turn_prompt_ids(
+    if generation_mode == "sectioned":
+        sections: dict[str, str] = {}
+        for section in HANDOFF_REQUIRED_SECTIONS:
+            assistant_prefix = handoff_section_assistant_prefix(section)
+            section_prompt_ids = build_user_turn_prompt_ids(
+                tokenizer,
+                prepared["pre_force_ids"],
+                build_handoff_section_instruction(section, variant),
+                close_open_thinking=True,
+                assistant_prefix=assistant_prefix,
+            )
+            attempt = complete(
+                section_prompt_ids,
+                section,
+                assistant_prefix=assistant_prefix,
+                attempt_max_tokens=min(
+                    max_tokens,
+                    HANDOFF_SECTION_MAX_TOKENS[section],
+                ),
+            )
+            section_content = normalize_handoff_section(
+                attempt["completion_text"],
+                section,
+            )
+            attempt["section"] = section
+            attempt["section_content"] = section_content
+            attempts.append(attempt)
+            sections[section] = section_content
+        prompt_ids = attempts[0]["prompt_ids"]
+        raw_output = assemble_handoff(sections)
+        parsed = parse_handoff_response(raw_output)
+        finish_reason = "sectioned"
+    elif generation_mode == "monolithic":
+        prompt_ids = build_user_turn_prompt_ids(
             tokenizer,
-            previous_context_ids,
-            build_handoff_repair_instruction(),
-            close_open_thinking=False,
+            prepared["pre_force_ids"],
+            build_handoff_instruction(variant),
+            close_open_thinking=True,
         )
-        attempts.append(complete(repair_prompt_ids, "repair"))
+        attempts.append(complete(prompt_ids, "initial"))
+        if repair_invalid and not attempts[-1]["parsed"]["is_valid"]:
+            completion_ids = tokenizer.encode(
+                attempts[-1]["completion_text"],
+                add_special_tokens=False,
+            )
+            if hasattr(completion_ids, "tolist"):
+                completion_ids = completion_ids.tolist()
+            previous_context_ids = prompt_ids + [int(value) for value in completion_ids]
+            repair_prompt_ids = build_user_turn_prompt_ids(
+                tokenizer,
+                previous_context_ids,
+                build_handoff_repair_instruction(),
+                close_open_thinking=False,
+            )
+            attempts.append(complete(repair_prompt_ids, "repair"))
+        final_attempt = attempts[-1]
+        raw_output = final_attempt["raw_output"]
+        parsed = final_attempt["parsed"]
+        finish_reason = final_attempt["finish_reason"]
+    else:
+        raise ValueError(f"unsupported handoff generation mode: {generation_mode!r}")
 
-    final_attempt = attempts[-1]
-    raw_output = final_attempt["raw_output"]
-    parsed = final_attempt["parsed"]
     usage = {
         key: sum(int(attempt["usage"].get(key) or 0) for attempt in attempts)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -313,6 +372,7 @@ def call_handoff(
                 f"old_parseable: {prepared['old_parseable']}",
                 f"variant: {variant}",
                 f"temperature: {temperature:g}",
+                f"generation_mode: {generation_mode}",
                 f"base_url: {base_url}",
                 f"prompt_tokens: {len(prompt_ids)}",
                 f"max_tokens: {max_tokens}",
@@ -344,19 +404,21 @@ def call_handoff(
         "old_parseable": prepared["old_parseable"],
         "variant": variant,
         "temperature": temperature,
+        "generation_mode": generation_mode,
         "base_url": base_url,
         "prompt_tokens": len(prompt_ids),
         "pre_force_tokens": len(prepared["pre_force_ids"]),
         "max_tokens": max_tokens,
-        "finish_reason": final_attempt["finish_reason"],
+        "finish_reason": finish_reason,
         "latency_s": time.monotonic() - started,
         "usage": usage,
         "parsed": parsed,
         "raw_output": raw_output,
-        "repair_used": len(attempts) > 1,
+        "repair_used": generation_mode == "monolithic" and len(attempts) > 1,
         "attempts": [
             {
                 "name": attempt["name"],
+                "section": attempt.get("section"),
                 "finish_reason": attempt["finish_reason"],
                 "usage": attempt["usage"],
                 "parsed": attempt["parsed"],
@@ -392,6 +454,7 @@ def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
             "old_parseable": result["old_parseable"],
             "variant": result["variant"],
             "temperature": result["temperature"],
+            "generation_mode": result.get("generation_mode", "monolithic"),
             "base_url": result["base_url"],
             "prompt_tokens": result["prompt_tokens"],
             "completion_tokens": result.get("usage", {}).get("completion_tokens"),
@@ -572,6 +635,7 @@ def main() -> None:
                 variant=job["variant"],
                 temperature=job["temperature"],
                 max_tokens=args.max_tokens,
+                generation_mode=args.generation_mode,
                 repair_invalid=args.repair_invalid,
                 top_p=args.top_p,
                 request_timeout_seconds=args.request_timeout_seconds,
@@ -597,6 +661,7 @@ def main() -> None:
                     "old_parseable": prepared_case["old_parseable"],
                     "variant": job["variant"],
                     "temperature": job["temperature"],
+                    "generation_mode": args.generation_mode,
                     "base_url": job["base_url"],
                     "prompt_tokens": None,
                     "pre_force_tokens": len(prepared_case["pre_force_ids"]),

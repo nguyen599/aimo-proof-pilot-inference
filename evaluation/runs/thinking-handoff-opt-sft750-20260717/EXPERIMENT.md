@@ -147,6 +147,40 @@ content to be re-emitted in all six XML sections. Results retain both attempts
 and aggregate their token cost, while the repaired artifact is what the restart
 evaluation consumes.
 
+### Live smoke 3: production-equivalent repair
+
+The repair turn did not recover the XML:
+
+```text
+initial: prompt=122377 completion=4096 finish=length valid=false
+repair:  prompt=126579 completion=4096 finish=length valid=false
+aggregate completion tokens=8192
+```
+
+Both calls remained inside `<established>`. The repair was therefore more
+expensive than the original forced-partial fallback without creating a usable
+restart artifact.
+
+The next design generates each handoff section independently from the same
+pre-force context. Each request has a focused extraction prompt and a hard
+section-specific cap:
+
+| Section | Max tokens |
+| --- | ---: |
+| `established` | 768 |
+| `promising` | 640 |
+| `failed` | 512 |
+| `uncertain` | 384 |
+| `bottleneck` | 256 |
+| `next_steps` | 384 |
+
+The harness strips any accidental section tag, fills only genuinely empty
+sections with an explicit no-information sentence, and assembles the six
+sections into valid XML. This bounds total generated handoff content at 2,944
+tokens and prevents one category from consuming the whole budget. All section
+requests retain the full original reasoning context; vLLM prefix caching can
+reuse their common 122K-token prefix.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof

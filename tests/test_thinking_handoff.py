@@ -24,7 +24,9 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     SavedProofGenerationCall,
     _parse_segment,
     append_restart_instruction,
+    assemble_handoff,
     build_handoff_instruction,
+    build_handoff_section_instruction,
     build_user_turn_prompt_ids,
     insert_restart_instruction_into_rendered_prompt,
     parse_handoff_response,
@@ -214,6 +216,66 @@ class SavedCallParserTests(unittest.TestCase):
 
 
 class HandoffPromptTests(unittest.TestCase):
+    def test_optimizer_builds_sectioned_handoff(self):
+        responses = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        text=f"Section content {index}.",
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=10,
+                    total_tokens=110,
+                ),
+            )
+            for index in range(6)
+        ]
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                del kwargs
+                return responses.pop(0)
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+                self.completions = FakeCompletions()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "pre_force_ids": FakeTokenizer.encode("<assistant><think>work"),
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": False,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant="evidence_first",
+                    temperature=0.7,
+                    max_tokens=4096,
+                    generation_mode="sectioned",
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                )
+
+        self.assertEqual(len(result["attempts"]), 6)
+        self.assertFalse(result["repair_used"])
+        self.assertTrue(result["parsed"]["is_valid"])
+        self.assertEqual(result["usage"]["completion_tokens"], 60)
+
     def test_optimizer_repairs_one_invalid_handoff(self):
         responses = [
             SimpleNamespace(
@@ -274,6 +336,7 @@ class HandoffPromptTests(unittest.TestCase):
                     variant="evidence_first",
                     temperature=0.7,
                     max_tokens=4096,
+                    generation_mode="monolithic",
                     repair_invalid=True,
                     top_p=0.95,
                     request_timeout_seconds=10,
@@ -285,6 +348,27 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertFalse(result["attempts"][0]["parsed"]["is_valid"])
         self.assertTrue(result["parsed"]["is_valid"])
         self.assertEqual(result["usage"]["completion_tokens"], 30)
+
+    def test_sectioned_handoff_assembles_all_required_sections(self):
+        handoff = assemble_handoff(
+            {
+                "established": "A proved reduction.",
+                "promising": "An exact identity.",
+                "failed": "A route lacks injectivity.",
+                "uncertain": "A parity pattern is unproved.",
+                "bottleneck": "The lower bound is missing.",
+                "next_steps": "Prove the lower bound.",
+            }
+        )
+        parsed = parse_handoff_response(handoff)
+
+        self.assertTrue(parsed["is_valid"])
+        instruction = build_handoff_section_instruction(
+            "bottleneck",
+            "continuation_frontier",
+        )
+        self.assertIn("one paragraph of at most 120 words", instruction)
+        self.assertIn("narrowest unresolved frontier", instruction)
 
     def test_handoff_prompt_has_strict_compression_contract(self):
         instruction = build_handoff_instruction("evidence_first")
