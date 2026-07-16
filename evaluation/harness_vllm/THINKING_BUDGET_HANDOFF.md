@@ -47,7 +47,8 @@ python evaluation/harness_vllm/optimize_thinking_handoff.py \
   --output-dir /tmp/thinking-handoff-optimization
 ```
 
-The optimizer validates an exact tokenizer round trip before sending requests.
+The optimizer requires the canonical re-tokenization to decode to exactly the
+saved prompt text. Equivalent token segmentations may differ slightly in token
+count; `--max-token-drift` defaults to 4 and rejects larger differences.
 It writes each full call under `calls/` and checkpoints `results.jsonl`,
 `results.csv`, and `summary.json` after every completed or failed request.
-

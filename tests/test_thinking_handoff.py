@@ -12,11 +12,13 @@ sys.path.insert(0, str(REPO))
 from evaluation.harness_vllm import run  # noqa: E402
 from evaluation.harness_vllm.optimize_thinking_handoff import (  # noqa: E402
     discover_cases,
+    prepare_case,
     select_diverse_cases,
 )
 from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     FINAL_PARTIAL_FORCE_MARKER,
     HANDOFF_ASSISTANT_PREFIX,
+    SavedProofGenerationCall,
     _parse_segment,
     append_restart_instruction,
     build_handoff_instruction,
@@ -156,6 +158,59 @@ class SavedCallParserTests(unittest.TestCase):
             len({bool(case["old_parseable"]) for case in selected}),
             1,
         )
+
+    def test_prepare_case_accepts_equivalent_token_segmentation(self):
+        class CanonicalTokenizer:
+            @staticmethod
+            def encode(text, add_special_tokens=False):
+                del add_special_tokens
+                token_ids = []
+                index = 0
+                while index < len(text):
+                    if text.startswith("ab", index):
+                        token_ids.append(1_000_000)
+                        index += 2
+                    else:
+                        token_ids.append(ord(text[index]))
+                        index += 1
+                return token_ids
+
+            @staticmethod
+            def decode(token_ids, skip_special_tokens=False):
+                del skip_special_tokens
+                return "".join(
+                    "ab" if token_id == 1_000_000 else chr(token_id)
+                    for token_id in token_ids
+                )
+
+        continuation_prompt = "abc" + run.FINAL_PARTIAL_FORCE_TEXT
+        canonical_tokens = CanonicalTokenizer.encode(continuation_prompt)
+        record = SavedProofGenerationCall(
+            path=Path("saved.txt"),
+            stage="proof_generation",
+            detail="candidate=0 round=0",
+            prompt_tokens=1,
+            max_tokens=10,
+            input_prompt="input",
+            continuation_prompt=continuation_prompt,
+            continuation_prompt_tokens=len(canonical_tokens) + 1,
+            continuation_max_tokens=1,
+            output_text=FINAL_PARTIAL_FORCE_MARKER,
+            finish_reason="length",
+            usage={},
+        )
+        prepared = prepare_case(
+            {
+                "record": record,
+                "rank": "rank0",
+                "problem": "1",
+                "old_parseable": False,
+                "source": "rank0/llm_calls/1/call.txt",
+            },
+            CanonicalTokenizer(),
+            max_token_drift=1,
+        )
+        self.assertEqual(prepared["token_drift"], -1)
 
 
 class HandoffPromptTests(unittest.TestCase):

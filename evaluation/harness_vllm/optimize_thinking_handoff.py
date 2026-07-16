@@ -74,6 +74,7 @@ def parse_args() -> argparse.Namespace:
         default=[],
     )
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--max-token-drift", type=int, default=4)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-workers", type=int, default=16)
     parser.add_argument("--request-timeout-seconds", type=float, default=900.0)
@@ -166,6 +167,8 @@ def select_diverse_cases(
 def prepare_case(
     case: dict[str, Any],
     tokenizer: Any,
+    *,
+    max_token_drift: int = 4,
 ) -> dict[str, Any]:
     record: SavedProofGenerationCall = case["record"]
     pre_force_text = remove_final_partial_force_text(record.continuation_prompt)
@@ -179,10 +182,16 @@ def prepare_case(
     if hasattr(pre_force_ids, "tolist"):
         pre_force_ids = pre_force_ids.tolist()
     token_drift = len(full_ids) - int(record.continuation_prompt_tokens)
-    if token_drift != 0:
+    canonical_text = tokenizer.decode(full_ids, skip_special_tokens=False)
+    if canonical_text != record.continuation_prompt:
         raise ValueError(
-            f"tokenizer round-trip drift for {record.path}: "
-            f"logged={record.continuation_prompt_tokens} encoded={len(full_ids)}"
+            f"tokenizer round trip changed saved prompt text for {record.path}"
+        )
+    if abs(token_drift) > max_token_drift:
+        raise ValueError(
+            f"tokenizer token-count drift exceeds {max_token_drift} for "
+            f"{record.path}: logged={record.continuation_prompt_tokens} "
+            f"encoded={len(full_ids)}"
         )
     return {
         **case,
@@ -405,6 +414,8 @@ def main() -> None:
         raise ValueError("--max-tokens must be positive")
     if args.max_workers < 1:
         raise ValueError("--max-workers must be positive")
+    if args.max_token_drift < 0:
+        raise ValueError("--max-token-drift cannot be negative")
     variants = args.variant or list(HANDOFF_VARIANTS)
     temperatures = args.temperature or list(DEFAULT_TEMPERATURES)
     if any(temperature < 0 for temperature in temperatures):
@@ -416,7 +427,14 @@ def main() -> None:
     )
     discovered = discover_cases(args.logs_root)
     selected = select_diverse_cases(discovered, args.case_count)
-    prepared = [prepare_case(case, tokenizer) for case in selected]
+    prepared = [
+        prepare_case(
+            case,
+            tokenizer,
+            max_token_drift=args.max_token_drift,
+        )
+        for case in selected
+    ]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "selected_cases.json").write_text(
         json.dumps(
@@ -430,6 +448,7 @@ def main() -> None:
                         "record"
                     ].continuation_prompt_tokens,
                     "pre_force_tokens": len(case["pre_force_ids"]),
+                    "token_drift": case["token_drift"],
                     "finish_reason": case["record"].finish_reason,
                 }
                 for case in prepared
@@ -441,9 +460,12 @@ def main() -> None:
         encoding="utf-8",
     )
     logging.info(
-        "Prepared %d/%d saved cases with exact tokenizer round trips",
+        "Prepared %d/%d saved cases with exact decoded-text round trips "
+        "(token drift range %d..%d)",
         len(prepared),
         len(discovered),
+        min(int(case["token_drift"]) for case in prepared),
+        max(int(case["token_drift"]) for case in prepared),
     )
     if args.dry_run:
         return

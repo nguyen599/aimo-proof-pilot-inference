@@ -52,6 +52,13 @@ so reconstruction dropped one token. The parser was changed to remove exactly
 the two debug-log section delimiters while preserving prompt trailing
 whitespace. A regression test now covers this case.
 
+After preserving whitespace, canonical SFT-750 re-tokenization still used
+between zero and three fewer tokens across the 17 contexts. For every context,
+decoding the canonical token IDs reproduced the saved prompt text exactly.
+This is equivalent tokenizer segmentation rather than parser loss. The
+optimizer now requires exact decoded-text equality and separately bounds the
+absolute token-count drift to four.
+
 ## Experiment 2: handoff prompt and temperature sweep
 
 Planned matrix:
@@ -81,4 +88,3 @@ generation from the original problem plus handoff. Record:
 
 This experiment determines whether the handoff improves proof completion rate,
 rather than only producing cleaner summaries.
-
