@@ -18,6 +18,7 @@ try:
         ChatScheduler,
         SamplingConfig,
         build_opd_proof_refinement_prompt,
+        append_final_output_discipline,
         format_refinement_critique,
         make_output,
         parse_generation_response,
@@ -39,6 +40,7 @@ except ModuleNotFoundError as exc:
         ChatScheduler,
         SamplingConfig,
         build_opd_proof_refinement_prompt,
+        append_final_output_discipline,
         format_refinement_critique,
         make_output,
         parse_generation_response,
@@ -105,6 +107,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Sampling temperature used only for the final refinement after a "
             "thinking-budget handoff. By default it inherits --temperature."
+        ),
+    )
+    parser.add_argument(
+        "--thinking-budget-refine-visible-output-target-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Add an explicit visible-answer token target and XML closure "
+            "instruction to the final post-handoff refinement."
         ),
     )
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -187,6 +198,11 @@ async def resume_final_refinement(
         1,
         strategy="deadline_aware",
     )
+    if cfg.thinking_budget_refine_visible_output_target_tokens > 0:
+        prompt = append_final_output_discipline(
+            prompt,
+            cfg.thinking_budget_refine_visible_output_target_tokens,
+        )
     response = await scheduler.call(
         "proof_refine",
         prompt,
@@ -399,6 +415,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             if args.thinking_budget_refine_final_temperature is None
             else float(args.thinking_budget_refine_final_temperature)
         ),
+        thinking_budget_refine_visible_output_target_tokens=max(
+            0,
+            int(args.thinking_budget_refine_visible_output_target_tokens),
+        ),
         verifier_thinking_budget_tokens=min(
             int(CFG.verifier_thinking_budget_tokens),
             max(1, int(args.verifier_max_tokens) - 1),
@@ -456,6 +476,9 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "thinking_budget_refine_final_temperature": (
                 cfg.thinking_budget_refine_final_temperature
+            ),
+            "thinking_budget_refine_visible_output_target_tokens": (
+                cfg.thinking_budget_refine_visible_output_target_tokens
             ),
             "temperature": args.temperature,
             "top_p": args.top_p,

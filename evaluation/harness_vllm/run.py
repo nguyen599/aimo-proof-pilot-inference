@@ -46,6 +46,7 @@ try:
         HANDOFF_VARIANTS,
         RESTART_FINALIZE_FORCE_TEXT,
         RESTART_STRATEGIES,
+        append_final_output_discipline,
         append_restart_instruction,
         build_handoff_instruction,
         build_handoff_repair_instruction,
@@ -67,6 +68,7 @@ except ModuleNotFoundError as exc:
         HANDOFF_VARIANTS,
         RESTART_FINALIZE_FORCE_TEXT,
         RESTART_STRATEGIES,
+        append_final_output_discipline,
         append_restart_instruction,
         build_handoff_instruction,
         build_handoff_repair_instruction,
@@ -262,6 +264,12 @@ class CFG:
     )
     thinking_budget_refine_final_temperature = environment_optional_float(
         "AIMO_THINKING_BUDGET_REFINE_FINAL_TEMPERATURE"
+    )
+    thinking_budget_refine_visible_output_target_tokens = int(
+        os.environ.get(
+            "AIMO_THINKING_BUDGET_REFINE_VISIBLE_OUTPUT_TARGET_TOKENS",
+            "0",
+        )
     )
     deepseek_thinking_budget_force_text = (
         "\nWe should now write the final solution due time limit.\n"
@@ -544,6 +552,7 @@ class PipelineConfig:
     thinking_budget_refine_final_round_tokens: int
     thinking_budget_refine_max_restarts: int
     thinking_budget_refine_final_temperature: Optional[float]
+    thinking_budget_refine_visible_output_target_tokens: int
     deepseek_thinking_budget_force_text: str
     verifier_thinking_budget_tokens: int
     verifier_thinking_budget_force_text: str
@@ -4818,6 +4827,18 @@ async def run_refinement_with_budget_restart(
                         DEFAULT_RESTART_STRATEGY,
                     ),
                 )
+                visible_output_target_tokens = int(
+                    getattr(
+                        cfg,
+                        "thinking_budget_refine_visible_output_target_tokens",
+                        0,
+                    )
+                )
+                if visible_output_target_tokens > 0:
+                    active_prompt = append_final_output_discipline(
+                        active_prompt,
+                        visible_output_target_tokens,
+                    )
                 if progress is not None:
                     progress.log(
                         "candidate=%d round=%d stage=refinement_handoff "
@@ -6041,6 +6062,7 @@ class ProofRuntime:
         thinking_budget_refine_final_round_tokens: int,
         thinking_budget_refine_max_restarts: int,
         thinking_budget_refine_final_temperature: Optional[float],
+        thinking_budget_refine_visible_output_target_tokens: int,
         deepseek_thinking_budget_force_text: str,
         verifier_thinking_budget_tokens: int,
         verifier_thinking_budget_force_text: str,
@@ -6228,6 +6250,10 @@ class ProofRuntime:
                 None
                 if thinking_budget_refine_final_temperature is None
                 else float(thinking_budget_refine_final_temperature)
+            ),
+            thinking_budget_refine_visible_output_target_tokens=max(
+                0,
+                int(thinking_budget_refine_visible_output_target_tokens),
             ),
             deepseek_thinking_budget_force_text=(
                 deepseek_thinking_budget_force_text
@@ -6840,6 +6866,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--thinking-budget-refine-final-temperature",
         type=float,
     )
+    pipeline.add_argument(
+        "--thinking-budget-refine-visible-output-target-tokens",
+        type=int,
+    )
     pipeline.add_argument("--problem-timeout-seconds", type=int)
     pipeline.add_argument("--selection-reserve-seconds", type=int)
     pipeline.add_argument("--selector-mode", choices=("llm", "score"))
@@ -6935,6 +6965,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         ),
         "thinking_budget_refine_final_temperature": (
             "thinking_budget_refine_final_temperature"
+        ),
+        "thinking_budget_refine_visible_output_target_tokens": (
+            "thinking_budget_refine_visible_output_target_tokens"
         ),
         "problem_timeout_seconds": "problem_timeout_seconds",
         "selection_reserve_seconds": "selection_reserve_seconds",
@@ -7086,6 +7119,11 @@ def run(cfg: type[CFG] = CFG) -> None:
         raise ValueError(
             "AIMO_THINKING_BUDGET_REFINE_FINAL_TEMPERATURE cannot be negative"
         )
+    if int(cfg.thinking_budget_refine_visible_output_target_tokens) < 0:
+        raise ValueError(
+            "AIMO_THINKING_BUDGET_REFINE_VISIBLE_OUTPUT_TARGET_TOKENS "
+            "cannot be negative"
+        )
     selected_gpus, resolved_tp, resolved_dp = resolve_gpu_parallel_layout(cfg)
     resolved_max_concurrent_requests = resolve_max_concurrent_requests(
         cfg,
@@ -7168,6 +7206,9 @@ def run(cfg: type[CFG] = CFG) -> None:
                 if cfg.thinking_budget_refine_final_temperature is None
                 else float(cfg.thinking_budget_refine_final_temperature)
             ),
+            "thinking_budget_refine_visible_output_target_tokens": int(
+                cfg.thinking_budget_refine_visible_output_target_tokens
+            ),
             "vllm_extra_args": str(cfg.vllm_extra_args),
             "served_model_name": str(cfg.served_model_name),
             "mock_llm": bool(cfg.mock_llm),
@@ -7190,7 +7231,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         "restart_strategy=%s final_round_budget=%s handoff_tokens=%s "
         "handoff_temperature=%s refine_handoff=%s refine_budget=%s "
         "refine_final_budget=%s refine_max_restarts=%s "
-        "refine_final_temperature=%s "
+        "refine_final_temperature=%s refine_visible_target=%s "
         "node_rank=%s/%s distributed_run=%s output=%s",
         cfg.stream_vllm,
         cfg.stream_vllm_server_log,
@@ -7218,6 +7259,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.thinking_budget_refine_final_round_tokens,
         cfg.thinking_budget_refine_max_restarts,
         cfg.thinking_budget_refine_final_temperature,
+        cfg.thinking_budget_refine_visible_output_target_tokens,
         distributed.rank,
         distributed.world_size,
         distributed.run_id or "local",
@@ -7306,6 +7348,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             ),
             thinking_budget_refine_final_temperature=(
                 cfg.thinking_budget_refine_final_temperature
+            ),
+            thinking_budget_refine_visible_output_target_tokens=(
+                cfg.thinking_budget_refine_visible_output_target_tokens
             ),
             deepseek_thinking_budget_force_text=(
                 cfg.deepseek_thinking_budget_force_text

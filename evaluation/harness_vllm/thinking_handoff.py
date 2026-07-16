@@ -1060,3 +1060,27 @@ def append_restart_instruction(
         raise ValueError("generation prompt must end in a user message")
     messages[-1]["content"] = messages[-1]["content"].rstrip() + "\n\n" + instruction
     return messages
+
+
+def append_final_output_discipline(
+    prompt: str | list[dict[str, str]],
+    target_tokens: int,
+) -> str | list[dict[str, str]]:
+    if target_tokens < 1:
+        raise ValueError("target_tokens must be positive")
+    instruction = f"""Final-output discipline for this repair:
+
+- Use the hidden reasoning phase to choose and audit the argument.
+- Once `<solution>` begins, write only the finalized proof. Do not narrate search, try alternative cases, or debate possible approaches inside the answer.
+- Target at most {target_tokens:,} tokens for the complete visible response.
+- Always close `<solution>`, `<self_evaluation>`, and `<score>` before stopping.
+- If a necessary lemma remains unproved, stop early and give the strongest rigorous partial proof, name the exact gap in `<self_evaluation>`, and use score 0 or 0.5. Never spend the remaining budget searching inside `<solution>`."""
+    if isinstance(prompt, str):
+        return prompt + "\n\n" + instruction
+    messages = [dict(message) for message in prompt]
+    if not messages or messages[-1].get("role") != "user":
+        raise ValueError("generation prompt must end in a user message")
+    messages[-1]["content"] = (
+        messages[-1]["content"].rstrip() + "\n\n" + instruction
+    )
+    return messages

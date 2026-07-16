@@ -27,6 +27,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     SavedProofGenerationCall,
     _parse_segment,
     append_restart_instruction,
+    append_final_output_discipline,
     assemble_handoff,
     build_empty_restart_handoff,
     build_fresh_handoff_section_prompt_ids,
@@ -132,6 +133,7 @@ def pipeline_cfg(**overrides):
         "thinking_budget_refine_final_round_tokens": 0,
         "thinking_budget_refine_max_restarts": 1,
         "thinking_budget_refine_final_temperature": None,
+        "thinking_budget_refine_visible_output_target_tokens": 0,
         "verify_n": 1,
         "meta_n": 0,
         "meta_policy": "all-reviews",
@@ -974,6 +976,24 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertIn("Reserve enough budget", instruction)
         self.assertIn("strongest rigorous partial proof", instruction)
 
+    def test_final_output_discipline_forbids_visible_search(self):
+        prompt = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "Problem and XML contract."},
+        ]
+        updated = append_final_output_discipline(prompt, 12_000)
+
+        self.assertEqual(updated[0], prompt[0])
+        self.assertIn("at most 12,000 tokens", updated[-1]["content"])
+        self.assertIn(
+            "Do not narrate search",
+            updated[-1]["content"],
+        )
+        self.assertIn(
+            "Always close `<solution>`",
+            updated[-1]["content"],
+        )
+
     def test_restart_finalization_force_reserves_visible_solution(self):
         force_text = (
             evaluate_thinking_handoff_restart.RESTART_FINALIZE_FORCE_TEXT
@@ -1420,6 +1440,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
                 thinking_budget_refine_final_round_tokens=10,
                 thinking_budget_refine_max_restarts=1,
                 thinking_budget_refine_final_temperature=0.6,
+                thinking_budget_refine_visible_output_target_tokens=12_000,
             ),
         )
         candidate = result["candidate"]
@@ -1452,6 +1473,10 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call["temperature"] for call in refinement_calls],
             [None, 0.6],
+        )
+        self.assertIn(
+            "at most 12,000 tokens",
+            str(scheduler.calls[4][1]),
         )
 
     async def test_resume_refinement_handoff_runs_only_final_repair_and_verifier(self):
@@ -1525,6 +1550,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
                     cfg=pipeline_cfg(
                         thinking_budget_refine_final_round_tokens=10,
                         thinking_budget_refine_final_temperature=0.6,
+                        thinking_budget_refine_visible_output_target_tokens=12_000,
                     ),
                 )
             )
@@ -1537,6 +1563,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
         self.assertEqual(scheduler.calls[0][2]["temperature"], 0.6)
+        self.assertIn("at most 12,000 tokens", str(scheduler.calls[0][1]))
 
     async def test_lossless_partial_handoff_reserves_final_output_budget(self):
         class FakeScheduler:

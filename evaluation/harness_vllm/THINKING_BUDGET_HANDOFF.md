@@ -120,7 +120,8 @@ python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
   --thinking-budget-refine-tokens 50000 \
   --thinking-budget-refine-final-round-tokens 50000 \
   --thinking-budget-refine-max-restarts 1 \
-  --thinking-budget-refine-final-temperature 0.6
+  --thinking-budget-refine-final-temperature 0.6 \
+  --thinking-budget-refine-visible-output-target-tokens 12000
 ```
 
 The first refinement stops at the initial budget and writes a bounded,
@@ -129,6 +130,10 @@ proof, the selected verifier critiques, and that report. Its final budget
 forces the transition to XML while reserving the remaining completion tokens
 for the repaired proof. The optional final temperature applies only to this
 post-handoff repair; when omitted, it inherits the normal stage temperature.
+The optional visible-output target adds a prompt contract that forbids
+exploratory narration inside `<solution>`, asks for closed XML within the
+target, and requires an honest partial score if the proof remains incomplete.
+It does not truncate the response and defaults to `0` (disabled).
 The feature is disabled by default. Audit fields are
 `proof_refine_attempt_output`, `proof_refine_handoff_output`,
 `proof_refine_handoffs`, and `refine_budget_restart_count`.
@@ -142,7 +147,8 @@ python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
   --resume-refinement-result /tmp/previous-replay/result.json \
   --thinking-budget-refine-handoff-enabled \
   --thinking-budget-refine-final-round-tokens 20000 \
-  --thinking-budget-refine-final-temperature 0.6
+  --thinking-budget-refine-final-temperature 0.6 \
+  --thinking-budget-refine-visible-output-target-tokens 12000
 ```
 
 Resume mode rebuilds the original refinement prompt, attaches the saved
@@ -161,4 +167,6 @@ tested `1.0`, `0.7`, and `0.6`. Temperatures `1.0` and `0.6` produced
 parser-valid XML, while `0.7` exhausted 65,000 tokens. None produced a
 mathematically rigorous proof. On that single sample, `0.6` closed in 24,678
 tokens and is the current opt-in experiment value, not a production default.
-See the experiment ledger for verifier findings and exact artifacts.
+A deconfounded repeat with base temperature `1.0` and only final refinement at
+`0.6` still exhausted all 65,000 tokens, demonstrating sampling variance. See
+the experiment ledger for verifier findings and exact artifacts.

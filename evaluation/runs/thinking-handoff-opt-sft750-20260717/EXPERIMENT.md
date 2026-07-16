@@ -912,9 +912,55 @@ python evaluation/harness_vllm/run.py \
   --thinking-budget-refine-final-temperature 0.6
 ```
 
+#### Independent-temperature replay
+
+A subsequent replay held the normal pipeline temperature at `1.0` and applied
+`0.6` only to the final post-handoff refinement. This removes the earlier
+confound where the verifier and meta-verifier also inherited temperature
+`0.6`.
+
+Artifact:
+`/tmp/thinking-handoff-refinement-resume20k-finaltemp06-sft750-20260717`
+
+| Metric | Result |
+|---|---:|
+| Base pipeline temperature | 1.0 |
+| Final refinement temperature | 0.6 |
+| Completion tokens | 65,000 |
+| Forced thinking boundary | 20,000 |
+| Finish reason | `length` |
+| Open `solution` tags | 1 |
+| Closed `solution` tags | 0 |
+| Parser-valid XML | no |
+| Re-verification calls | 0 |
+| Selected verification round | 0 |
+
+The model spent the entire approximately 45,000-token visible reserve
+continuing exploratory case analysis inside `<solution>`. Thus temperature
+`0.6` is not a deterministic completion fix: across the two runs that used
+`0.6` for final refinement, one closed and one did not.
+
+### Experiment 9: bound visible proof writing
+
+The next opt-in prompt targets the failure observed above rather than moving
+the hidden-reasoning boundary again. After a refinement handoff, it tells the
+model to:
+
+- finish all search during hidden reasoning;
+- write only finalized claims after `<solution>` begins;
+- target a complete visible response within 12,000 tokens;
+- always close all three XML sections;
+- stop early with an honest partial proof and score 0 or 0.5 when a key lemma
+  remains missing.
+
+It is controlled by
+`thinking_budget_refine_visible_output_target_tokens` and is disabled at `0`.
+The target is a prompt contract, not a hard truncation; the external 65,000
+completion limit remains unchanged.
+
 ## Current validation
 
 - Targeted Ruff checks pass.
 - Python compilation checks pass.
-- Focused handoff suite: 36 tests passed.
-- Full repository suite: 141 tests passed, 36 subtests passed.
+- Focused handoff suite: 37 tests passed.
+- Full repository suite: 142 tests passed, 36 subtests passed.
