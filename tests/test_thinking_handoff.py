@@ -17,6 +17,7 @@ from evaluation.harness_vllm.optimize_thinking_handoff import (  # noqa: E402
 from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     FINAL_PARTIAL_FORCE_MARKER,
     HANDOFF_ASSISTANT_PREFIX,
+    _parse_segment,
     append_restart_instruction,
     build_handoff_instruction,
     build_user_turn_prompt_ids,
@@ -117,6 +118,17 @@ def pipeline_cfg(**overrides):
 
 
 class SavedCallParserTests(unittest.TestCase):
+    def test_continuation_parser_preserves_prompt_trailing_newline(self):
+        prompt = "decoded prompt with significant suffix\n"
+        prompt_tokens, max_tokens, parsed = _parse_segment(
+            "prompt_tokens: 17\n"
+            "max_tokens: 23\n\n"
+            f"{prompt}\n\n"
+        )
+        self.assertEqual(prompt_tokens, 17)
+        self.assertEqual(max_tokens, 23)
+        self.assertEqual(parsed, prompt)
+
     def test_all_checked_in_budget_hit_logs_parse_and_drop_force_suffix(self):
         paths = []
         for path in LOG_ROOT.glob("rank*/llm_calls/*/*proof_gen*.txt"):

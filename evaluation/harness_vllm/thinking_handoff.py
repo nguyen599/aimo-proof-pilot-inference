@@ -71,12 +71,21 @@ def _section_ranges(text: str) -> dict[str, tuple[int, int]]:
 
 
 def _parse_segment(section: str) -> tuple[int, int, str]:
-    lines = section.lstrip("\n").splitlines()
-    if len(lines) < 3:
+    normalized = section.removeprefix("\n")
+    metadata, separator, encoded_body = normalized.partition("\n\n")
+    metadata_lines = metadata.splitlines()
+    if not separator or len(metadata_lines) != 2:
         raise ValueError("continuation section is missing metadata")
-    prompt_tokens = int(lines[0].removeprefix("prompt_tokens:").strip())
-    max_tokens = int(lines[1].removeprefix("max_tokens:").strip())
-    body = "\n".join(lines[3:] if not lines[2].strip() else lines[2:]).rstrip()
+    prompt_tokens = int(
+        metadata_lines[0].removeprefix("prompt_tokens:").strip()
+    )
+    max_tokens = int(metadata_lines[1].removeprefix("max_tokens:").strip())
+    # The logger appends one newline after the decoded prompt, and the next
+    # section begins with another newline. Remove exactly those delimiters so
+    # prompt-significant trailing whitespace remains intact.
+    if not encoded_body.endswith("\n\n"):
+        raise ValueError("continuation section is missing its trailing delimiters")
+    body = encoded_body[:-2]
     return prompt_tokens, max_tokens, body
 
 
