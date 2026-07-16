@@ -6,15 +6,14 @@ command immediately; read its output from command history afterward.
 
 ## Node ownership
 
-Human-facing node numbers are one-based, while relay client ranks are
-zero-based:
+UI node numbers and relay client ranks are both zero-based:
 
 | Member | Human nodes | Relay clients |
 |---|---:|---|
-| `vu` | 1-2 | `node0`, `node1` |
-| `bogo` | 3-4 | `node2`, `node3` |
-| `yi` | 5-6 | `node4`, `node5` |
-| `nguyen` | 7-8 | `node6`, `node7` |
+| `vu` | 0-1 | `node0`, `node1` |
+| `bogo` | 2-3 | `node2`, `node3` |
+| `yi` | 4-5 | `node4`, `node5` |
+| `nguyen` | 6-7 | `node6`, `node7` |
 
 The nodes share the main filesystem. Run package installs, downloads,
 repository updates, and other shared-file mutations on exactly one node. Run a
