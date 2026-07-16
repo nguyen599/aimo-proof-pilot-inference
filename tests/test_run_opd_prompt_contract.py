@@ -47,6 +47,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "0.6",
                 "--thinking-budget-refine-visible-output-target-tokens",
                 "12000",
+                "--thinking-budget-refine-visible-output-limit-tokens",
+                "12000",
                 "--node-rank",
                 "1",
                 "--world-size",
@@ -77,6 +79,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
         self.assertEqual(
             cfg.thinking_budget_refine_visible_output_target_tokens,
+            12_000,
+        )
+        self.assertEqual(
+            cfg.thinking_budget_refine_visible_output_limit_tokens,
             12_000,
         )
 

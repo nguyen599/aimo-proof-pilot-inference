@@ -958,9 +958,62 @@ It is controlled by
 The target is a prompt contract, not a hard truncation; the external 65,000
 completion limit remains unchanged.
 
+#### Prompt-only target replay
+
+The replay used the independent final-refinement temperature from the previous
+experiment and added a 12,000-token visible-output target.
+
+Artifact:
+`/tmp/thinking-handoff-refinement-resume20k-finaltemp06-visible12k-sft750-20260717`
+
+| Metric | Result |
+|---|---:|
+| Base pipeline temperature | 1.0 |
+| Final refinement temperature | 0.6 |
+| Forced thinking boundary | 20,000 |
+| Visible-output prompt target | 12,000 |
+| Completion tokens | 65,000 |
+| Finish reason | `length` |
+| Open `solution` tags | 1 |
+| Closed `solution` tags | 0 |
+| Parser-valid XML | no |
+| Re-verification calls | 0 |
+| Selected verification round | 0 |
+
+The model ignored the soft target and spent the full remaining completion
+budget on exploratory combinatorics inside `<solution>`. This rules out a
+prompt-only token target as a reliable cutoff defense. The next experiment
+must enforce the visible-output boundary in the streaming client and append an
+explicitly incomplete, score-0 XML footer when the model does not close the
+response itself. That can improve structural completion but must not be
+reported as a solved proof.
+
+### Experiment 10: enforced visible-output boundary
+
+The runner now has a separate opt-in
+`thinking_budget_refine_visible_output_limit_tokens` control. It applies only
+to the final refinement after a successful handoff. The streaming client stops
+the post-thinking visible segment at the configured boundary. If the output is
+already parser-valid it is left unchanged. Otherwise the client:
+
+1. preserves all generated proof text;
+2. states that the proof is incomplete;
+3. closes `<solution>` and `<self_evaluation>`;
+4. emits `<score>0</score>`; and
+5. records the intervention in usage metadata.
+
+This control is intended to separate two metrics:
+
+- **structural completion:** whether the candidate reaches parseable XML
+  without the external 65,000-token cutoff;
+- **rigorous completion:** whether a verifier accepts the mathematical proof.
+
+Only the second metric is evidence that the handoff improved solving. Forced
+score-0 closure counts as structural completion and rigorous failure.
+
 ## Current validation
 
 - Targeted Ruff checks pass.
 - Python compilation checks pass.
-- Focused handoff suite: 37 tests passed.
-- Full repository suite: 142 tests passed, 36 subtests passed.
+- Focused handoff and CLI suites: 73 tests passed.
+- Full repository suite: 145 tests passed, 36 subtests passed.

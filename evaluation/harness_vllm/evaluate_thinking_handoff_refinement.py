@@ -118,6 +118,16 @@ def parse_args() -> argparse.Namespace:
             "instruction to the final post-handoff refinement."
         ),
     )
+    parser.add_argument(
+        "--thinking-budget-refine-visible-output-limit-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Hard-limit post-intervention visible tokens in the final "
+            "post-handoff refinement. If the response remains incomplete, "
+            "append an honest score-0 XML closure."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--request-timeout-seconds", type=float, default=7200.0)
@@ -213,6 +223,9 @@ async def resume_final_refinement(
         ),
         thinking_budget_force_text=RESTART_FINALIZE_FORCE_TEXT,
         thinking_budget_action="finalize",
+        visible_output_limit_tokens=(
+            cfg.thinking_budget_refine_visible_output_limit_tokens or None
+        ),
     )
     parsed = parse_generation_response(response.get("text", ""))
     critiques = [
@@ -419,6 +432,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             0,
             int(args.thinking_budget_refine_visible_output_target_tokens),
         ),
+        thinking_budget_refine_visible_output_limit_tokens=max(
+            0,
+            int(args.thinking_budget_refine_visible_output_limit_tokens),
+        ),
         verifier_thinking_budget_tokens=min(
             int(CFG.verifier_thinking_budget_tokens),
             max(1, int(args.verifier_max_tokens) - 1),
@@ -479,6 +496,9 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             ),
             "thinking_budget_refine_visible_output_target_tokens": (
                 cfg.thinking_budget_refine_visible_output_target_tokens
+            ),
+            "thinking_budget_refine_visible_output_limit_tokens": (
+                cfg.thinking_budget_refine_visible_output_limit_tokens
             ),
             "temperature": args.temperature,
             "top_p": args.top_p,

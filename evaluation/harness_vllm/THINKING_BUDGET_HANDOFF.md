@@ -121,7 +121,8 @@ python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
   --thinking-budget-refine-final-round-tokens 50000 \
   --thinking-budget-refine-max-restarts 1 \
   --thinking-budget-refine-final-temperature 0.6 \
-  --thinking-budget-refine-visible-output-target-tokens 12000
+  --thinking-budget-refine-visible-output-target-tokens 12000 \
+  --thinking-budget-refine-visible-output-limit-tokens 12000
 ```
 
 The first refinement stops at the initial budget and writes a bounded,
@@ -133,10 +134,19 @@ post-handoff repair; when omitted, it inherits the normal stage temperature.
 The optional visible-output target adds a prompt contract that forbids
 exploratory narration inside `<solution>`, asks for closed XML within the
 target, and requires an honest partial score if the proof remains incomplete.
-It does not truncate the response and defaults to `0` (disabled).
+It does not truncate the response and defaults to `0` (disabled). The separate
+visible-output limit is an enforced streaming boundary. If the model has not
+closed a valid response at that boundary, the client preserves its partial
+argument and appends an explicitly incomplete `<self_evaluation>` and
+`<score>0</score>`. This prevents an unparseable external token cutoff; it does
+not turn the partial argument into a solved proof. The limit also defaults to
+`0`.
 The feature is disabled by default. Audit fields are
 `proof_refine_attempt_output`, `proof_refine_handoff_output`,
-`proof_refine_handoffs`, and `refine_budget_restart_count`.
+`proof_refine_handoffs`, and `refine_budget_restart_count`. Per-call usage also
+records `visible_output_limit_applied`,
+`visible_output_forced_partial_closure`, and
+`visible_output_forced_tokens`.
 
 To retest only the final repair from a saved refinement handoff, without
 repeating the initial verification and first stopped refinement:
@@ -148,7 +158,8 @@ python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
   --thinking-budget-refine-handoff-enabled \
   --thinking-budget-refine-final-round-tokens 20000 \
   --thinking-budget-refine-final-temperature 0.6 \
-  --thinking-budget-refine-visible-output-target-tokens 12000
+  --thinking-budget-refine-visible-output-target-tokens 12000 \
+  --thinking-budget-refine-visible-output-limit-tokens 12000
 ```
 
 Resume mode rebuilds the original refinement prompt, attaches the saved

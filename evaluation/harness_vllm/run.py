@@ -271,6 +271,12 @@ class CFG:
             "0",
         )
     )
+    thinking_budget_refine_visible_output_limit_tokens = int(
+        os.environ.get(
+            "AIMO_THINKING_BUDGET_REFINE_VISIBLE_OUTPUT_LIMIT_TOKENS",
+            "0",
+        )
+    )
     deepseek_thinking_budget_force_text = (
         "\nWe should now write the final solution due time limit.\n"
         "</think>\n\n## Solution\n"
@@ -553,6 +559,7 @@ class PipelineConfig:
     thinking_budget_refine_max_restarts: int
     thinking_budget_refine_final_temperature: Optional[float]
     thinking_budget_refine_visible_output_target_tokens: int
+    thinking_budget_refine_visible_output_limit_tokens: int
     deepseek_thinking_budget_force_text: str
     verifier_thinking_budget_tokens: int
     verifier_thinking_budget_force_text: str
@@ -2010,6 +2017,53 @@ def parse_generation_response(
     }
 
 
+VISIBLE_OUTPUT_LIMIT_PARTIAL_PROOF_TEXT = (
+    "The refinement reached its enforced visible-output limit before a "
+    "complete rigorous proof was produced. The preceding argument is partial "
+    "and must not be treated as a complete solution."
+)
+VISIBLE_OUTPUT_LIMIT_SELF_EVALUATION = (
+    "The response was closed automatically at the configured visible-output "
+    "limit. At least one required argument remains unresolved, so this is an "
+    "incomplete proof."
+)
+
+
+def build_visible_output_limit_footer(text: str) -> str:
+    if parse_generation_response(text).get("is_valid_candidate_response"):
+        return ""
+
+    visible = final_visible_output(text)
+    normalized = visible.lower()
+    solution_open = normalized.rfind("<solution>")
+    solution_close = normalized.rfind("</solution>")
+    parts: list[str] = ["\n\n"]
+    if solution_open < 0:
+        parts.extend(
+            [
+                "<solution>\n",
+                VISIBLE_OUTPUT_LIMIT_PARTIAL_PROOF_TEXT,
+                "\n</solution>\n",
+            ]
+        )
+    elif solution_close < solution_open:
+        parts.extend(
+            [
+                VISIBLE_OUTPUT_LIMIT_PARTIAL_PROOF_TEXT,
+                "\n</solution>\n",
+            ]
+        )
+    parts.extend(
+        [
+            "<self_evaluation>\n",
+            VISIBLE_OUTPUT_LIMIT_SELF_EVALUATION,
+            "\n</self_evaluation>\n",
+            "<score>0</score>",
+        ]
+    )
+    return "".join(parts)
+
+
 def require_valid_candidate_response(
     parsed: dict[str, Any],
     *,
@@ -2939,6 +2993,7 @@ class ChatScheduler:
         max_tokens_override: Optional[int] = None,
         response_prefix: str = "",
         return_context_ids: bool = False,
+        visible_output_limit_tokens: Optional[int] = None,
     ) -> dict[str, Any]:
 
         response: Optional[dict[str, Any]] = None
@@ -2970,6 +3025,7 @@ class ChatScheduler:
                         max_tokens_override,
                         response_prefix,
                         return_context_ids,
+                        visible_output_limit_tokens,
                     )
         except Exception:
             if progress is not None:
@@ -3022,6 +3078,7 @@ class ChatScheduler:
         max_tokens_override: Optional[int] = None,
         response_prefix: str = "",
         return_context_ids: bool = False,
+        visible_output_limit_tokens: Optional[int] = None,
     ) -> dict[str, Any]:
         client = self._clients[index]
         call_log_path: Optional[Path] = None
@@ -3038,6 +3095,11 @@ class ChatScheduler:
             raise ValueError(
                 "thinking_budget_action must be either 'finalize' or 'stop'"
             )
+        if (
+            visible_output_limit_tokens is not None
+            and int(visible_output_limit_tokens) < 1
+        ):
+            raise ValueError("visible_output_limit_tokens must be positive")
         started = time.time()
         assistant_prefix = None
         if prompt_token_ids is not None:
@@ -3287,6 +3349,121 @@ class ChatScheduler:
                     first_segment["stopped_by_budget"]
                     and has_closed_thinking_block(first_segment["text"])
                 )
+                visible_output_limit_requested = (
+                    int(visible_output_limit_tokens)
+                    if visible_output_limit_tokens is not None
+                    else None
+                )
+                visible_output_limit_effective: Optional[int] = None
+                visible_output_limit_applied = False
+                visible_output_forced_partial_closure = False
+                visible_output_forced_tokens = 0
+
+                def continue_after_thinking(
+                    continuation_prompt_ids: list[int],
+                    remaining_tokens: int,
+                    *,
+                    visible_tokens_already: int = 0,
+                ) -> None:
+                    nonlocal finish_reason
+                    nonlocal generated_token_ids
+                    nonlocal streamed_tokens
+                    nonlocal usage
+                    nonlocal visible_output_forced_partial_closure
+                    nonlocal visible_output_forced_tokens
+                    nonlocal visible_output_limit_applied
+                    nonlocal visible_output_limit_effective
+
+                    if visible_output_limit_requested is not None:
+                        current_text = (
+                            response_prefix
+                            + (assistant_prefix or "")
+                            + "".join(text_parts)
+                        )
+                        footer_reserve_tokens = len(
+                            self._token_ids_to_list(
+                                self.tokenizer.encode(
+                                    build_visible_output_limit_footer(current_text),
+                                    add_special_tokens=False,
+                                )
+                            )
+                        )
+                        visible_output_limit_effective = min(
+                            max(
+                                0,
+                                visible_output_limit_requested
+                                - visible_tokens_already,
+                            ),
+                            max(0, remaining_tokens - footer_reserve_tokens),
+                        )
+
+                    if visible_output_limit_effective == 0:
+                        continuation = {
+                            "text": "",
+                            "generated_token_ids": [],
+                            "streamed_tokens": 0,
+                            "finish_reason": None,
+                            "usage": {},
+                            "stopped_by_budget": True,
+                        }
+                    else:
+                        continuation = stream_completion(
+                            continuation_prompt_ids,
+                            remaining_tokens,
+                            stop_after_tokens=visible_output_limit_effective,
+                        )
+
+                    text_parts.append(str(continuation["text"]))
+                    generated_token_ids.extend(
+                        continuation["generated_token_ids"]
+                    )
+                    streamed_tokens += int(continuation["streamed_tokens"])
+                    finish_reason = continuation["finish_reason"]
+                    if continuation["usage"]:
+                        usage = continuation["usage"]
+
+                    visible_output_limit_applied = bool(
+                        visible_output_limit_requested is not None
+                        and continuation.get("stopped_by_budget")
+                    )
+                    if not visible_output_limit_applied:
+                        return
+
+                    combined_text = (
+                        response_prefix
+                        + (assistant_prefix or "")
+                        + "".join(text_parts)
+                    )
+                    footer = build_visible_output_limit_footer(combined_text)
+                    if footer:
+                        footer_token_ids = self._token_ids_to_list(
+                            self.tokenizer.encode(
+                                footer,
+                                add_special_tokens=False,
+                            )
+                        )
+                        text_parts.append(footer)
+                        generated_token_ids.extend(footer_token_ids)
+                        streamed_tokens += len(footer_token_ids)
+                        visible_output_forced_tokens = len(footer_token_ids)
+                        visible_output_forced_partial_closure = True
+                        if progress is not None and stream_id is not None:
+                            progress.stream_advance(
+                                stream_id,
+                                len(footer_token_ids),
+                            )
+                    finish_reason = "visible_output_limit_reached"
+                    logging.warning(
+                        "Visible-output limit reached stage=%s detail=%s "
+                        "requested=%d effective=%d forced_partial=%s "
+                        "forced_tokens=%d",
+                        stage,
+                        detail,
+                        visible_output_limit_requested,
+                        visible_output_limit_effective,
+                        visible_output_forced_partial_closure,
+                        visible_output_forced_tokens,
+                    )
 
                 if thinking_budget_applied and thinking_budget_skipped_closed:
                     remaining_tokens = max_tokens - streamed_tokens
@@ -3302,18 +3479,27 @@ class ChatScheduler:
                     )
                     if remaining_tokens > 0:
                         continuation_prompt_ids = prompt_ids + generated_token_ids
-                        second_segment = stream_completion(
+                        visible_tokens_already = (
+                            len(
+                                self._token_ids_to_list(
+                                    self.tokenizer.encode(
+                                        final_visible_output(
+                                            response_prefix
+                                            + (assistant_prefix or "")
+                                            + "".join(text_parts)
+                                        ),
+                                        add_special_tokens=False,
+                                    )
+                                )
+                            )
+                            if visible_output_limit_requested is not None
+                            else 0
+                        )
+                        continue_after_thinking(
                             continuation_prompt_ids,
                             remaining_tokens,
+                            visible_tokens_already=visible_tokens_already,
                         )
-                        text_parts.append(second_segment["text"])
-                        generated_token_ids.extend(
-                            second_segment["generated_token_ids"]
-                        )
-                        streamed_tokens += int(second_segment["streamed_tokens"])
-                        finish_reason = second_segment["finish_reason"]
-                        if second_segment["usage"]:
-                            usage = second_segment["usage"]
                     else:
                         finish_reason = "thinking_budget_reached"
                 elif thinking_budget_applied and thinking_budget_action == "stop":
@@ -3344,8 +3530,10 @@ class ChatScheduler:
                         progress.stream_advance(stream_id, len(force_token_ids))
                     if append_intervention_to_output:
                         text_parts.append(intervention_text)
+                        generated_token_ids.extend(force_token_ids)
+                        streamed_tokens += len(force_token_ids)
                     remaining_tokens = (
-                        max_tokens - streamed_tokens - len(force_token_ids)
+                        max_tokens - streamed_tokens
                     )
                     logging.info(
                         "Applied thinking intervention stage=%s detail=%s reason=%s "
@@ -3363,29 +3551,11 @@ class ChatScheduler:
                         first_segment.get("repetition_line"),
                     )
                     if remaining_tokens > 0:
-                        continuation_prompt_ids = (
-                            prompt_ids + generated_token_ids + force_token_ids
-                        )
-                        second_segment = stream_completion(
-                            continuation_prompt_ids,
+                        continue_after_thinking(
+                            prompt_ids + generated_token_ids,
                             remaining_tokens,
                         )
-                        text_parts.append(second_segment["text"])
-                        if append_intervention_to_output:
-                            generated_token_ids.extend(force_token_ids)
-                        generated_token_ids.extend(
-                            second_segment["generated_token_ids"]
-                        )
-                        streamed_tokens += int(second_segment["streamed_tokens"])
-                        if append_intervention_to_output:
-                            streamed_tokens += len(force_token_ids)
-                        finish_reason = second_segment["finish_reason"]
-                        if second_segment["usage"]:
-                            usage = second_segment["usage"]
                     else:
-                        if append_intervention_to_output:
-                            generated_token_ids.extend(force_token_ids)
-                            streamed_tokens += len(force_token_ids)
                         finish_reason = "thinking_budget_reached"
 
                 usage["completion_tokens"] = streamed_tokens
@@ -3404,6 +3574,21 @@ class ChatScheduler:
                 usage["repetition_guard_count"] = first_segment.get("repetition_count")
                 usage["thinking_budget_force_skipped_closed"] = (
                     thinking_budget_skipped_closed
+                )
+                usage["visible_output_limit_tokens"] = (
+                    visible_output_limit_requested
+                )
+                usage["visible_output_limit_effective_tokens"] = (
+                    visible_output_limit_effective
+                )
+                usage["visible_output_limit_applied"] = (
+                    visible_output_limit_applied
+                )
+                usage["visible_output_forced_partial_closure"] = (
+                    visible_output_forced_partial_closure
+                )
+                usage["visible_output_forced_tokens"] = (
+                    visible_output_forced_tokens
                 )
                 text = response_prefix + (assistant_prefix or "") + "".join(text_parts)
                 result = {
@@ -4753,10 +4938,22 @@ async def run_refinement_with_budget_restart(
             and final_temperature is not None
             else None
         )
+        visible_output_limit_tokens = (
+            int(
+                getattr(
+                    cfg,
+                    "thinking_budget_refine_visible_output_limit_tokens",
+                    0,
+                )
+            )
+            if restart_idx > 0 and not can_restart
+            else 0
+        )
         if progress is not None:
             progress.log(
                 "candidate=%d round=%d stage=refinement_attempt status=start "
-                "restart=%d/%d budget=%s budget_action=%s temperature=%s",
+                "restart=%d/%d budget=%s budget_action=%s temperature=%s "
+                "visible_limit=%s",
                 attempt_idx,
                 round_idx,
                 restart_idx,
@@ -4764,6 +4961,7 @@ async def run_refinement_with_budget_restart(
                 budget_tokens,
                 "stop" if can_restart else "finalize",
                 request_temperature,
+                visible_output_limit_tokens or None,
             )
         response = await scheduler.call(
             "proof_refine",
@@ -4777,6 +4975,7 @@ async def run_refinement_with_budget_restart(
             thinking_budget_tokens=budget_tokens,
             thinking_budget_force_text=force_text if budget_tokens else "",
             thinking_budget_action="stop" if can_restart else "finalize",
+            visible_output_limit_tokens=visible_output_limit_tokens or None,
         )
 
         if can_restart and response_hit_unfinished_thinking_budget(response):
@@ -6063,6 +6262,7 @@ class ProofRuntime:
         thinking_budget_refine_max_restarts: int,
         thinking_budget_refine_final_temperature: Optional[float],
         thinking_budget_refine_visible_output_target_tokens: int,
+        thinking_budget_refine_visible_output_limit_tokens: int,
         deepseek_thinking_budget_force_text: str,
         verifier_thinking_budget_tokens: int,
         verifier_thinking_budget_force_text: str,
@@ -6254,6 +6454,10 @@ class ProofRuntime:
             thinking_budget_refine_visible_output_target_tokens=max(
                 0,
                 int(thinking_budget_refine_visible_output_target_tokens),
+            ),
+            thinking_budget_refine_visible_output_limit_tokens=max(
+                0,
+                int(thinking_budget_refine_visible_output_limit_tokens),
             ),
             deepseek_thinking_budget_force_text=(
                 deepseek_thinking_budget_force_text
@@ -6870,6 +7074,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--thinking-budget-refine-visible-output-target-tokens",
         type=int,
     )
+    pipeline.add_argument(
+        "--thinking-budget-refine-visible-output-limit-tokens",
+        type=int,
+    )
     pipeline.add_argument("--problem-timeout-seconds", type=int)
     pipeline.add_argument("--selection-reserve-seconds", type=int)
     pipeline.add_argument("--selector-mode", choices=("llm", "score"))
@@ -6968,6 +7176,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         ),
         "thinking_budget_refine_visible_output_target_tokens": (
             "thinking_budget_refine_visible_output_target_tokens"
+        ),
+        "thinking_budget_refine_visible_output_limit_tokens": (
+            "thinking_budget_refine_visible_output_limit_tokens"
         ),
         "problem_timeout_seconds": "problem_timeout_seconds",
         "selection_reserve_seconds": "selection_reserve_seconds",
@@ -7124,6 +7335,11 @@ def run(cfg: type[CFG] = CFG) -> None:
             "AIMO_THINKING_BUDGET_REFINE_VISIBLE_OUTPUT_TARGET_TOKENS "
             "cannot be negative"
         )
+    if int(cfg.thinking_budget_refine_visible_output_limit_tokens) < 0:
+        raise ValueError(
+            "AIMO_THINKING_BUDGET_REFINE_VISIBLE_OUTPUT_LIMIT_TOKENS "
+            "cannot be negative"
+        )
     selected_gpus, resolved_tp, resolved_dp = resolve_gpu_parallel_layout(cfg)
     resolved_max_concurrent_requests = resolve_max_concurrent_requests(
         cfg,
@@ -7209,6 +7425,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             "thinking_budget_refine_visible_output_target_tokens": int(
                 cfg.thinking_budget_refine_visible_output_target_tokens
             ),
+            "thinking_budget_refine_visible_output_limit_tokens": int(
+                cfg.thinking_budget_refine_visible_output_limit_tokens
+            ),
             "vllm_extra_args": str(cfg.vllm_extra_args),
             "served_model_name": str(cfg.served_model_name),
             "mock_llm": bool(cfg.mock_llm),
@@ -7232,6 +7451,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         "handoff_temperature=%s refine_handoff=%s refine_budget=%s "
         "refine_final_budget=%s refine_max_restarts=%s "
         "refine_final_temperature=%s refine_visible_target=%s "
+        "refine_visible_limit=%s "
         "node_rank=%s/%s distributed_run=%s output=%s",
         cfg.stream_vllm,
         cfg.stream_vllm_server_log,
@@ -7260,6 +7480,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.thinking_budget_refine_max_restarts,
         cfg.thinking_budget_refine_final_temperature,
         cfg.thinking_budget_refine_visible_output_target_tokens,
+        cfg.thinking_budget_refine_visible_output_limit_tokens,
         distributed.rank,
         distributed.world_size,
         distributed.run_id or "local",
@@ -7351,6 +7572,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             ),
             thinking_budget_refine_visible_output_target_tokens=(
                 cfg.thinking_budget_refine_visible_output_target_tokens
+            ),
+            thinking_budget_refine_visible_output_limit_tokens=(
+                cfg.thinking_budget_refine_visible_output_limit_tokens
             ),
             deepseek_thinking_budget_force_text=(
                 cfg.deepseek_thinking_budget_force_text

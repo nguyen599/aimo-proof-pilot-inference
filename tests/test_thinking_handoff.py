@@ -134,6 +134,7 @@ def pipeline_cfg(**overrides):
         "thinking_budget_refine_max_restarts": 1,
         "thinking_budget_refine_final_temperature": None,
         "thinking_budget_refine_visible_output_target_tokens": 0,
+        "thinking_budget_refine_visible_output_limit_tokens": 0,
         "verify_n": 1,
         "meta_n": 0,
         "meta_policy": "all-reviews",
@@ -994,6 +995,26 @@ class HandoffPromptTests(unittest.TestCase):
             updated[-1]["content"],
         )
 
+    def test_visible_output_limit_footer_closes_partial_proof_honestly(self):
+        partial = "<think>research</think><solution>A partial argument."
+        footer = run.build_visible_output_limit_footer(partial)
+        parsed = run.parse_generation_response(partial + footer)
+
+        self.assertTrue(parsed["is_valid_candidate_response"])
+        self.assertEqual(parsed["self_score"], 0.0)
+        self.assertIn("A partial argument.", parsed["proof"])
+        self.assertIn("must not be treated", parsed["proof"])
+        self.assertIn("closed automatically", parsed["self_evaluation"])
+
+    def test_visible_output_limit_footer_does_not_change_complete_response(self):
+        complete = (
+            "<solution>A complete proof.</solution>"
+            "<self_evaluation>Every step is justified.</self_evaluation>"
+            "<score>1</score>"
+        )
+
+        self.assertEqual(run.build_visible_output_limit_footer(complete), "")
+
     def test_restart_finalization_force_reserves_visible_solution(self):
         force_text = (
             evaluate_thinking_handoff_restart.RESTART_FINALIZE_FORCE_TEXT
@@ -1125,6 +1146,89 @@ class HandoffPromptTests(unittest.TestCase):
                 VALID_HANDOFF,
                 1,
             )
+
+
+class VisibleOutputLimitSchedulerTests(unittest.TestCase):
+    def test_streaming_limit_forces_an_audited_partial_xml_closure(self):
+        class FakeStream:
+            def __init__(self, text):
+                token_ids = FakeTokenizer.encode(text)
+                self.chunks = [
+                    SimpleNamespace(
+                        usage=None,
+                        choices=[
+                            SimpleNamespace(
+                                finish_reason=None,
+                                text=character,
+                                token_ids=token_ids[: index + 1],
+                                model_extra={},
+                            )
+                        ],
+                    )
+                    for index, character in enumerate(text)
+                ]
+
+            def __iter__(self):
+                return iter(self.chunks)
+
+            def close(self):
+                return None
+
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                del kwargs
+                self.calls += 1
+                return FakeStream(
+                    "abcdefghij" if self.calls == 1 else "0123456789ABCDEFGHIJ"
+                )
+
+        completions = FakeCompletions()
+        fake_openai = SimpleNamespace(completions=completions)
+        with patch.object(run, "OpenAI", return_value=fake_openai):
+            scheduler = run.ChatScheduler(
+                base_urls=["http://test/v1"],
+                api_key="test",
+                model="test",
+                sampling=run.SamplingConfig(
+                    max_new_tokens=1_000,
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=-1,
+                    min_new_tokens=0,
+                    min_p=None,
+                ),
+                max_concurrent_requests=1,
+                tokenizer=FakeTokenizer(),
+                stream_responses=True,
+            )
+
+        result = scheduler._call_sync(
+            "proof_refine",
+            [{"role": "user", "content": "Prove the claim."}],
+            0,
+            0.6,
+            thinking_budget_tokens=5,
+            thinking_budget_force_text="\n</think>\n\n<solution>\n",
+            visible_output_limit_tokens=10,
+        )
+        parsed = run.parse_generation_response(result["text"])
+
+        self.assertEqual(completions.calls, 2)
+        self.assertEqual(result["finish_reason"], "visible_output_limit_reached")
+        self.assertTrue(result["usage"]["visible_output_limit_applied"])
+        self.assertEqual(
+            result["usage"]["visible_output_limit_effective_tokens"],
+            10,
+        )
+        self.assertTrue(
+            result["usage"]["visible_output_forced_partial_closure"]
+        )
+        self.assertGreater(result["usage"]["visible_output_forced_tokens"], 0)
+        self.assertTrue(parsed["is_valid_candidate_response"])
+        self.assertEqual(parsed["self_score"], 0.0)
 
 
 class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -1441,6 +1545,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
                 thinking_budget_refine_max_restarts=1,
                 thinking_budget_refine_final_temperature=0.6,
                 thinking_budget_refine_visible_output_target_tokens=12_000,
+                thinking_budget_refine_visible_output_limit_tokens=12_000,
             ),
         )
         candidate = result["candidate"]
@@ -1473,6 +1578,10 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call["temperature"] for call in refinement_calls],
             [None, 0.6],
+        )
+        self.assertEqual(
+            [call["visible_output_limit_tokens"] for call in refinement_calls],
+            [None, 12_000],
         )
         self.assertIn(
             "at most 12,000 tokens",
@@ -1551,6 +1660,7 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
                         thinking_budget_refine_final_round_tokens=10,
                         thinking_budget_refine_final_temperature=0.6,
                         thinking_budget_refine_visible_output_target_tokens=12_000,
+                        thinking_budget_refine_visible_output_limit_tokens=12_000,
                     ),
                 )
             )
@@ -1563,6 +1673,10 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
         self.assertEqual(scheduler.calls[0][2]["temperature"], 0.6)
+        self.assertEqual(
+            scheduler.calls[0][2]["visible_output_limit_tokens"],
+            12_000,
+        )
         self.assertIn("at most 12,000 tokens", str(scheduler.calls[0][1]))
 
     async def test_lossless_partial_handoff_reserves_final_output_budget(self):
