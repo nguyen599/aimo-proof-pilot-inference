@@ -1440,21 +1440,6 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
             candidate["proof_refine_handoff_output"][0]["finish_reason"],
             "partial_passthrough",
         )
-        restarted_refinement_prompt = scheduler.calls[4][1][-1]["content"]
-        self.assertLess(
-            restarted_refinement_prompt.index("<previous_attempt_handoff>"),
-            restarted_refinement_prompt.index(
-                "MANDATORY FINAL REPAIR OBLIGATIONS"
-            ),
-        )
-        self.assertIn(
-            "Verifier score 0.",
-            restarted_refinement_prompt[
-                restarted_refinement_prompt.index(
-                    "MANDATORY FINAL REPAIR OBLIGATIONS"
-                ) :
-            ],
-        )
         self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
 
@@ -1535,17 +1520,6 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [stage for stage, _, _ in scheduler.calls],
             ["proof_refine", "proof_verify"],
-        )
-        refinement_prompt = scheduler.calls[0][1][-1]["content"]
-        self.assertLess(
-            refinement_prompt.index("<previous_attempt_handoff>"),
-            refinement_prompt.index("MANDATORY FINAL REPAIR OBLIGATIONS"),
-        )
-        self.assertIn(
-            "The lower-bound lemma is missing.",
-            refinement_prompt[
-                refinement_prompt.index("MANDATORY FINAL REPAIR OBLIGATIONS") :
-            ],
         )
         self.assertTrue(details["verification_ran"])
         self.assertEqual(candidate["selected_verification_round"], 1)

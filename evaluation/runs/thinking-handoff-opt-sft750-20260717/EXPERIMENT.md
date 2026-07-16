@@ -841,6 +841,35 @@ the selected critiques after the handoff as mandatory repair obligations,
 immediately before the fresh refinement begins. The final call must either
 repair each item or mark it unresolved and avoid claiming a complete proof.
 
+#### Live result: post-handoff critique restatement
+
+This change regressed completion:
+
+| Metric | Result |
+|---|---:|
+| Prompt tokens | 19,973 |
+| Completion tokens | 65,000 |
+| Forced thinking boundary | 20,000 |
+| Finish reason | `length` |
+| Open `solution` tags | 1 |
+| Closed `solution` tags | 0 |
+| Parser-valid XML | no |
+| Re-verification calls | 0 |
+| Selected verification round | 0 |
+
+The final visible section continued exploratory work on the rejected reduction
+and `k=2` until the request limit. Repeating the full critiques near the
+generation boundary did not produce a concise repair and removed the
+format-completion gain from Experiment 6. The change is therefore not retained
+in the production restart prompt.
+
+### Experiment 8: final-refinement temperature sweep
+
+Keep the parser-successful Experiment 6 prompt and 20,000-token boundary, then
+run final refinements at temperatures 0.7 and 0.6. The two runs reuse the same
+saved handoff and critiques. They test whether lower sampling variance improves
+voluntary closure or verifier score without changing token allocation.
+
 ## Current validation
 
 - Targeted Ruff checks pass.

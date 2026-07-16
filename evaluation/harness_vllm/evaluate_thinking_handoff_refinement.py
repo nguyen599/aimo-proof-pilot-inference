@@ -17,7 +17,6 @@ try:
         RESTART_FINALIZE_FORCE_TEXT,
         ChatScheduler,
         SamplingConfig,
-        append_refinement_restart_obligations,
         build_opd_proof_refinement_prompt,
         format_refinement_critique,
         make_output,
@@ -39,7 +38,6 @@ except ModuleNotFoundError as exc:
         RESTART_FINALIZE_FORCE_TEXT,
         ChatScheduler,
         SamplingConfig,
-        append_refinement_restart_obligations,
         build_opd_proof_refinement_prompt,
         format_refinement_critique,
         make_output,
@@ -180,10 +178,6 @@ async def resume_final_refinement(
         str(handoffs[-1]["text"]),
         1,
         strategy="deadline_aware",
-    )
-    prompt = append_refinement_restart_obligations(
-        prompt,
-        selected_critiques,
     )
     response = await scheduler.call(
         "proof_refine",

@@ -146,9 +146,8 @@ lossless handoff and selected validated critiques, and runs one final repair.
 It invokes the verifier and meta-verifier only when that repair is
 parser-valid, then keeps the higher-scoring verified round.
 
-For refinement restarts, the selected critiques are also repeated after the
-handoff as mandatory repair obligations. This keeps concrete verifier findings
-near the generation boundary instead of burying them before a long transferred
-research report. The model must repair each item or report it as unresolved;
-the downstream verifier remains the authority on whether that instruction was
-actually followed.
+A full post-handoff repetition of the selected critiques was tested but is not
+enabled. On the recorded hard sample it regressed a parser-valid 20,000-token
+restart into another 65,000-token cutoff. The original refinement prompt still
+contains the selected critiques before the handoff, and the downstream
+verifier remains the authority on proof quality.
