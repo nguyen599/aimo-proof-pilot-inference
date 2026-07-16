@@ -91,3 +91,21 @@ saved prompt text. Equivalent token segmentations may differ slightly in token
 count; `--max-token-drift` defaults to 4 and rejects larger differences.
 It writes each full call under `calls/` and checkpoints `results.jsonl`,
 `results.csv`, and `summary.json` after every completed or failed request.
+
+## Replay verifier refinement
+
+Use `evaluate_thinking_handoff_refinement.py` to test a saved parser-valid
+restart without regenerating its long proof:
+
+```bash
+python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
+  --logs-root evaluation/runs/imo2025-full-p16-r1-p2-sft750-parserfix4-20260716T173047Z-partial-20260717/logs \
+  --restart-results /tmp/thinking-handoff-restart-passthrough-force100k-sft750-20260717/results.jsonl \
+  --model-path /tmp/models/olmo3-opd-sft-750-vllm \
+  --base-url http://127.0.0.1:8000/v1 \
+  --output-dir /tmp/thinking-handoff-refinement-replay
+```
+
+The replay runs the normal verifier, optional meta-verifier, proof refiner, and
+final verifier over the saved proof. It writes the complete candidate record
+to `result.json` and a compact call-count and score summary to `summary.json`.

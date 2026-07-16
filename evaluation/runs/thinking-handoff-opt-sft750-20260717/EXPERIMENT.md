@@ -680,6 +680,11 @@ the same SFT-750 runtime. This tests whether verification can repair the
 parser-valid but mathematically incorrect restarted proof instead of spending
 the only refinement allowance on context reset.
 
+`evaluate_thinking_handoff_refinement.py` replays the saved 100,000-token
+restart directly, so this experiment measures only verification and
+refinement. It does not pay for or introduce sampling variance from another
+long proof-generation call.
+
 ## Current validation
 
 - Targeted Ruff checks pass.
