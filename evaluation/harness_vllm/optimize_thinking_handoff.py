@@ -22,12 +22,13 @@ try:
         HANDOFF_REQUIRED_SECTIONS,
         HANDOFF_SECTION_MAX_TOKENS,
         HANDOFF_VARIANTS,
+        MAP_REDUCE_SECTION_MAX_TOKENS,
         SavedProofGenerationCall,
         assemble_handoff,
         build_fresh_handoff_section_prompt_ids,
-        build_handoff_from_digests_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
+        build_handoff_section_from_digests_prompt_ids,
         build_handoff_section_instruction,
         build_research_window_digest_prompt_ids,
         build_user_turn_prompt_ids,
@@ -48,12 +49,13 @@ except ModuleNotFoundError as exc:
         HANDOFF_REQUIRED_SECTIONS,
         HANDOFF_SECTION_MAX_TOKENS,
         HANDOFF_VARIANTS,
+        MAP_REDUCE_SECTION_MAX_TOKENS,
         SavedProofGenerationCall,
         assemble_handoff,
         build_fresh_handoff_section_prompt_ids,
-        build_handoff_from_digests_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
+        build_handoff_section_from_digests_prompt_ids,
         build_handoff_section_instruction,
         build_research_window_digest_prompt_ids,
         build_user_turn_prompt_ids,
@@ -112,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--digest-max-tokens",
         type=int,
-        default=320,
+        default=160,
         help="Per-window completion cap for map-reduce digest extraction.",
     )
     parser.add_argument(
@@ -276,7 +278,7 @@ def call_handoff(
     generation_mode: str,
     repair_invalid: bool,
     digest_temperature: float = 0.2,
-    digest_max_tokens: int = 320,
+    digest_max_tokens: int = 160,
     map_reduce_final_max_tokens: int = 2048,
     top_p: float,
     request_timeout_seconds: float,
@@ -332,7 +334,7 @@ def call_handoff(
         }
 
     if generation_mode == "map_reduce":
-        problem, windows, context_metadata = prepare_handoff_research_windows(
+        _problem, windows, context_metadata = prepare_handoff_research_windows(
             tokenizer,
             original_input_prompt=prepared["record"].input_prompt,
             pre_force_text=prepared["pre_force_text"],
@@ -341,7 +343,6 @@ def call_handoff(
         for window_index, window in enumerate(windows):
             digest_prompt_ids = build_research_window_digest_prompt_ids(
                 tokenizer,
-                problem=problem,
                 window=window,
             )
             attempt = complete(
@@ -367,23 +368,39 @@ def call_handoff(
                 }
             )
 
-        prompt_ids = build_handoff_from_digests_prompt_ids(
-            tokenizer,
-            problem=problem,
-            digests=digests,
-            variant=variant,
-        )
-        attempts.append(
-            complete(
-                prompt_ids,
-                "final_handoff",
-                attempt_max_tokens=min(max_tokens, map_reduce_final_max_tokens),
+        sections: dict[str, str] = {}
+        reduce_attempts: list[dict[str, Any]] = []
+        for section in HANDOFF_REQUIRED_SECTIONS:
+            assistant_prefix = handoff_section_assistant_prefix(section)
+            section_prompt_ids = build_handoff_section_from_digests_prompt_ids(
+                tokenizer,
+                digests=digests,
+                section=section,
+                variant=variant,
             )
-        )
-        final_attempt = attempts[-1]
-        raw_output = final_attempt["raw_output"]
-        parsed = final_attempt["parsed"]
-        finish_reason = final_attempt["finish_reason"]
+            attempt = complete(
+                section_prompt_ids,
+                f"reduce_{section}",
+                assistant_prefix=assistant_prefix,
+                attempt_max_tokens=min(
+                    max_tokens,
+                    MAP_REDUCE_SECTION_MAX_TOKENS[section],
+                ),
+            )
+            section_content = normalize_handoff_section(
+                attempt["completion_text"],
+                section,
+            )
+            attempt["section"] = section
+            attempt["section_content"] = section_content
+            attempt["context_metadata"] = context_metadata
+            attempts.append(attempt)
+            reduce_attempts.append(attempt)
+            sections[section] = section_content
+        prompt_ids = reduce_attempts[0]["prompt_ids"]
+        raw_output = assemble_handoff(sections)
+        parsed = parse_handoff_response(raw_output)
+        finish_reason = "map_reduce_sectioned"
     elif generation_mode in {"sectioned", "fresh_sectioned"}:
         sections: dict[str, str] = {}
         for section in HANDOFF_REQUIRED_SECTIONS:

@@ -269,6 +269,47 @@ small reduce stage. A configuration is accepted only if its handoff is both
 valid and useful under manual review, then improves fresh round-1 proof
 completion before the next thinking cutoff.
 
+### Live smoke 6: first map-reduce implementation
+
+One `evidence_first`, temperature-0.7 case completed quickly:
+
+```text
+aggregate prompt tokens=38571
+aggregate completion tokens=2678
+latency=16.6s
+final reduce prompt tokens=3340
+finish_reason=stop
+valid=false
+```
+
+The design was rejected for two independent reasons:
+
+- every one of the eight 320-token map calls reached its length cap and mostly
+  described or restated the problem instead of extracting state;
+- the monolithic reducer copied the XML schema descriptions, closed
+  `<established>` as `</handoff>`, and therefore produced invalid output.
+
+Inspection of the exact saved source explains why even chronological sampling
+was poor. For this case, useful reasoning occupies only the first roughly
+8,000 characters. The remaining more than 230,000 characters repeatedly emit
+variants of:
+
+```text
+(1,?) all; (2,2) missing;
+```
+
+The exact fixed-block repetition detector missed this variable-alignment loop.
+The next revision therefore:
+
+1. detects the first pair of low-novelty token windows and discards the tail
+   before window selection;
+2. omits the full original problem from map calls;
+3. requires at most five typed extractive lines (`P`, `A`, `F`, `U`, `N`) and
+   deterministically drops nonconforming prose;
+4. reduces each final handoff section independently from the typed digests;
+5. assembles final XML in code, so one malformed generation cannot invalidate
+   the handoff.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof

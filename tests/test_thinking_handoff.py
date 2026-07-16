@@ -28,6 +28,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     build_fresh_handoff_section_prompt_ids,
     build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
+    build_handoff_section_from_digests_prompt_ids,
     build_handoff_section_instruction,
     build_research_window_digest_prompt_ids,
     build_user_turn_prompt_ids,
@@ -39,6 +40,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     remove_final_partial_force_text,
     select_reasoning_token_windows,
     truncate_consecutive_token_repetition,
+    truncate_low_novelty_token_tail,
 )
 
 
@@ -280,7 +282,6 @@ class HandoffPromptTests(unittest.TestCase):
         digest_prompt = FakeTokenizer.decode(
             build_research_window_digest_prompt_ids(
                 FakeTokenizer(),
-                problem=problem,
                 window=windows[0],
             )
         )
@@ -306,9 +307,40 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertIn("A proved local fact.", final_prompt)
         self.assertIn("below 1,200 words", final_prompt)
         self.assertEqual(
-            normalize_research_digest("<digest>Useful fact.</digest>ignored"),
-            "Useful fact.",
+            normalize_research_digest("<digest>P | Useful fact.</digest>ignored"),
+            "P | Useful fact.",
         )
+        section_prompt = FakeTokenizer.decode(
+            build_handoff_section_from_digests_prompt_ids(
+                FakeTokenizer(),
+                digests=[
+                    {
+                        "start": windows[0]["start"],
+                        "end": windows[0]["end"],
+                        "text": "P | A proved local fact.",
+                    }
+                ],
+                section="established",
+                variant="evidence_first",
+            )
+        )
+        self.assertNotIn("Original problem:", section_prompt)
+        self.assertIn("P | A proved local fact.", section_prompt)
+
+    def test_low_novelty_tail_truncates_repetitive_loop(self):
+        prefix = list(range(3_000))
+        repeated = [7, 8, 9, 10] * 2_000
+        cleaned, metadata = truncate_low_novelty_token_tail(
+            prefix + repeated,
+            window_tokens=512,
+            stride_tokens=128,
+            minimum_prefix_tokens=1_024,
+        )
+
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata["kind"], "low_novelty")
+        self.assertGreaterEqual(len(cleaned), len(prefix) - 512)
+        self.assertLess(len(cleaned), len(prefix) + 512)
 
     def test_optimizer_builds_map_reduce_handoff(self):
         requests = []
@@ -316,7 +348,7 @@ class HandoffPromptTests(unittest.TestCase):
             SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        text=f"Digest {index}.</digest>",
+                        text=f"P | Digest {index}.</digest>",
                         finish_reason="stop",
                     )
                 ],
@@ -328,20 +360,21 @@ class HandoffPromptTests(unittest.TestCase):
             )
             for index in range(8)
         ]
-        responses.append(
+        responses.extend(
             SimpleNamespace(
                 choices=[
                     SimpleNamespace(
-                        text=VALID_HANDOFF_AFTER_PREFIX,
+                        text=f"Section content {index}.",
                         finish_reason="stop",
                     )
                 ],
                 usage=SimpleNamespace(
                     prompt_tokens=200,
-                    completion_tokens=20,
-                    total_tokens=220,
+                    completion_tokens=10,
+                    total_tokens=210,
                 ),
             )
+            for index in range(6)
         )
 
         class FakeCompletions:
@@ -358,6 +391,7 @@ class HandoffPromptTests(unittest.TestCase):
             "<｜begin▁of▁sentence｜>System<｜User｜>Problem: prove X."
             "<｜Assistant｜><think>\n"
         )
+        reasoning = "".join(chr(0x10000 + index) for index in range(40_000))
         with tempfile.TemporaryDirectory() as directory:
             with patch(
                 "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
@@ -366,7 +400,7 @@ class HandoffPromptTests(unittest.TestCase):
                 result = call_handoff(
                     prepared={
                         "record": SimpleNamespace(input_prompt=original),
-                        "pre_force_text": original + ("reasoning " * 5_000),
+                        "pre_force_text": original + reasoning,
                         "pre_force_ids": [],
                         "source": "rank0/llm_calls/1/call.txt",
                         "rank": "rank0",
@@ -387,18 +421,24 @@ class HandoffPromptTests(unittest.TestCase):
                     output_dir=Path(directory),
                 )
 
-        self.assertEqual(len(result["attempts"]), 9)
+        self.assertEqual(len(result["attempts"]), 14)
         self.assertTrue(result["parsed"]["is_valid"])
-        self.assertEqual(result["usage"]["completion_tokens"], 100)
+        self.assertEqual(result["usage"]["completion_tokens"], 140)
         self.assertEqual(
             [request["temperature"] for request in requests[:8]],
             [0.2] * 8,
         )
-        self.assertEqual(requests[-1]["temperature"], 0.7)
-        self.assertEqual(requests[-1]["max_tokens"], 2048)
+        self.assertEqual(
+            [request["temperature"] for request in requests[8:]],
+            [0.7] * 6,
+        )
+        self.assertEqual(
+            [request["max_tokens"] for request in requests[8:]],
+            [320, 256, 192, 160, 128, 192],
+        )
         self.assertEqual(
             [attempt["digest"] for attempt in result["attempts"][:2]],
-            ["Digest 0.", "Digest 1."],
+            ["P | Digest 0.", "P | Digest 1."],
         )
 
     def test_optimizer_builds_sectioned_handoff(self):

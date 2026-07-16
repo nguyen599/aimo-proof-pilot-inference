@@ -34,6 +34,14 @@ HANDOFF_SECTION_MAX_TOKENS = {
     "bottleneck": 256,
     "next_steps": 384,
 }
+MAP_REDUCE_SECTION_MAX_TOKENS = {
+    "established": 320,
+    "promising": 256,
+    "failed": 192,
+    "uncertain": 160,
+    "bottleneck": 128,
+    "next_steps": 192,
+}
 HANDOFF_SECTION_DESCRIPTIONS = {
     "established": (
         "Only facts, exact equations, reductions, or partial lemmas that were "
@@ -439,6 +447,61 @@ def truncate_consecutive_token_repetition(
     return values, None
 
 
+def truncate_low_novelty_token_tail(
+    token_ids: list[int],
+    *,
+    window_tokens: int = 2_048,
+    stride_tokens: int = 512,
+    ngram_tokens: int = 8,
+    ngram_stride: int = 2,
+    novelty_threshold: float = 0.12,
+    minimum_consecutive_windows: int = 2,
+    minimum_prefix_tokens: int = 2_048,
+) -> tuple[list[int], dict[str, Any] | None]:
+    values = [int(value) for value in token_ids]
+    if len(values) < minimum_prefix_tokens + window_tokens:
+        return values, None
+
+    low_novelty_start: int | None = None
+    low_novelty_windows: list[dict[str, Any]] = []
+    final_start = len(values) - window_tokens
+    for start in range(minimum_prefix_tokens, final_start + 1, stride_tokens):
+        window = values[start : start + window_tokens]
+        ngrams = [
+            tuple(window[index : index + ngram_tokens])
+            for index in range(
+                0,
+                len(window) - ngram_tokens + 1,
+                ngram_stride,
+            )
+        ]
+        novelty = len(set(ngrams)) / len(ngrams) if ngrams else 1.0
+        if novelty <= novelty_threshold:
+            if low_novelty_start is None:
+                low_novelty_start = start
+                low_novelty_windows = []
+            low_novelty_windows.append(
+                {
+                    "start": start,
+                    "end": start + window_tokens,
+                    "novelty": novelty,
+                }
+            )
+            if len(low_novelty_windows) >= minimum_consecutive_windows:
+                return values[:low_novelty_start], {
+                    "kind": "low_novelty",
+                    "start": low_novelty_start,
+                    "window_tokens": window_tokens,
+                    "ngram_tokens": ngram_tokens,
+                    "threshold": novelty_threshold,
+                    "windows": low_novelty_windows,
+                }
+        else:
+            low_novelty_start = None
+            low_novelty_windows = []
+    return values, None
+
+
 def select_reasoning_token_windows(
     token_ids: list[int],
     *,
@@ -482,6 +545,9 @@ def prepare_handoff_research_windows(
     cleaned_reasoning_ids, repetition = truncate_consecutive_token_repetition(
         original_reasoning_ids
     )
+    cleaned_reasoning_ids, low_novelty = truncate_low_novelty_token_tail(
+        cleaned_reasoning_ids
+    )
     selected = select_reasoning_token_windows(
         cleaned_reasoning_ids,
         total_tokens=reasoning_total_tokens,
@@ -502,6 +568,7 @@ def prepare_handoff_research_windows(
             "reasoning_original_tokens": len(original_reasoning_ids),
             "reasoning_cleaned_tokens": len(cleaned_reasoning_ids),
             "repetition": repetition,
+            "low_novelty": low_novelty,
             "window_ranges": [(window["start"], window["end"]) for window in windows],
         },
     )
@@ -512,11 +579,13 @@ def render_handoff_extraction_prompt_ids(
     *,
     user_content: str,
     assistant_prefix: str,
+    system_content: str | None = None,
 ) -> list[int]:
     messages = [
         {
             "role": "system",
-            "content": (
+            "content": system_content
+            or (
                 "You are a mathematical research-state compressor. Follow the "
                 "latest extraction instruction exactly. Do not solve the problem."
             ),
@@ -583,30 +652,34 @@ def build_fresh_handoff_section_prompt_ids(
 def build_research_window_digest_prompt_ids(
     tokenizer: Any,
     *,
-    problem: str,
     window: dict[str, Any],
 ) -> list[int]:
-    user_content = f"""Original problem:
-{problem}
+    user_content = f"""Audit one chronological window from an unfinished proof attempt. The fresh solver already has the original problem, so never restate it.
 
-The text below is one chronological window from an unfinished proof attempt:
+Return at most five concise lines. Every line must use exactly one prefix:
+- P | rigorously established fact, formula, reduction, or partial lemma
+- A | concrete approach or construction that may be worth continuing
+- F | failed approach followed by its exact obstruction
+- U | explicitly unproved claim or assumption
+- N | local bottleneck or next useful step
+
+Use only mathematical state supported by the quoted window. Do not solve, infer a final answer, discuss this task, describe the window, or repeat an item. If the window has no reusable state, output exactly:
+N | No reusable mathematical state was found in this window.
 
 <research_window token_start="{window["start"]}" token_end="{window["end"]}">
 {window["text"]}
 </research_window>
 
-Extract only reusable mathematical state from this window. Use at most 220 words. Include only:
-- facts, formulas, reductions, or partial lemmas actually justified here;
-- concrete constructions or routes worth continuing;
-- failed routes with their exact obstruction;
-- explicitly unproved claims;
-- the local bottleneck or next useful step.
-
-Do not restate the problem, continue solving, invent claims, discuss formatting, or repeat an item. Output plain concise notes only."""
+Output only the typed lines now."""
     return render_handoff_extraction_prompt_ids(
         tokenizer,
         user_content=user_content,
         assistant_prefix="\n</think>\n\n<digest>\n",
+        system_content=(
+            "You are an extractive mathematical audit tool. Copy or lightly "
+            "normalize only research state present in the quoted window. Never "
+            "continue the proof or restate its problem."
+        ),
     )
 
 
@@ -615,7 +688,19 @@ def normalize_research_digest(text: str) -> str:
     if "</digest>" in content:
         content = content.split("</digest>", 1)[0]
     content = re.sub(r"(?is)</?digest>", "", content).strip()
-    return content or "No reusable mathematical state was found in this window."
+    typed_lines: list[str] = []
+    for line in content.splitlines():
+        match = re.match(r"^\s*[-*]?\s*([PAFUN])\s*\|\s*(.+?)\s*$", line)
+        if not match:
+            continue
+        normalized = f"{match.group(1)} | {match.group(2)}"
+        if normalized not in typed_lines:
+            typed_lines.append(normalized)
+        if len(typed_lines) >= 5:
+            break
+    if typed_lines:
+        return "\n".join(typed_lines)
+    return "N | No reusable mathematical state was found in this window."
 
 
 def build_handoff_from_digests_prompt_ids(
@@ -645,6 +730,39 @@ def build_handoff_from_digests_prompt_ids(
         tokenizer,
         user_content=user_content,
         assistant_prefix=HANDOFF_ASSISTANT_PREFIX,
+    )
+
+
+def build_handoff_section_from_digests_prompt_ids(
+    tokenizer: Any,
+    *,
+    digests: list[dict[str, Any]],
+    section: str,
+    variant: str,
+) -> list[int]:
+    digest_text = "\n\n".join(
+        (
+            f'<research_digest token_start="{digest["start"]}" '
+            f'token_end="{digest["end"]}">\n'
+            f"{digest['text']}\n"
+            "</research_digest>"
+        )
+        for digest in digests
+    )
+    user_content = (
+        "The fresh solver already has the original problem. Organize only the "
+        "extractive research digests below; do not restate or solve the problem.\n\n"
+        f"{digest_text}\n\n"
+        f"{build_handoff_section_instruction(section, variant)}"
+    )
+    return render_handoff_extraction_prompt_ids(
+        tokenizer,
+        user_content=user_content,
+        assistant_prefix=handoff_section_assistant_prefix(section),
+        system_content=(
+            "You are a mathematical research-state editor. Use only the supplied "
+            "typed digests. Never add proof steps, conjectures, or problem text."
+        ),
     )
 
 
