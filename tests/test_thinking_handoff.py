@@ -26,12 +26,16 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     append_restart_instruction,
     assemble_handoff,
     build_fresh_handoff_section_prompt_ids,
+    build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
     build_handoff_section_instruction,
+    build_research_window_digest_prompt_ids,
     build_user_turn_prompt_ids,
     insert_restart_instruction_into_rendered_prompt,
+    normalize_research_digest,
     parse_handoff_response,
     parse_saved_proof_generation_call,
+    prepare_handoff_research_windows,
     remove_final_partial_force_text,
     select_reasoning_token_windows,
     truncate_consecutive_token_repetition,
@@ -258,6 +262,143 @@ class HandoffPromptTests(unittest.TestCase):
         )
         self.assertEqual(
             [(start, end) for start, end, _ in windows], [(0, 10), (90, 100)]
+        )
+
+    def test_map_reduce_prompts_keep_window_extraction_separate(self):
+        original = (
+            "<｜begin▁of▁sentence｜>System<｜User｜>Problem: prove X.\n\n"
+            "Respond in EXACTLY this format:\n<solution>...</solution>"
+            "<｜Assistant｜><think>\n"
+        )
+        problem, windows, metadata = prepare_handoff_research_windows(
+            FakeTokenizer(),
+            original_input_prompt=original,
+            pre_force_text=original + "first fact; failed route; next idea",
+            reasoning_total_tokens=18,
+            reasoning_window_tokens=9,
+        )
+        digest_prompt = FakeTokenizer.decode(
+            build_research_window_digest_prompt_ids(
+                FakeTokenizer(),
+                problem=problem,
+                window=windows[0],
+            )
+        )
+        final_prompt = FakeTokenizer.decode(
+            build_handoff_from_digests_prompt_ids(
+                FakeTokenizer(),
+                problem=problem,
+                digests=[
+                    {
+                        "start": windows[0]["start"],
+                        "end": windows[0]["end"],
+                        "text": "A proved local fact.",
+                    }
+                ],
+                variant="evidence_first",
+            )
+        )
+
+        self.assertEqual(len(windows), 2)
+        self.assertEqual(metadata["window_ranges"], [(0, 9), (26, 35)])
+        self.assertIn("one chronological window", digest_prompt)
+        self.assertNotIn("below 1,200 words", digest_prompt)
+        self.assertIn("A proved local fact.", final_prompt)
+        self.assertIn("below 1,200 words", final_prompt)
+        self.assertEqual(
+            normalize_research_digest("<digest>Useful fact.</digest>ignored"),
+            "Useful fact.",
+        )
+
+    def test_optimizer_builds_map_reduce_handoff(self):
+        requests = []
+        responses = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        text=f"Digest {index}.</digest>",
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=10,
+                    total_tokens=110,
+                ),
+            )
+            for index in range(8)
+        ]
+        responses.append(
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        text=VALID_HANDOFF_AFTER_PREFIX,
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=200,
+                    completion_tokens=20,
+                    total_tokens=220,
+                ),
+            )
+        )
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                requests.append(kwargs)
+                return responses.pop(0)
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+                self.completions = FakeCompletions()
+
+        original = (
+            "<｜begin▁of▁sentence｜>System<｜User｜>Problem: prove X."
+            "<｜Assistant｜><think>\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "record": SimpleNamespace(input_prompt=original),
+                        "pre_force_text": original + ("reasoning " * 5_000),
+                        "pre_force_ids": [],
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": False,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant="evidence_first",
+                    temperature=0.7,
+                    max_tokens=4096,
+                    generation_mode="map_reduce",
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                )
+
+        self.assertEqual(len(result["attempts"]), 9)
+        self.assertTrue(result["parsed"]["is_valid"])
+        self.assertEqual(result["usage"]["completion_tokens"], 100)
+        self.assertEqual(
+            [request["temperature"] for request in requests[:8]],
+            [0.2] * 8,
+        )
+        self.assertEqual(requests[-1]["temperature"], 0.7)
+        self.assertEqual(requests[-1]["max_tokens"], 2048)
+        self.assertEqual(
+            [attempt["digest"] for attempt in result["attempts"][:2]],
+            ["Digest 0.", "Digest 1."],
         )
 
     def test_optimizer_builds_sectioned_handoff(self):

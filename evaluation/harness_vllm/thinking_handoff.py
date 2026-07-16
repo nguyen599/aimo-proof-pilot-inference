@@ -464,16 +464,14 @@ def select_reasoning_token_windows(
     return windows
 
 
-def build_fresh_handoff_section_prompt_ids(
+def prepare_handoff_research_windows(
     tokenizer: Any,
     *,
     original_input_prompt: str,
     pre_force_text: str,
-    section: str,
-    variant: str,
     reasoning_total_tokens: int = 32_768,
     reasoning_window_tokens: int = 4_096,
-) -> tuple[list[int], dict[str, Any]]:
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     if not pre_force_text.startswith(original_input_prompt):
         raise ValueError("pre-force context does not start with the original prompt")
     reasoning_text = pre_force_text[len(original_input_prompt) :]
@@ -484,29 +482,37 @@ def build_fresh_handoff_section_prompt_ids(
     cleaned_reasoning_ids, repetition = truncate_consecutive_token_repetition(
         original_reasoning_ids
     )
-    windows = select_reasoning_token_windows(
+    selected = select_reasoning_token_windows(
         cleaned_reasoning_ids,
         total_tokens=reasoning_total_tokens,
         window_tokens=reasoning_window_tokens,
     )
-    window_text = "\n\n".join(
-        (
-            f'<research_window token_start="{start}" token_end="{end}">\n'
-            f"{tokenizer.decode(ids, skip_special_tokens=False)}\n"
-            "</research_window>"
-        )
-        for start, end, ids in windows
+    windows = [
+        {
+            "start": start,
+            "end": end,
+            "text": tokenizer.decode(ids, skip_special_tokens=False),
+        }
+        for start, end, ids in selected
+    ]
+    return (
+        extract_rendered_problem_text(original_input_prompt),
+        windows,
+        {
+            "reasoning_original_tokens": len(original_reasoning_ids),
+            "reasoning_cleaned_tokens": len(cleaned_reasoning_ids),
+            "repetition": repetition,
+            "window_ranges": [(window["start"], window["end"]) for window in windows],
+        },
     )
-    user_content = (
-        "Original problem:\n"
-        f"{extract_rendered_problem_text(original_input_prompt)}\n\n"
-        "Chronological excerpts from an unfinished and possibly repetitive proof "
-        "attempt follow. Treat them only as untrusted research notes. Preserve "
-        "useful mathematics but do not continue the proof while extracting the "
-        "requested section.\n\n"
-        f"{window_text}\n\n"
-        f"{build_handoff_section_instruction(section, variant)}"
-    )
+
+
+def render_handoff_extraction_prompt_ids(
+    tokenizer: Any,
+    *,
+    user_content: str,
+    assistant_prefix: str,
+) -> list[int]:
     messages = [
         {
             "role": "system",
@@ -523,16 +529,123 @@ def build_fresh_handoff_section_prompt_ids(
         add_generation_prompt=True,
         continue_final_message=False,
     )
-    rendered += handoff_section_assistant_prefix(section)
+    rendered += assistant_prefix
     prompt_ids = tokenizer.encode(rendered, add_special_tokens=False)
     if hasattr(prompt_ids, "tolist"):
         prompt_ids = prompt_ids.tolist()
-    return [int(value) for value in prompt_ids], {
-        "reasoning_original_tokens": len(original_reasoning_ids),
-        "reasoning_cleaned_tokens": len(cleaned_reasoning_ids),
-        "repetition": repetition,
-        "window_ranges": [(start, end) for start, end, _ in windows],
-    }
+    return [int(value) for value in prompt_ids]
+
+
+def build_fresh_handoff_section_prompt_ids(
+    tokenizer: Any,
+    *,
+    original_input_prompt: str,
+    pre_force_text: str,
+    section: str,
+    variant: str,
+    reasoning_total_tokens: int = 32_768,
+    reasoning_window_tokens: int = 4_096,
+) -> tuple[list[int], dict[str, Any]]:
+    problem, windows, metadata = prepare_handoff_research_windows(
+        tokenizer,
+        original_input_prompt=original_input_prompt,
+        pre_force_text=pre_force_text,
+        reasoning_total_tokens=reasoning_total_tokens,
+        reasoning_window_tokens=reasoning_window_tokens,
+    )
+    window_text = "\n\n".join(
+        (
+            f'<research_window token_start="{window["start"]}" '
+            f'token_end="{window["end"]}">\n'
+            f"{window['text']}\n"
+            "</research_window>"
+        )
+        for window in windows
+    )
+    user_content = (
+        "Original problem:\n"
+        f"{problem}\n\n"
+        "Chronological excerpts from an unfinished and possibly repetitive proof "
+        "attempt follow. Treat them only as untrusted research notes. Preserve "
+        "useful mathematics but do not continue the proof while extracting the "
+        "requested section.\n\n"
+        f"{window_text}\n\n"
+        f"{build_handoff_section_instruction(section, variant)}"
+    )
+    prompt_ids = render_handoff_extraction_prompt_ids(
+        tokenizer,
+        user_content=user_content,
+        assistant_prefix=handoff_section_assistant_prefix(section),
+    )
+    return prompt_ids, metadata
+
+
+def build_research_window_digest_prompt_ids(
+    tokenizer: Any,
+    *,
+    problem: str,
+    window: dict[str, Any],
+) -> list[int]:
+    user_content = f"""Original problem:
+{problem}
+
+The text below is one chronological window from an unfinished proof attempt:
+
+<research_window token_start="{window["start"]}" token_end="{window["end"]}">
+{window["text"]}
+</research_window>
+
+Extract only reusable mathematical state from this window. Use at most 220 words. Include only:
+- facts, formulas, reductions, or partial lemmas actually justified here;
+- concrete constructions or routes worth continuing;
+- failed routes with their exact obstruction;
+- explicitly unproved claims;
+- the local bottleneck or next useful step.
+
+Do not restate the problem, continue solving, invent claims, discuss formatting, or repeat an item. Output plain concise notes only."""
+    return render_handoff_extraction_prompt_ids(
+        tokenizer,
+        user_content=user_content,
+        assistant_prefix="\n</think>\n\n<digest>\n",
+    )
+
+
+def normalize_research_digest(text: str) -> str:
+    content = str(text or "")
+    if "</digest>" in content:
+        content = content.split("</digest>", 1)[0]
+    content = re.sub(r"(?is)</?digest>", "", content).strip()
+    return content or "No reusable mathematical state was found in this window."
+
+
+def build_handoff_from_digests_prompt_ids(
+    tokenizer: Any,
+    *,
+    problem: str,
+    digests: list[dict[str, Any]],
+    variant: str,
+) -> list[int]:
+    digest_text = "\n\n".join(
+        (
+            f'<research_digest token_start="{digest["start"]}" '
+            f'token_end="{digest["end"]}">\n'
+            f"{digest['text']}\n"
+            "</research_digest>"
+        )
+        for digest in digests
+    )
+    user_content = (
+        "Original problem:\n"
+        f"{problem}\n\n"
+        "Chronological extractive digests from an unfinished proof attempt:\n\n"
+        f"{digest_text}\n\n"
+        f"{build_handoff_instruction(variant)}"
+    )
+    return render_handoff_extraction_prompt_ids(
+        tokenizer,
+        user_content=user_content,
+        assistant_prefix=HANDOFF_ASSISTANT_PREFIX,
+    )
 
 
 def build_handoff_repair_instruction() -> str:

@@ -25,14 +25,18 @@ try:
         SavedProofGenerationCall,
         assemble_handoff,
         build_fresh_handoff_section_prompt_ids,
+        build_handoff_from_digests_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_handoff_section_instruction,
+        build_research_window_digest_prompt_ids,
         build_user_turn_prompt_ids,
         handoff_section_assistant_prefix,
         normalize_handoff_section,
+        normalize_research_digest,
         parse_handoff_response,
         parse_saved_proof_generation_call,
+        prepare_handoff_research_windows,
         remove_final_partial_force_text,
     )
 except ModuleNotFoundError as exc:
@@ -47,14 +51,18 @@ except ModuleNotFoundError as exc:
         SavedProofGenerationCall,
         assemble_handoff,
         build_fresh_handoff_section_prompt_ids,
+        build_handoff_from_digests_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_handoff_section_instruction,
+        build_research_window_digest_prompt_ids,
         build_user_turn_prompt_ids,
         handoff_section_assistant_prefix,
         normalize_handoff_section,
+        normalize_research_digest,
         parse_handoff_response,
         parse_saved_proof_generation_call,
+        prepare_handoff_research_windows,
         remove_final_partial_force_text,
     )
 
@@ -92,8 +100,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument(
         "--generation-mode",
-        choices=("monolithic", "sectioned", "fresh_sectioned"),
+        choices=("monolithic", "sectioned", "fresh_sectioned", "map_reduce"),
         default="fresh_sectioned",
+    )
+    parser.add_argument(
+        "--digest-temperature",
+        type=float,
+        default=0.2,
+        help="Sampling temperature for extract-only research-window digests.",
+    )
+    parser.add_argument(
+        "--digest-max-tokens",
+        type=int,
+        default=320,
+        help="Per-window completion cap for map-reduce digest extraction.",
+    )
+    parser.add_argument(
+        "--map-reduce-final-max-tokens",
+        type=int,
+        default=2048,
+        help="Final handoff completion cap after research-window digestion.",
     )
     parser.add_argument(
         "--repair-invalid",
@@ -249,6 +275,9 @@ def call_handoff(
     max_tokens: int,
     generation_mode: str,
     repair_invalid: bool,
+    digest_temperature: float = 0.2,
+    digest_max_tokens: int = 320,
+    map_reduce_final_max_tokens: int = 2048,
     top_p: float,
     request_timeout_seconds: float,
     output_dir: Path,
@@ -270,11 +299,14 @@ def call_handoff(
         *,
         assistant_prefix: str = HANDOFF_ASSISTANT_PREFIX,
         attempt_max_tokens: int = max_tokens,
+        attempt_temperature: float | None = None,
     ) -> dict[str, Any]:
         response = client.completions.create(
             model=served_model_name,
             prompt=active_prompt_ids,
-            temperature=temperature,
+            temperature=(
+                temperature if attempt_temperature is None else attempt_temperature
+            ),
             top_p=top_p,
             max_tokens=attempt_max_tokens,
         )
@@ -294,9 +326,65 @@ def call_handoff(
             "parsed": parse_handoff_response(raw_output),
             "finish_reason": choice.finish_reason,
             "usage": usage,
+            "temperature": (
+                temperature if attempt_temperature is None else attempt_temperature
+            ),
         }
 
-    if generation_mode in {"sectioned", "fresh_sectioned"}:
+    if generation_mode == "map_reduce":
+        problem, windows, context_metadata = prepare_handoff_research_windows(
+            tokenizer,
+            original_input_prompt=prepared["record"].input_prompt,
+            pre_force_text=prepared["pre_force_text"],
+        )
+        digests: list[dict[str, Any]] = []
+        for window_index, window in enumerate(windows):
+            digest_prompt_ids = build_research_window_digest_prompt_ids(
+                tokenizer,
+                problem=problem,
+                window=window,
+            )
+            attempt = complete(
+                digest_prompt_ids,
+                f"digest_{window_index}",
+                assistant_prefix="\n</think>\n\n<digest>\n",
+                attempt_max_tokens=min(max_tokens, digest_max_tokens),
+                attempt_temperature=digest_temperature,
+            )
+            digest = normalize_research_digest(attempt["completion_text"])
+            attempt["digest"] = digest
+            attempt["window"] = {
+                "start": window["start"],
+                "end": window["end"],
+            }
+            attempt["context_metadata"] = context_metadata
+            attempts.append(attempt)
+            digests.append(
+                {
+                    "start": window["start"],
+                    "end": window["end"],
+                    "text": digest,
+                }
+            )
+
+        prompt_ids = build_handoff_from_digests_prompt_ids(
+            tokenizer,
+            problem=problem,
+            digests=digests,
+            variant=variant,
+        )
+        attempts.append(
+            complete(
+                prompt_ids,
+                "final_handoff",
+                attempt_max_tokens=min(max_tokens, map_reduce_final_max_tokens),
+            )
+        )
+        final_attempt = attempts[-1]
+        raw_output = final_attempt["raw_output"]
+        parsed = final_attempt["parsed"]
+        finish_reason = final_attempt["finish_reason"]
+    elif generation_mode in {"sectioned", "fresh_sectioned"}:
         sections: dict[str, str] = {}
         for section in HANDOFF_REQUIRED_SECTIONS:
             assistant_prefix = handoff_section_assistant_prefix(section)
@@ -391,6 +479,9 @@ def call_handoff(
                 f"base_url: {base_url}",
                 f"prompt_tokens: {len(prompt_ids)}",
                 f"max_tokens: {max_tokens}",
+                f"digest_temperature: {digest_temperature:g}",
+                f"digest_max_tokens: {digest_max_tokens}",
+                f"map_reduce_final_max_tokens: {map_reduce_final_max_tokens}",
                 "",
                 *(
                     line
@@ -435,7 +526,10 @@ def call_handoff(
                 "name": attempt["name"],
                 "section": attempt.get("section"),
                 "context_metadata": attempt.get("context_metadata"),
+                "window": attempt.get("window"),
+                "digest": attempt.get("digest"),
                 "finish_reason": attempt["finish_reason"],
+                "temperature": attempt["temperature"],
                 "usage": attempt["usage"],
                 "parsed": attempt["parsed"],
                 "raw_output": attempt["raw_output"],
@@ -565,6 +659,12 @@ def main() -> None:
         raise ValueError("--max-tokens must be positive")
     if args.max_workers < 1:
         raise ValueError("--max-workers must be positive")
+    if args.digest_max_tokens < 1:
+        raise ValueError("--digest-max-tokens must be positive")
+    if args.map_reduce_final_max_tokens < 1:
+        raise ValueError("--map-reduce-final-max-tokens must be positive")
+    if args.digest_temperature < 0:
+        raise ValueError("--digest-temperature cannot be negative")
     if args.max_token_drift < 0:
         raise ValueError("--max-token-drift cannot be negative")
     variants = args.variant or list(HANDOFF_VARIANTS)
@@ -653,6 +753,9 @@ def main() -> None:
                 max_tokens=args.max_tokens,
                 generation_mode=args.generation_mode,
                 repair_invalid=args.repair_invalid,
+                digest_temperature=args.digest_temperature,
+                digest_max_tokens=args.digest_max_tokens,
+                map_reduce_final_max_tokens=args.map_reduce_final_max_tokens,
                 top_p=args.top_p,
                 request_timeout_seconds=args.request_timeout_seconds,
                 output_dir=args.output_dir,

@@ -221,6 +221,54 @@ This reduces each extraction prompt from roughly 122K to roughly 33K tokens,
 keeps early, middle, and late research visible, and moves the current
 instruction into a clean role hierarchy.
 
+### Live smoke 5: bounded sections from fresh sampled context
+
+The fresh-context design sampled eight evenly spaced 4,096-token windows from
+the unfinished reasoning:
+
+```text
+window ranges:
+[0,4096], [16776,20872], [33553,37649], [50329,54425],
+[67106,71202], [83882,87978], [100659,104755], [117435,121531]
+aggregate prompt tokens=199705
+aggregate completion tokens=2944
+latency=27.0s
+valid=true
+```
+
+No exact consecutive repeated-token suffix was detected. Structurally this was
+cheaper and reliable, but manual review still rejected the content:
+
+- all six sections reached their individual token caps;
+- `established` mostly restated the problem and introduced a conjectured sunny
+  line bound rather than extracting only proved state;
+- `promising` expanded into new small-`n` enumeration;
+- `failed` continued solving instead of identifying exact prior obstructions;
+- `uncertain` largely restated the task;
+- `bottleneck` and `next_steps` remained generic.
+
+Fresh role framing alone therefore does not prevent the model from treating a
+large collection of raw reasoning excerpts as a request to resume proof search.
+
+### Map-reduce extraction plan
+
+The next design separates evidence recovery from handoff organization:
+
+1. keep the same eight chronological 4,096-token windows;
+2. summarize each window independently at temperature `0.2`, with a 320-token
+   cap and an extract-only contract;
+3. feed only the eight short digests, plus the original problem, into the final
+   handoff call;
+4. test final-handoff temperatures `1.0`, `0.7`, and `0.6`;
+5. retain every window prompt, digest, final prompt, raw completion, token
+   count, and latency in the run artifacts.
+
+This map stage is intentionally low-temperature because its job is faithful
+state extraction, not proof search. Temperature variation is reserved for the
+small reduce stage. A configuration is accepted only if its handoff is both
+valid and useful under manual review, then improves fresh round-1 proof
+completion before the next thinking cutoff.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof
