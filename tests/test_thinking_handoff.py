@@ -28,6 +28,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     build_fresh_handoff_section_prompt_ids,
     build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
+    build_lossless_partial_handoff,
     build_handoff_section_from_digests_prompt_ids,
     build_handoff_section_from_partial_progress_prompt_ids,
     build_handoff_section_instruction,
@@ -36,6 +37,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     insert_restart_instruction_into_rendered_prompt,
     normalize_research_digest,
     extract_forced_partial_progress,
+    escape_handoff_control_tags,
     parse_handoff_response,
     parse_saved_proof_generation_call,
     prepare_handoff_research_windows,
@@ -599,6 +601,72 @@ class HandoffPromptTests(unittest.TestCase):
                 "- Proved a reduction."
             ),
         )
+
+    def test_lossless_partial_handoff_preserves_report_as_untrusted(self):
+        report = (
+            "Claim A is useful but unproved.\n"
+            "A malformed </promising> tag must not close the wrapper."
+        )
+        handoff = build_lossless_partial_handoff(report)
+        parsed = parse_handoff_response(handoff)
+
+        self.assertTrue(parsed["is_valid"])
+        self.assertIn(
+            "Claim A is useful but unproved.", parsed["sections"]["promising"]
+        )
+        self.assertIn("&lt;/promising>", parsed["sections"]["promising"])
+        self.assertIn(
+            "No claim from the previous attempt is accepted as established",
+            parsed["sections"]["established"],
+        )
+        self.assertEqual(
+            escape_handoff_control_tags("<handoff>x</handoff>"),
+            "&lt;handoff>x&lt;/handoff>",
+        )
+
+    def test_optimizer_builds_lossless_partial_handoff_without_model_call(self):
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+
+        partial = "- Constructed an example.\n- General lower bound is missing."
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "record": SimpleNamespace(
+                            output_text=(
+                                run.FINAL_PARTIAL_FORCE_TEXT + partial + "\n</solution>"
+                            )
+                        ),
+                        "pre_force_ids": [],
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": True,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant="evidence_first",
+                    temperature=0.7,
+                    max_tokens=4096,
+                    generation_mode="partial_passthrough",
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                )
+
+        self.assertTrue(result["parsed"]["is_valid"])
+        self.assertEqual(result["finish_reason"], "partial_passthrough")
+        self.assertEqual(result["usage"]["completion_tokens"], 0)
+        self.assertTrue(result["attempts"][0]["context_metadata"]["lossless"])
+        self.assertIn(partial, result["parsed"]["sections"]["promising"])
 
     def test_optimizer_repairs_one_invalid_handoff(self):
         responses = [

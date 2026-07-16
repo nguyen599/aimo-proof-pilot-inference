@@ -25,6 +25,7 @@ try:
         MAP_REDUCE_SECTION_MAX_TOKENS,
         SavedProofGenerationCall,
         assemble_handoff,
+        build_lossless_partial_handoff,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
@@ -54,6 +55,7 @@ except ModuleNotFoundError as exc:
         MAP_REDUCE_SECTION_MAX_TOKENS,
         SavedProofGenerationCall,
         assemble_handoff,
+        build_lossless_partial_handoff,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
@@ -112,6 +114,7 @@ def parse_args() -> argparse.Namespace:
             "fresh_sectioned",
             "map_reduce",
             "partial_sectioned",
+            "partial_passthrough",
         ),
         default="fresh_sectioned",
     )
@@ -343,7 +346,42 @@ def call_handoff(
             ),
         }
 
-    if generation_mode == "partial_sectioned":
+    if generation_mode == "partial_passthrough":
+        partial_progress = extract_forced_partial_progress(
+            prepared["record"].output_text
+        )
+        partial_ids = tokenizer.encode(
+            partial_progress,
+            add_special_tokens=False,
+        )
+        if hasattr(partial_ids, "tolist"):
+            partial_ids = partial_ids.tolist()
+        prompt_ids = [int(value) for value in partial_ids]
+        raw_output = build_lossless_partial_handoff(partial_progress)
+        parsed = parse_handoff_response(raw_output)
+        finish_reason = "partial_passthrough"
+        attempts.append(
+            {
+                "name": "partial_passthrough",
+                "prompt_ids": prompt_ids,
+                "completion_text": "",
+                "raw_output": raw_output,
+                "parsed": parsed,
+                "finish_reason": finish_reason,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "temperature": temperature,
+                "context_metadata": {
+                    "partial_progress_chars": len(partial_progress),
+                    "partial_progress_tokens": len(prompt_ids),
+                    "lossless": True,
+                },
+            }
+        )
+    elif generation_mode == "partial_sectioned":
         partial_progress = extract_forced_partial_progress(
             prepared["record"].output_text
         )

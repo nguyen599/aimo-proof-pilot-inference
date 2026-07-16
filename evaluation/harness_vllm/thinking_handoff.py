@@ -83,6 +83,11 @@ RENDERED_USER_MARKERS = (
 
 _SECTION_HEADER = re.compile(r"^===== (?P<title>.+?) =====$", re.MULTILINE)
 _HANDOFF_BLOCK = re.compile(r"(?is)<handoff>\s*(.*?)\s*</handoff>")
+_HANDOFF_CONTROL_TAG = re.compile(
+    r"(?is)<\s*/?\s*(?:handoff|"
+    + "|".join(re.escape(section) for section in HANDOFF_REQUIRED_SECTIONS)
+    + r")\s*>"
+)
 
 
 @dataclass(frozen=True)
@@ -224,6 +229,57 @@ def extract_forced_partial_progress(text: str) -> str:
     if not progress:
         raise ValueError("forced partial progress is empty")
     return progress
+
+
+def escape_handoff_control_tags(text: str) -> str:
+    """Prevent quoted research notes from closing the deterministic wrapper."""
+
+    return _HANDOFF_CONTROL_TAG.sub(
+        lambda match: "&lt;" + match.group(0)[1:],
+        str(text or ""),
+    )
+
+
+def build_lossless_partial_handoff(partial_progress: str) -> str:
+    """Wrap an untrusted cutoff report without asking another model to edit it."""
+
+    report = escape_handoff_control_tags(partial_progress).strip()
+    if not report:
+        raise ValueError("partial progress report is empty")
+    return assemble_handoff(
+        {
+            "established": (
+                "No claim from the previous attempt is accepted as established. "
+                "Recheck every carried statement against the original problem."
+            ),
+            "promising": (
+                "The complete untrusted partial-progress report is preserved below. "
+                "It may contain useful constructions, calculations, and gaps, but it "
+                "may also contain contradictions or errors.\n\n"
+                "<untrusted_partial_progress>\n"
+                f"{report}\n"
+                "</untrusted_partial_progress>"
+            ),
+            "failed": (
+                "The previous attempt exhausted its reasoning budget before a "
+                "complete proof. Do not resume a repetitive route merely because it "
+                "appears in the report."
+            ),
+            "uncertain": (
+                "Every mathematical claim in the quoted report remains unverified "
+                "until independently proved or checked."
+            ),
+            "bottleneck": (
+                "No complete general proof was produced. The fresh solver must "
+                "identify the actual missing argument after auditing the report."
+            ),
+            "next_steps": (
+                "First verify the concrete constructions and impossibility claims. "
+                "Discard contradictions, recover only sound lemmas, then restart the "
+                "general proof independently and complete every missing case."
+            ),
+        }
+    )
 
 
 def _render_chat_template(

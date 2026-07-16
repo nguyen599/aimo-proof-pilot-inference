@@ -343,6 +343,37 @@ far cleaner than the preceding repetitive hidden reasoning. The next smoke
 quotes that partial-progress report in a fresh context, extracts six bounded
 sections independently, and still treats every carried claim as untrusted.
 
+### Live smoke 8: section extraction from forced partial progress
+
+The sectioned extractor used the 4,462-token forced partial-progress report
+rather than the repetitive hidden reasoning:
+
+```text
+partial_progress_chars=12947
+partial_progress_tokens=4462
+aggregate prompt tokens=28213
+aggregate completion tokens=1210
+latency=7.3s
+valid=true
+```
+
+This source materially improved relevance: every section stayed on the sunny
+lines problem and retained concrete small-`n` constructions. The generated
+handoff is still rejected because the reducer changed mathematical state:
+
+- `established` says that `n=3, k=1` is possible, while `failed` says it is
+  impossible;
+- speculative bounds on sunny-line coverage are promoted into apparent facts;
+- five of six section calls reached their token caps and ended mid-argument;
+- the same uncertain `n=4, k=1` construction is repeated with different
+  confidence levels across sections.
+
+The failure is therefore semantic rather than structural. Changing reducer
+temperature cannot guarantee fidelity. The next baseline carries the complete
+forced partial report losslessly as explicitly untrusted context, with
+deterministic guard sections around it. The fresh solver, rather than another
+summarizer, is responsible for auditing its claims.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof
