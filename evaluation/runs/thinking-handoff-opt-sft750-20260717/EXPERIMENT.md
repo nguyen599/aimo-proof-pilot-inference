@@ -310,6 +310,39 @@ The next revision therefore:
 5. assembles final XML in code, so one malformed generation cannot invalidate
    the handoff.
 
+### Live smoke 7: low-novelty truncation and typed digests
+
+The revised extractor identified the repetitive tail with the real SFT-750
+tokenizer:
+
+```text
+reasoning_original_tokens=121531
+low_novelty_start=2560
+reasoning_cleaned_tokens=2560
+window_ranges=[[0,2560]]
+aggregate prompt tokens=4261
+aggregate completion tokens=1408
+latency=6.0s
+```
+
+This confirms that low-novelty truncation removes the pathological loop and
+makes extraction inexpensive. The configuration is still rejected:
+
+- the one 160-token map completion did not emit any required typed line, so the
+  deterministic parser correctly replaced it with a no-progress marker;
+- the six section reducers ignored that empty evidence and hallucinated
+  unrelated problems about sums of squares, functional equations, reciprocal
+  inequalities, and harmonic numbers;
+- deterministic XML assembly made the artifact structurally valid, but its
+  mathematical fidelity was zero.
+
+The next source is the already-generated strongest-partial continuation after
+the old forced `</think>` marker. For this case it is roughly 13,000 characters
+and contains concrete constructions, small-`n` checks, and explicit gaps. It is
+far cleaner than the preceding repetitive hidden reasoning. The next smoke
+quotes that partial-progress report in a fresh context, extracts six bounded
+sections independently, and still treats every carried claim as untrusted.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof

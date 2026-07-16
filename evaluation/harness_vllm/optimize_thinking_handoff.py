@@ -29,6 +29,7 @@ try:
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_handoff_section_from_digests_prompt_ids,
+        build_handoff_section_from_partial_progress_prompt_ids,
         build_handoff_section_instruction,
         build_research_window_digest_prompt_ids,
         build_user_turn_prompt_ids,
@@ -38,6 +39,7 @@ try:
         parse_handoff_response,
         parse_saved_proof_generation_call,
         prepare_handoff_research_windows,
+        extract_forced_partial_progress,
         remove_final_partial_force_text,
     )
 except ModuleNotFoundError as exc:
@@ -56,6 +58,7 @@ except ModuleNotFoundError as exc:
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_handoff_section_from_digests_prompt_ids,
+        build_handoff_section_from_partial_progress_prompt_ids,
         build_handoff_section_instruction,
         build_research_window_digest_prompt_ids,
         build_user_turn_prompt_ids,
@@ -65,6 +68,7 @@ except ModuleNotFoundError as exc:
         parse_handoff_response,
         parse_saved_proof_generation_call,
         prepare_handoff_research_windows,
+        extract_forced_partial_progress,
         remove_final_partial_force_text,
     )
 
@@ -102,7 +106,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument(
         "--generation-mode",
-        choices=("monolithic", "sectioned", "fresh_sectioned", "map_reduce"),
+        choices=(
+            "monolithic",
+            "sectioned",
+            "fresh_sectioned",
+            "map_reduce",
+            "partial_sectioned",
+        ),
         default="fresh_sectioned",
     )
     parser.add_argument(
@@ -333,7 +343,54 @@ def call_handoff(
             ),
         }
 
-    if generation_mode == "map_reduce":
+    if generation_mode == "partial_sectioned":
+        partial_progress = extract_forced_partial_progress(
+            prepared["record"].output_text
+        )
+        partial_ids = tokenizer.encode(
+            partial_progress,
+            add_special_tokens=False,
+        )
+        if hasattr(partial_ids, "tolist"):
+            partial_ids = partial_ids.tolist()
+        context_metadata = {
+            "partial_progress_chars": len(partial_progress),
+            "partial_progress_tokens": len(partial_ids),
+        }
+        sections: dict[str, str] = {}
+        reduce_attempts: list[dict[str, Any]] = []
+        for section in HANDOFF_REQUIRED_SECTIONS:
+            assistant_prefix = handoff_section_assistant_prefix(section)
+            section_prompt_ids = build_handoff_section_from_partial_progress_prompt_ids(
+                tokenizer,
+                partial_progress=partial_progress,
+                section=section,
+                variant=variant,
+            )
+            attempt = complete(
+                section_prompt_ids,
+                f"partial_{section}",
+                assistant_prefix=assistant_prefix,
+                attempt_max_tokens=min(
+                    max_tokens,
+                    MAP_REDUCE_SECTION_MAX_TOKENS[section],
+                ),
+            )
+            section_content = normalize_handoff_section(
+                attempt["completion_text"],
+                section,
+            )
+            attempt["section"] = section
+            attempt["section_content"] = section_content
+            attempt["context_metadata"] = context_metadata
+            attempts.append(attempt)
+            reduce_attempts.append(attempt)
+            sections[section] = section_content
+        prompt_ids = reduce_attempts[0]["prompt_ids"]
+        raw_output = assemble_handoff(sections)
+        parsed = parse_handoff_response(raw_output)
+        finish_reason = "partial_sectioned"
+    elif generation_mode == "map_reduce":
         _problem, windows, context_metadata = prepare_handoff_research_windows(
             tokenizer,
             original_input_prompt=prepared["record"].input_prompt,

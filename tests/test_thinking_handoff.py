@@ -29,11 +29,13 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
     build_handoff_section_from_digests_prompt_ids,
+    build_handoff_section_from_partial_progress_prompt_ids,
     build_handoff_section_instruction,
     build_research_window_digest_prompt_ids,
     build_user_turn_prompt_ids,
     insert_restart_instruction_into_rendered_prompt,
     normalize_research_digest,
+    extract_forced_partial_progress,
     parse_handoff_response,
     parse_saved_proof_generation_call,
     prepare_handoff_research_windows,
@@ -327,6 +329,28 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertNotIn("Original problem:", section_prompt)
         self.assertIn("P | A proved local fact.", section_prompt)
 
+    def test_forced_partial_progress_becomes_fresh_section_source(self):
+        report = extract_forced_partial_progress(
+            "hidden reasoning\n"
+            + run.FINAL_PARTIAL_FORCE_TEXT
+            + "- Proved a reduction.\n- A construction still has a gap.\n"
+            + "</solution><self_evaluation>ignored</self_evaluation>"
+        )
+        prompt = FakeTokenizer.decode(
+            build_handoff_section_from_partial_progress_prompt_ids(
+                FakeTokenizer(),
+                partial_progress=report,
+                section="failed",
+                variant="lemma_ledger",
+            )
+        )
+
+        self.assertIn("- Proved a reduction.", report)
+        self.assertNotIn("self_evaluation", report)
+        self.assertIn("<partial_progress_report>", prompt)
+        self.assertIn("Treat every claim as untrusted", prompt)
+        self.assertIn("lemma ledger", prompt)
+
     def test_low_novelty_tail_truncates_repetitive_loop(self):
         prefix = list(range(3_000))
         repeated = [7, 8, 9, 10] * 2_000
@@ -500,6 +524,81 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertFalse(result["repair_used"])
         self.assertTrue(result["parsed"]["is_valid"])
         self.assertEqual(result["usage"]["completion_tokens"], 60)
+
+    def test_optimizer_builds_partial_sectioned_handoff(self):
+        responses = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        text=f"Partial section {index}.",
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=10,
+                    total_tokens=110,
+                ),
+            )
+            for index in range(6)
+        ]
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                del kwargs
+                return responses.pop(0)
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+                self.completions = FakeCompletions()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "record": SimpleNamespace(
+                            output_text=(
+                                run.FINAL_PARTIAL_FORCE_TEXT
+                                + "- Proved a reduction.\n"
+                                + "</solution>"
+                            )
+                        ),
+                        "pre_force_ids": [],
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": True,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant="evidence_first",
+                    temperature=0.7,
+                    max_tokens=4096,
+                    generation_mode="partial_sectioned",
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                )
+
+        self.assertEqual(len(result["attempts"]), 6)
+        self.assertTrue(result["parsed"]["is_valid"])
+        self.assertEqual(result["finish_reason"], "partial_sectioned")
+        self.assertEqual(result["usage"]["completion_tokens"], 60)
+        self.assertEqual(
+            result["attempts"][0]["context_metadata"]["partial_progress_chars"],
+            len(
+                "We were unable to produce a complete proof. However, the "
+                "strongest partial progress is as follows:\n"
+                "- Proved a reduction."
+            ),
+        )
 
     def test_optimizer_repairs_one_invalid_handoff(self):
         responses = [

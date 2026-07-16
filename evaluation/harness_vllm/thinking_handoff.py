@@ -210,6 +210,22 @@ def remove_final_partial_force_text(text: str) -> str:
     return text[:close_index].rstrip()
 
 
+def extract_forced_partial_progress(text: str) -> str:
+    raw = str(text or "")
+    marker_index = raw.rfind(FINAL_PARTIAL_FORCE_MARKER)
+    if marker_index < 0:
+        raise ValueError("proof output does not contain the final partial marker")
+    end = len(raw)
+    for marker in ("</solution>", "<self_evaluation>", "<score>"):
+        position = raw.find(marker, marker_index)
+        if position >= 0:
+            end = min(end, position)
+    progress = raw[marker_index:end].strip()
+    if not progress:
+        raise ValueError("forced partial progress is empty")
+    return progress
+
+
 def _render_chat_template(
     tokenizer: Any,
     messages: list[dict[str, str]],
@@ -762,6 +778,34 @@ def build_handoff_section_from_digests_prompt_ids(
         system_content=(
             "You are a mathematical research-state editor. Use only the supplied "
             "typed digests. Never add proof steps, conjectures, or problem text."
+        ),
+    )
+
+
+def build_handoff_section_from_partial_progress_prompt_ids(
+    tokenizer: Any,
+    *,
+    partial_progress: str,
+    section: str,
+    variant: str,
+) -> list[int]:
+    user_content = (
+        "The fresh solver already has the original problem. The quoted report was "
+        "generated after an earlier attempt exhausted its reasoning budget. Treat "
+        "every claim as untrusted and organize only what the report actually says. "
+        "Do not restate or solve the problem.\n\n"
+        "<partial_progress_report>\n"
+        f"{partial_progress}\n"
+        "</partial_progress_report>\n\n"
+        f"{build_handoff_section_instruction(section, variant)}"
+    )
+    return render_handoff_extraction_prompt_ids(
+        tokenizer,
+        user_content=user_content,
+        assistant_prefix=handoff_section_assistant_prefix(section),
+        system_content=(
+            "You are a mathematical research-state editor. Extract only from the "
+            "quoted partial-progress report. Never add proof steps or claims."
         ),
     )
 
