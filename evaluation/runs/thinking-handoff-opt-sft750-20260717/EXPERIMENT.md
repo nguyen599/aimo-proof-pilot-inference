@@ -1011,6 +1011,59 @@ This control is intended to separate two metrics:
 Only the second metric is evidence that the handoff improved solving. Forced
 score-0 closure counts as structural completion and rigorous failure.
 
+#### Live result: 12,000-token hard boundary
+
+Artifact:
+`/tmp/thinking-handoff-refinement-resume20k-finaltemp06-hardvisible12k-sft750-20260717-v1`
+
+| Metric | Result |
+|---|---:|
+| Base pipeline temperature | 1.0 |
+| Final refinement temperature | 0.6 |
+| Forced thinking boundary | 20,000 |
+| Visible-output prompt target | 12,000 |
+| Visible-output hard limit | 12,000 |
+| Completion tokens | 23,805 |
+| Finish reason | `stop` |
+| Parser-valid XML | yes |
+| Refined proof characters | 10,632 |
+| Model self-score | 1 |
+| Hard limit reached | no |
+| Forced score-0 closure | no |
+| Verifier scores | 0, 0, 0, 0 |
+| Meta-verifier scores | 0.5, 1, 0.5, 0.5 |
+| Aggregate verifier score | 0.0 |
+| Selected verification round | 1 |
+| Structurally complete | 1/1 |
+| Manually rigorous | 0/1 |
+
+The final refinement stopped naturally after approximately 20,000 hidden
+reasoning tokens and 3,805 visible tokens. Consequently,
+`visible_output_limit_applied=false` and
+`visible_output_forced_partial_closure=false`: the hard guard did not alter
+this sample. This is a useful end-to-end check that enabling the guard leaves
+a naturally completed response unchanged, but it is not live evidence for the
+forced-closure branch.
+
+All four verifiers rejected the proof. Their common objections were:
+
+- the claimed maximum coverage by mixed non-sunny lines is unsupported and
+  has counterexamples;
+- the proof replaces an arbitrary uncovered set with a fixed triangular set
+  without a valid reduction;
+- the arguments for `k=2` and `k>=4` therefore do not apply to arbitrary line
+  configurations; and
+- the stated `n=3, k=3` construction incorrectly calls a slope `-1` line
+  sunny.
+
+The same prompt settings produced an unclosed 65,000-token response in the
+previous replay. Since the hard limit was not reached here, the difference is
+sampling variance and cannot be attributed to the guard. Across all final
+refinement temperature and boundary experiments on this problem, structural
+completion improved in some runs, but rigorous proof completion remains zero.
+The hard limit is retained as an opt-in safety mechanism for producing an
+honest trainable partial trace; it is not a proof-quality improvement.
+
 ## Current validation
 
 - Targeted Ruff checks pass.
