@@ -22,6 +22,7 @@ try:
         HANDOFF_VARIANTS,
         SavedProofGenerationCall,
         build_handoff_instruction,
+        build_handoff_repair_instruction,
         build_user_turn_prompt_ids,
         parse_handoff_response,
         parse_saved_proof_generation_call,
@@ -36,6 +37,7 @@ except ModuleNotFoundError as exc:
         HANDOFF_VARIANTS,
         SavedProofGenerationCall,
         build_handoff_instruction,
+        build_handoff_repair_instruction,
         build_user_turn_prompt_ids,
         parse_handoff_response,
         parse_saved_proof_generation_call,
@@ -74,6 +76,12 @@ def parse_args() -> argparse.Namespace:
         default=[],
     )
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument(
+        "--repair-invalid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Mirror run.py by making one XML repair call after an invalid handoff.",
+    )
     parser.add_argument("--max-token-drift", type=int, default=4)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-workers", type=int, default=16)
@@ -129,7 +137,9 @@ def discover_cases(logs_root: Path) -> list[dict[str, Any]]:
             }
         )
     if not cases:
-        raise ValueError(f"no thinking-budget proof-generation calls found in {logs_root}")
+        raise ValueError(
+            f"no thinking-budget proof-generation calls found in {logs_root}"
+        )
     return cases
 
 
@@ -218,6 +228,7 @@ def call_handoff(
     variant: str,
     temperature: float,
     max_tokens: int,
+    repair_invalid: bool,
     top_p: float,
     request_timeout_seconds: float,
     output_dir: Path,
@@ -238,23 +249,59 @@ def call_handoff(
         timeout=request_timeout_seconds,
         max_retries=2,
     )
-    response = client.completions.create(
-        model=served_model_name,
-        prompt=prompt_ids,
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-    )
-    choice = response.choices[0]
-    raw_output = HANDOFF_ASSISTANT_PREFIX + (choice.text or "")
-    parsed = parse_handoff_response(raw_output)
+    attempts: list[dict[str, Any]] = []
+
+    def complete(active_prompt_ids: list[int], attempt_name: str) -> dict[str, Any]:
+        response = client.completions.create(
+            model=served_model_name,
+            prompt=active_prompt_ids,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+        )
+        choice = response.choices[0]
+        completion_text = choice.text or ""
+        raw_output = HANDOFF_ASSISTANT_PREFIX + completion_text
+        usage = {
+            key: getattr(response.usage, key)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if response.usage is not None and hasattr(response.usage, key)
+        }
+        return {
+            "name": attempt_name,
+            "prompt_ids": active_prompt_ids,
+            "completion_text": completion_text,
+            "raw_output": raw_output,
+            "parsed": parse_handoff_response(raw_output),
+            "finish_reason": choice.finish_reason,
+            "usage": usage,
+        }
+
+    attempts.append(complete(prompt_ids, "initial"))
+    if repair_invalid and not attempts[-1]["parsed"]["is_valid"]:
+        completion_ids = tokenizer.encode(
+            attempts[-1]["completion_text"],
+            add_special_tokens=False,
+        )
+        if hasattr(completion_ids, "tolist"):
+            completion_ids = completion_ids.tolist()
+        previous_context_ids = prompt_ids + [int(value) for value in completion_ids]
+        repair_prompt_ids = build_user_turn_prompt_ids(
+            tokenizer,
+            previous_context_ids,
+            build_handoff_repair_instruction(),
+            close_open_thinking=False,
+        )
+        attempts.append(complete(repair_prompt_ids, "repair"))
+
+    final_attempt = attempts[-1]
+    raw_output = final_attempt["raw_output"]
+    parsed = final_attempt["parsed"]
     usage = {
-        key: getattr(response.usage, key)
+        key: sum(int(attempt["usage"].get(key) or 0) for attempt in attempts)
         for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-        if response.usage is not None and hasattr(response.usage, key)
     }
     run_id = case_run_id(prepared["source"], variant, temperature)
-    prompt_text = tokenizer.decode(prompt_ids, skip_special_tokens=False)
     call_path = output_dir / "calls" / f"{run_id}.txt"
     call_path.parent.mkdir(parents=True, exist_ok=True)
     call_path.write_text(
@@ -270,12 +317,21 @@ def call_handoff(
                 f"prompt_tokens: {len(prompt_ids)}",
                 f"max_tokens: {max_tokens}",
                 "",
-                "===== INPUT PROMPT =====",
-                prompt_text,
-                "",
-                "===== OUTPUT =====",
-                raw_output,
-                "",
+                *(
+                    line
+                    for attempt_index, attempt in enumerate(attempts, start=1)
+                    for line in (
+                        f"===== ATTEMPT {attempt_index}: {attempt['name']} INPUT =====",
+                        tokenizer.decode(
+                            attempt["prompt_ids"],
+                            skip_special_tokens=False,
+                        ),
+                        "",
+                        f"===== ATTEMPT {attempt_index}: {attempt['name']} OUTPUT =====",
+                        attempt["raw_output"],
+                        "",
+                    )
+                ),
             ]
         ),
         encoding="utf-8",
@@ -292,11 +348,22 @@ def call_handoff(
         "prompt_tokens": len(prompt_ids),
         "pre_force_tokens": len(prepared["pre_force_ids"]),
         "max_tokens": max_tokens,
-        "finish_reason": choice.finish_reason,
+        "finish_reason": final_attempt["finish_reason"],
         "latency_s": time.monotonic() - started,
         "usage": usage,
         "parsed": parsed,
         "raw_output": raw_output,
+        "repair_used": len(attempts) > 1,
+        "attempts": [
+            {
+                "name": attempt["name"],
+                "finish_reason": attempt["finish_reason"],
+                "usage": attempt["usage"],
+                "parsed": attempt["parsed"],
+                "raw_output": attempt["raw_output"],
+            }
+            for attempt in attempts
+        ],
         "call_log": str(call_path),
         "error": None,
     }
@@ -312,8 +379,7 @@ def atomic_write_text(path: Path, text: str) -> None:
 def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     jsonl_text = "".join(
-        json.dumps(result, ensure_ascii=False, default=str) + "\n"
-        for result in results
+        json.dumps(result, ensure_ascii=False, default=str) + "\n" for result in results
     )
     atomic_write_text(output_dir / "results.jsonl", jsonl_text)
 
@@ -331,6 +397,10 @@ def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
             "completion_tokens": result.get("usage", {}).get("completion_tokens"),
             "finish_reason": result.get("finish_reason"),
             "latency_s": result.get("latency_s"),
+            "repair_used": result.get("repair_used", False),
+            "initial_valid": (
+                result.get("attempts", [{}])[0].get("parsed", {}).get("is_valid", False)
+            ),
             "valid_handoff": result.get("parsed", {}).get("is_valid", False),
             "missing_sections": ",".join(
                 result.get("parsed", {}).get("missing_sections", [])
@@ -356,8 +426,7 @@ def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
     for (variant, temperature), group in sorted(groups.items()):
         successful = [result for result in group if not result.get("error")]
         valid = sum(
-            bool(result.get("parsed", {}).get("is_valid"))
-            for result in successful
+            bool(result.get("parsed", {}).get("is_valid")) for result in successful
         )
         summary.append(
             {
@@ -368,6 +437,9 @@ def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
                 "failed": len(group) - len(successful),
                 "valid": valid,
                 "valid_fraction": valid / len(successful) if successful else 0.0,
+                "repair_count": sum(
+                    bool(result.get("repair_used")) for result in successful
+                ),
                 "mean_completion_tokens": (
                     sum(
                         int(result.get("usage", {}).get("completion_tokens") or 0)
@@ -444,9 +516,7 @@ def main() -> None:
                     "rank": case["rank"],
                     "problem": case["problem"],
                     "old_parseable": case["old_parseable"],
-                    "logged_prompt_tokens": case[
-                        "record"
-                    ].continuation_prompt_tokens,
+                    "logged_prompt_tokens": case["record"].continuation_prompt_tokens,
                     "pre_force_tokens": len(case["pre_force_ids"]),
                     "token_drift": case["token_drift"],
                     "finish_reason": case["record"].finish_reason,
@@ -482,9 +552,7 @@ def main() -> None:
                         "prepared": case,
                         "variant": variant,
                         "temperature": temperature,
-                        "base_url": args.base_url[
-                            endpoint_index % len(args.base_url)
-                        ],
+                        "base_url": args.base_url[endpoint_index % len(args.base_url)],
                     }
                 )
                 endpoint_index += 1
@@ -504,6 +572,7 @@ def main() -> None:
                 variant=job["variant"],
                 temperature=job["temperature"],
                 max_tokens=args.max_tokens,
+                repair_invalid=args.repair_invalid,
                 top_p=args.top_p,
                 request_timeout_seconds=args.request_timeout_seconds,
                 output_dir=args.output_dir,

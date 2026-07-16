@@ -294,6 +294,7 @@ def evaluate_restart(
         "self_score": parsed.get("self_score"),
         "latency_s": latency_s,
         "tokens_per_second": len(generated_ids) / latency_s if latency_s else 0.0,
+        "raw_output": output_text,
         "call_log": str(call_path),
         "error": None,
     }

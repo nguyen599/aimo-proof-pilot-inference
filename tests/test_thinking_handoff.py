@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -11,6 +13,7 @@ sys.path.insert(0, str(REPO))
 
 from evaluation.harness_vllm import run  # noqa: E402
 from evaluation.harness_vllm.optimize_thinking_handoff import (  # noqa: E402
+    call_handoff,
     discover_cases,
     prepare_case,
     select_diverse_cases,
@@ -211,6 +214,78 @@ class SavedCallParserTests(unittest.TestCase):
 
 
 class HandoffPromptTests(unittest.TestCase):
+    def test_optimizer_repairs_one_invalid_handoff(self):
+        responses = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        text="repeated draft without closing tags",
+                        finish_reason="length",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=10,
+                    total_tokens=110,
+                ),
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        text=VALID_HANDOFF_AFTER_PREFIX,
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=120,
+                    completion_tokens=20,
+                    total_tokens=140,
+                ),
+            ),
+        ]
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                del kwargs
+                return responses.pop(0)
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+                self.completions = FakeCompletions()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "pre_force_ids": FakeTokenizer.encode("<assistant><think>work"),
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": False,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant="evidence_first",
+                    temperature=0.7,
+                    max_tokens=4096,
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                )
+
+        self.assertTrue(result["repair_used"])
+        self.assertEqual(len(result["attempts"]), 2)
+        self.assertFalse(result["attempts"][0]["parsed"]["is_valid"])
+        self.assertTrue(result["parsed"]["is_valid"])
+        self.assertEqual(result["usage"]["completion_tokens"], 30)
+
     def test_handoff_prompt_has_strict_compression_contract(self):
         instruction = build_handoff_instruction("evidence_first")
 

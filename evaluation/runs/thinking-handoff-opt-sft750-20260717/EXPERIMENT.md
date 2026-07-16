@@ -124,6 +124,29 @@ The next prompt revision keeps 4,096 as a safety ceiling but requires:
 - no full problem restatement, duplicated facts, or attempt narration;
 - all XML tags to be closed.
 
+### Live smoke 2: strict single-call compression
+
+The same source context was retried with the strict compression contract:
+
+```text
+prompt_tokens=122377
+completion_tokens=4096
+finish_reason=length
+is_valid=false
+```
+
+The output was denser and dropped most attempt narration, but it again remained
+inside `<established>` until the token cap. It expanded into small-case
+calculations instead of obeying the bullet and section limits. Increasing the
+single-call cap would preserve this failure mode and consume more context.
+
+The optimizer is therefore being aligned with the production path in `run.py`:
+after an invalid first handoff, it makes one repair turn over the exact prior
+context and draft. The repair instruction requires the same mathematical
+content to be re-emitted in all six XML sections. Results retain both attempts
+and aggregate their token cost, while the repaired artifact is what the restart
+evaluation consumes.
+
 ## Experiment 3: fresh round-1 proof completion
 
 After selecting the strongest handoff configuration, restart fresh proof
