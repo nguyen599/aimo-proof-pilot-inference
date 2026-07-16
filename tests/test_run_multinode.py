@@ -263,6 +263,103 @@ class DistributedRuntimeTests(unittest.TestCase):
             self.assertEqual(payloads[0]["assigned_attempts"], [0, 2])
             self.assertEqual(payloads[1]["assigned_attempts"], [1, 3])
 
+    def test_two_rank_mock_run_supports_concurrent_problems(self):
+        try:
+            import torch.distributed as dist
+        except ImportError:
+            self.skipTest("torch.distributed is unavailable")
+        if not dist.is_available():
+            self.skipTest("torch.distributed is unavailable")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_path = root / "input.csv"
+            output_path = root / "submission.csv"
+            input_path.write_text(
+                'id,problem\n1,"Prove the first mock claim."\n'
+                '2,"Prove the second mock claim."\n',
+                encoding="utf-8",
+            )
+            port = free_tcp_port()
+            launcher = textwrap.dedent(
+                """
+                import os
+                from pathlib import Path
+                from evaluation.harness_vllm import run
+
+                run.CFG.model_path = Path('/unused-model')
+                run.CFG.input_csv = Path(os.environ['TEST_INPUT'])
+                run.CFG.output_csv = Path(os.environ['AIMO_OUTPUT_PATH'])
+                run.CFG.logdir = Path(os.environ['AIMO_LOGDIR'])
+                run.CFG.mock_llm = True
+                run.CFG.verbose = False
+                run.CFG.num_gpus = 1
+                run.CFG.gpus = '0'
+                run.CFG.tensor_parallel_size = 1
+                run.CFG.data_parallel_size = 1
+                run.CFG.pipelines_per_problem = 4
+                run.CFG.deepseek_math_v2_candidate_count = 0
+                run.CFG.verify_n = 1
+                run.CFG.meta_n = 0
+                run.CFG.refine_rounds = 0
+                run.CFG.selector_mode = 'score'
+                run.CFG.max_rows = 2
+                run.CFG.max_concurrent_problems = 2
+                run.run()
+                """
+            )
+            processes = []
+            for rank in range(2):
+                env = {
+                    **os.environ,
+                    "PYTHONPATH": str(REPO),
+                    "GLOBAL_RANK": str(rank),
+                    "WORLD_SIZE": "2",
+                    "MASTER_ADDR": "127.0.0.1",
+                    "MASTER_PORT": str(port),
+                    "AIMO_DISTRIBUTED_ROOT": str(root / "distributed"),
+                    "AIMO_DISTRIBUTED_RUN_ID": "mock-two-rank-concurrent",
+                    "AIMO_DISTRIBUTED_TIMEOUT_SECONDS": "60",
+                    "AIMO_DISTRIBUTED_POLL_SECONDS": "0.1",
+                    "AIMO_LOGDIR": str(root / "logs"),
+                    "AIMO_OUTPUT_PATH": str(output_path),
+                    "TEST_INPUT": str(input_path),
+                }
+                processes.append(
+                    subprocess.Popen(
+                        [sys.executable, "-c", launcher],
+                        cwd=REPO,
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                )
+
+            outputs = []
+            for process in processes:
+                output, _ = process.communicate(timeout=60)
+                outputs.append(output)
+            for rank, (process, output) in enumerate(zip(processes, outputs)):
+                self.assertEqual(process.returncode, 0, f"rank={rank}\n{output}")
+
+            with output_path.open(newline="", encoding="utf-8") as source:
+                rows = list(csv.DictReader(source))
+            self.assertEqual([row["id"] for row in rows], ["1", "2"])
+            problem_dirs = list(
+                (
+                    root
+                    / "distributed"
+                    / "runs"
+                    / "mock-two-rank-concurrent"
+                    / "problems"
+                ).iterdir()
+            )
+            self.assertEqual(len(problem_dirs), 2)
+            for problem_dir in problem_dirs:
+                self.assertTrue((problem_dir / "rank_0000.json").is_file())
+                self.assertTrue((problem_dir / "rank_0001.json").is_file())
+
     def test_startup_config_mismatch_fails_every_rank_without_deadlock(self):
         try:
             import torch.distributed as dist

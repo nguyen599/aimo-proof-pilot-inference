@@ -224,9 +224,13 @@ class CFG:
     max_concurrent_requests = int(
         os.environ.get("AIMO_MAX_CONCURRENT_REQUESTS", "0")
     )
-    max_concurrent_problems = 1
+    max_concurrent_problems = int(
+        os.environ.get("AIMO_MAX_CONCURRENT_PROBLEMS", "1")
+    )
 
-    pipelines_per_problem = 14
+    pipelines_per_problem = int(
+        os.environ.get("AIMO_PIPELINES_PER_PROBLEM", "14")
+    )
     deepseek_math_v2_candidate_count = int(
         os.environ.get("AIMO_DEEPSEEK_MATH_V2_CANDIDATE_COUNT", "6")
     )
@@ -245,7 +249,7 @@ class CFG:
     meta_n = 1
     meta_policy = "all-reviews"  # low-only, all-reviews
     strict_pass_meta = True
-    refine_rounds = 1
+    refine_rounds = int(os.environ.get("AIMO_REFINE_ROUNDS", "1"))
     refine_review_n = 2
     min_valid_low = 1
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
@@ -5678,31 +5682,19 @@ def run_simple_csv(
             return row_position, output_row
 
     async def run_rows() -> None:
-        if runtime.distributed.enabled:
-            for row_position, (row_idx, row) in enumerate(df.iterrows()):
-                _, output_row = await process_row(row_position, int(row_idx), row)
-                if runtime.distributed.is_primary:
-                    output_rows[row_position] = output_row
-                    persist_outputs()
-                    print(
-                        f"Wrote row {len(output_rows)}/{len(df)} "
-                        f"id={output_row['id']} status={output_row['final_status']} "
-                        f"elapsed={output_row['elapsed_s'] or 0.0}",
-                    )
-                else:
-                    print(
-                        f"Rank {runtime.distributed.rank} completed distributed "
-                        f"row {row_position + 1}/{len(df)} id={output_row['id']}",
-                    )
-            return
-
         tasks = [
             asyncio.create_task(process_row(row_position, int(row_idx), row))
             for row_position, (row_idx, row) in enumerate(df.iterrows())
         ]
         for task in asyncio.as_completed(tasks):
-            row_idx, output_row = await task
-            output_rows[row_idx] = output_row
+            row_position, output_row = await task
+            if runtime.distributed.enabled and not runtime.distributed.is_primary:
+                print(
+                    f"Rank {runtime.distributed.rank} completed distributed "
+                    f"row {row_position + 1}/{len(df)} id={output_row['id']}",
+                )
+                continue
+            output_rows[row_position] = output_row
             persist_outputs()
             print(
                 f"Wrote row {len(output_rows)}/{len(df)} id={output_row['id']} "
@@ -5782,6 +5774,12 @@ def resolve_max_concurrent_requests(cfg: Any, selected_gpu_count: int) -> int:
 
 
 def run(cfg: type[CFG] = CFG) -> None:
+    if int(cfg.max_concurrent_problems) < 1:
+        raise ValueError("AIMO_MAX_CONCURRENT_PROBLEMS must be at least 1")
+    if int(cfg.pipelines_per_problem) < 1:
+        raise ValueError("AIMO_PIPELINES_PER_PROBLEM must be at least 1")
+    if int(cfg.refine_rounds) < 0:
+        raise ValueError("AIMO_REFINE_ROUNDS cannot be negative")
     selected_gpus, resolved_tp, resolved_dp = resolve_gpu_parallel_layout(cfg)
     resolved_max_concurrent_requests = resolve_max_concurrent_requests(
         cfg,

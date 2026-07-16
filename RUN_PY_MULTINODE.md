@@ -44,6 +44,9 @@ export AIMO_GPUS=0,1,2,3,4,5,6,7
 export AIMO_TENSOR_PARALLEL_SIZE=2
 export AIMO_DATA_PARALLEL_SIZE=4
 export AIMO_REQUESTS_PER_GPU=32
+export AIMO_PIPELINES_PER_PROBLEM=16
+export AIMO_MAX_CONCURRENT_PROBLEMS=2
+export AIMO_REFINE_ROUNDS=1
 
 # Use the same unique ID and shared writable directory on all nodes.
 export AIMO_DISTRIBUTED_RUN_ID="imo-2025-final-v1"
@@ -79,6 +82,10 @@ the selected local GPU count. The example therefore allows 256 local scheduler
 requests per node. Set `AIMO_MAX_CONCURRENT_REQUESTS` to a positive integer to
 override the computed value. This scheduler limit is separate from vLLM's
 `max_num_seqs` execution limit, so excess requests wait in the local queue.
+
+`AIMO_MAX_CONCURRENT_PROBLEMS` applies to distributed runs as well as local
+runs. Every rank schedules the same problem ordinals, while candidate attempts
+within each problem remain sharded by global candidate ID.
 
 The initial Gloo group only exchanges the run ID and validates that all nodes
 have the same inference configuration. It is destroyed before local vLLM
