@@ -125,6 +125,10 @@ def pipeline_cfg(**overrides):
         "thinking_budget_handoff_mode": "model",
         "thinking_budget_restart_strategy": "standard",
         "thinking_budget_final_round_tokens": 0,
+        "thinking_budget_refine_handoff_enabled": False,
+        "thinking_budget_refine_tokens": 0,
+        "thinking_budget_refine_final_round_tokens": 0,
+        "thinking_budget_refine_max_restarts": 1,
         "verify_n": 1,
         "meta_n": 0,
         "meta_policy": "all-reviews",
@@ -1315,6 +1319,126 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidate["budget_restart_count"], 1)
         self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(len(candidate["proof_refine_output"]), 1)
+        self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
+
+    async def test_refinement_budget_handoff_restarts_before_reverification(self):
+        class FakeScheduler:
+            tokenizer = FakeTokenizer()
+
+            def __init__(self):
+                self.calls = []
+                self.refinement_count = 0
+                self.verification_count = 0
+
+            @staticmethod
+            def _token_ids_to_list(token_ids):
+                return list(token_ids)
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append((stage, prompt, kwargs))
+                if stage == "proof_generation":
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A proof with a gap.</solution>"
+                            "<self_evaluation>A lemma is missing.</self_evaluation>"
+                            "<score>0.5</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_verify":
+                    self.verification_count += 1
+                    score = 0 if self.verification_count == 1 else 1
+                    return {
+                        "success": True,
+                        "text": (
+                            f"<evaluation>Verifier score {score}.</evaluation>"
+                            "<suggestions>Prove the missing lemma.</suggestions>"
+                            f"<score>{score}</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_refine":
+                    self.refinement_count += 1
+                    if self.refinement_count == 1:
+                        return {
+                            "success": True,
+                            "text": "<think>unfinished verifier-guided repair",
+                            "finish_reason": "thinking_budget_reached",
+                            "usage": {
+                                "completion_tokens": 10,
+                                "estimated_prompt_tokens": 5,
+                                "thinking_budget_applied": True,
+                                "thinking_budget_action": "stop",
+                                "thinking_budget_force_skipped_closed": False,
+                            },
+                            "_thinking_budget_context_ids": [1, 2, 3],
+                        }
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A repaired complete proof.</solution>"
+                            "<self_evaluation>The missing lemma is proved.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_refine_finalize":
+                    return {
+                        "success": True,
+                        "text": (
+                            run.FINAL_PARTIAL_FORCE_TEXT
+                            + "The repair reduced the problem to one exact lemma."
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {
+                            "completion_tokens": 5,
+                            "estimated_prompt_tokens": 3,
+                        },
+                        "server_url": "http://test",
+                        "latency_s": 1.0,
+                    }
+                raise AssertionError(stage)
+
+        scheduler = FakeScheduler()
+        result = await run.run_candidate_pipeline(
+            "Prove the claim.",
+            0,
+            1,
+            scheduler,
+            pipeline_cfg(
+                thinking_budget_handoff_mode="lossless_partial",
+                thinking_budget_restart_strategy="deadline_aware",
+                thinking_budget_refine_handoff_enabled=True,
+                thinking_budget_refine_tokens=10,
+                thinking_budget_refine_final_round_tokens=10,
+                thinking_budget_refine_max_restarts=1,
+            ),
+        )
+        candidate = result["candidate"]
+
+        self.assertEqual(
+            [stage for stage, _, _ in scheduler.calls],
+            [
+                "proof_generation",
+                "proof_verify",
+                "proof_refine",
+                "proof_refine_finalize",
+                "proof_refine",
+                "proof_verify",
+            ],
+        )
+        self.assertEqual(candidate["refine_budget_restart_count"], 1)
+        self.assertEqual(len(candidate["proof_refine_attempt_output"]), 1)
+        self.assertEqual(len(candidate["proof_refine_handoff_output"]), 1)
+        self.assertEqual(
+            candidate["proof_refine_handoff_output"][0]["finish_reason"],
+            "partial_passthrough",
+        )
+        self.assertEqual(candidate["selected_verification_round"], 1)
         self.assertEqual(candidate["proof_solution"], "A repaired complete proof.")
 
     async def test_lossless_partial_handoff_reserves_final_output_budget(self):

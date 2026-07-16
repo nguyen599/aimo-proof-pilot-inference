@@ -685,9 +685,79 @@ restart directly, so this experiment measures only verification and
 refinement. It does not pay for or introduce sampling variance from another
 long proof-generation call.
 
+### Baseline replay result
+
+Artifact:
+`/tmp/thinking-handoff-refinement-replay100k-sft750-20260717`
+
+The saved 100,000-token restart was checked by four verifiers and four
+meta-verifiers. All four low-score critiques were validated. The aggregate
+score was `0.125`, status was `validated_low_score`, and the critique set
+identified both the invalid `n=3, k=3` construction and the false claim that a
+sunny line contains at most two points of the residual triangle.
+
+The verifier-guided refinement did run, but it repeated the original failure
+mode:
+
+```text
+proof_refine completion_tokens=65000
+finish_reason=length
+has_solution=false
+has_self_evaluation=false
+proof_chars=0
+```
+
+The tail was still exploring whether `k=5` might be possible. Because the
+refinement was parser-invalid, it was not re-verified and round 0 remained the
+selected proof:
+
+| Metric | Result |
+|---|---:|
+| Initial proof verifier calls | 4 |
+| Validated low-score critiques | 4 |
+| Refinement calls | 1 |
+| Refinement parser-valid | 0/1 |
+| Refinement reached visible proof | 0/1 |
+| Selected verification round | 0 |
+| Final aggregate score | 0.125 |
+| Manually rigorous proof | 0/1 |
+
+This isolates a second cutoff: preserving the verifier-guided round is
+necessary but not sufficient, because the refiner itself can spend its entire
+completion allowance in hidden reasoning.
+
+### Experiment 5: lossless refinement restart
+
+The next opt-in policy applies the same context-reset mechanism inside one
+logical refinement round:
+
+1. Stop the first refinement at 50,000 of 65,000 tokens.
+2. Use the remaining allowance to emit an untrusted partial-progress report.
+3. Start a fresh refinement with the original proof, selected verifier
+   critiques, and the lossless report.
+4. Force the fresh refinement out of thinking at 50,000 tokens, leaving about
+   15,000 tokens for closed XML.
+5. Re-verify only if the repaired proof parses.
+
+The feature is disabled by default and controlled by
+`thinking_budget_refine_handoff_enabled`,
+`thinking_budget_refine_tokens`,
+`thinking_budget_refine_final_round_tokens`, and
+`thinking_budget_refine_max_restarts`. Trace records distinguish the stopped
+attempt, deterministic handoff, and final refinement. A focused test verifies:
+
+```text
+proof_generation
+proof_verify
+proof_refine
+proof_refine_finalize
+proof_refine
+proof_verify
+```
+
 ## Current validation
 
 - Targeted Ruff checks pass.
 - Python compilation checks pass.
-- Focused handoff suite: 34 tests passed.
-- Full repository suite: 139 tests passed, 36 subtests passed.
+- Focused handoff suite: 35 tests passed.
+- Full repository suite: 140 tests passed, 36 subtests passed.

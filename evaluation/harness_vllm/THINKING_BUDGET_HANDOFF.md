@@ -109,3 +109,23 @@ python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
 The replay runs the normal verifier, optional meta-verifier, proof refiner, and
 final verifier over the saved proof. It writes the complete candidate record
 to `result.json` and a compact call-count and score summary to `summary.json`.
+
+Refinement can use the same lossless context-reset mechanism independently of
+proof generation:
+
+```bash
+python evaluation/harness_vllm/evaluate_thinking_handoff_refinement.py \
+  ... \
+  --thinking-budget-refine-handoff-enabled \
+  --thinking-budget-refine-tokens 50000 \
+  --thinking-budget-refine-final-round-tokens 50000 \
+  --thinking-budget-refine-max-restarts 1
+```
+
+The first refinement stops at the initial budget and writes a bounded,
+untrusted partial-progress report. A fresh refinement receives the original
+proof, the selected verifier critiques, and that report. Its final budget
+forces the transition to XML while reserving the remaining completion tokens
+for the repaired proof. The feature is disabled by default. Audit fields are
+`proof_refine_attempt_output`, `proof_refine_handoff_output`,
+`proof_refine_handoffs`, and `refine_budget_restart_count`.

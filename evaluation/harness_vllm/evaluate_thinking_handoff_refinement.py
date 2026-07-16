@@ -67,6 +67,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proof-max-tokens", type=int, default=65_000)
     parser.add_argument("--verifier-max-tokens", type=int, default=32_000)
     parser.add_argument("--meta-max-tokens", type=int, default=32_000)
+    parser.add_argument(
+        "--thinking-budget-refine-handoff-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--thinking-budget-refine-tokens", type=int, default=50_000)
+    parser.add_argument(
+        "--thinking-budget-refine-final-round-tokens",
+        type=int,
+        default=50_000,
+    )
+    parser.add_argument("--thinking-budget-refine-max-restarts", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--request-timeout-seconds", type=float, default=7200.0)
@@ -180,6 +192,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "proof": parsed["proof"],
     }
     cfg = SimpleNamespace(
+        proof_max_new_tokens=max(1, int(args.proof_max_tokens)),
         default_temperature=float(args.temperature),
         proof_generation_temperatures=[],
         verify_n=max(1, int(args.verify_n)),
@@ -191,6 +204,32 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         min_valid_low=1,
         verification_early_stop=False,
         thinking_budget_enabled=True,
+        thinking_budget_handoff_max_tokens=int(
+            CFG.thinking_budget_handoff_max_tokens
+        ),
+        thinking_budget_handoff_temperature=float(
+            CFG.thinking_budget_handoff_temperature
+        ),
+        thinking_budget_handoff_prompt_variant=str(
+            CFG.thinking_budget_handoff_prompt_variant
+        ),
+        thinking_budget_handoff_mode="lossless_partial",
+        thinking_budget_restart_strategy="deadline_aware",
+        thinking_budget_refine_handoff_enabled=bool(
+            args.thinking_budget_refine_handoff_enabled
+        ),
+        thinking_budget_refine_tokens=max(
+            0,
+            int(args.thinking_budget_refine_tokens),
+        ),
+        thinking_budget_refine_final_round_tokens=max(
+            0,
+            int(args.thinking_budget_refine_final_round_tokens),
+        ),
+        thinking_budget_refine_max_restarts=max(
+            0,
+            int(args.thinking_budget_refine_max_restarts),
+        ),
         verifier_thinking_budget_tokens=min(
             int(CFG.verifier_thinking_budget_tokens),
             max(1, int(args.verifier_max_tokens) - 1),
@@ -226,6 +265,16 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "proof_max_tokens": args.proof_max_tokens,
             "verifier_max_tokens": args.verifier_max_tokens,
             "meta_max_tokens": args.meta_max_tokens,
+            "thinking_budget_refine_handoff_enabled": (
+                cfg.thinking_budget_refine_handoff_enabled
+            ),
+            "thinking_budget_refine_tokens": cfg.thinking_budget_refine_tokens,
+            "thinking_budget_refine_final_round_tokens": (
+                cfg.thinking_budget_refine_final_round_tokens
+            ),
+            "thinking_budget_refine_max_restarts": (
+                cfg.thinking_budget_refine_max_restarts
+            ),
             "temperature": args.temperature,
             "top_p": args.top_p,
         },
@@ -253,6 +302,12 @@ def main() -> None:
         "verifier_calls": len(result["candidate"].get("proof_verify_output") or []),
         "meta_calls": len(result["candidate"].get("proof_meta_verify_output") or []),
         "refine_calls": len(result["candidate"].get("proof_refine_output") or []),
+        "refine_budget_restarts": result["candidate"].get(
+            "refine_budget_restart_count"
+        ),
+        "refine_handoff_calls": len(
+            result["candidate"].get("proof_refine_handoff_output") or []
+        ),
         "selected_verification_round": result["candidate"].get(
             "selected_verification_round"
         ),
