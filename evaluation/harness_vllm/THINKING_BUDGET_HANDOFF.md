@@ -1,33 +1,56 @@
 # Thinking-budget handoff
 
-When proof generation reaches its thinking budget, `run.py` now uses the
+When proof generation reaches its thinking budget, `run.py` can use the
 remaining refine round as a context reset:
 
 1. Stop the unfinished assistant reasoning without emitting a partial proof.
-2. Close `</think>` and add a real user turn requesting a structured handoff.
-3. Parse the handoff into established facts, promising work, failed routes,
-   uncertain claims, the bottleneck, and next steps.
+2. Build a handoff either with a model-written structured summary or by
+   preserving the strongest partial-progress report losslessly as untrusted
+   evidence.
+3. Add a real user turn containing the handoff.
 4. Start a fresh proof-generation call from the original problem plus the
    handoff.
-5. Verify that restarted proof in the final round. If no refine round remains,
-   keep the existing strongest-partial completion behavior.
+5. Optionally give the final restart a smaller thinking budget, force the
+   transition to visible proof output at that boundary, and spend the remaining
+   completion allowance on the proof.
+6. Verify the restarted proof. If no refine round remains, keep the existing
+   strongest-partial completion behavior unless a final-round budget is set.
 
-An invalid handoff is repaired once. If it is still invalid, the pipeline falls
-back to the previous strongest-partial completion path.
+In `model` mode, an invalid handoff is repaired once. If it is still invalid,
+the pipeline falls back to the previous strongest-partial completion path. In
+`lossless_partial` mode, the bounded strongest-partial report is wrapped
+deterministically and no additional summarizer call is made.
 
 ## Configuration
 
 ```bash
 python evaluation/harness_vllm/run.py \
   --thinking-budget-handoff-enabled \
+  --thinking-budget-handoff-mode lossless_partial \
+  --thinking-budget-restart-strategy deadline_aware \
+  --thinking-budget-final-round-tokens 100000 \
   --thinking-budget-handoff-max-tokens 4096 \
   --thinking-budget-handoff-temperature 0.7 \
   --thinking-budget-handoff-prompt-variant evidence_first
 ```
 
-Prompt variants are `evidence_first`, `lemma_ledger`, and
-`continuation_frontier`. Disable the feature with
+Handoff modes are:
+
+- `model`: generate the six-section handoff with the policy model.
+- `lossless_partial`: preserve the complete forced partial-progress report
+  inside an explicitly untrusted deterministic wrapper.
+
+Restart strategies are `standard` and `deadline_aware`. Prompt variants
+`evidence_first`, `lemma_ledger`, and `continuation_frontier` apply to model
+handoffs. `--thinking-budget-final-round-tokens 0` preserves the previous final
+round behavior; a positive value reserves the rest of `--max-new-tokens` for
+visible output. Disable the feature with
 `--no-thinking-budget-handoff-enabled`.
+
+The 100,000-token value above is an experiment configuration for a
+126,000-token completion allowance, not a universal ratio. See
+[`EXPERIMENT.md`](../runs/thinking-handoff-opt-sft750-20260717/EXPERIMENT.md)
+for the measured completion and proof-quality results before adopting it.
 
 ## Prompt optimization
 

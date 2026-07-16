@@ -121,6 +121,9 @@ def pipeline_cfg(**overrides):
         "thinking_budget_handoff_max_tokens": 4096,
         "thinking_budget_handoff_temperature": 0.7,
         "thinking_budget_handoff_prompt_variant": "evidence_first",
+        "thinking_budget_handoff_mode": "model",
+        "thinking_budget_restart_strategy": "standard",
+        "thinking_budget_final_round_tokens": 0,
         "verify_n": 1,
         "meta_n": 0,
         "meta_policy": "all-reviews",
@@ -1005,10 +1008,10 @@ class HandoffPromptTests(unittest.TestCase):
             "temperature": 0.0,
             "parsed": {"text": VALID_HANDOFF},
         }
-        max_tokens = 512
         force_ids = FakeTokenizer.encode(
             evaluate_thinking_handoff_restart.RESTART_FINALIZE_FORCE_TEXT
         )
+        max_tokens = len(first_ids) + len(force_ids) + len(final_ids) + 32
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
@@ -1097,6 +1100,32 @@ class HandoffPromptTests(unittest.TestCase):
 
 
 class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
+    def test_final_restart_round_can_use_a_smaller_reasoning_budget(self):
+        cfg = pipeline_cfg(
+            proof_max_new_tokens=512,
+            proof_generation_thinking_budgets=[480],
+            thinking_budget_final_round_tokens=100,
+        )
+
+        self.assertEqual(
+            run.resolve_thinking_budget_tokens(
+                0,
+                cfg,
+                solve_round_idx=0,
+                can_restart=True,
+            ),
+            480,
+        )
+        self.assertEqual(
+            run.resolve_thinking_budget_tokens(
+                0,
+                cfg,
+                solve_round_idx=1,
+                can_restart=False,
+            ),
+            100,
+        )
+
     async def test_budget_hit_handoff_restarts_before_only_verification_round(self):
         class FakeScheduler:
             tokenizer = FakeTokenizer()
@@ -1178,6 +1207,124 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(candidate["proof_generation_outputs"]), 2)
         self.assertEqual(len(candidate["proof_handoff_output"]), 1)
         self.assertEqual(candidate["proof_refine_output"], [])
+        self.assertEqual(
+            candidate["proof_solution"],
+            "A complete restarted proof.",
+        )
+
+    async def test_lossless_partial_handoff_reserves_final_output_budget(self):
+        class FakeScheduler:
+            tokenizer = FakeTokenizer()
+
+            def __init__(self):
+                self.calls = []
+                self.generation_count = 0
+
+            @staticmethod
+            def _token_ids_to_list(token_ids):
+                return list(token_ids)
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append((stage, prompt, kwargs))
+                if stage == "proof_generation":
+                    self.generation_count += 1
+                    if self.generation_count == 1:
+                        return {
+                            "success": True,
+                            "text": "<think>unfinished research",
+                            "finish_reason": "thinking_budget_reached",
+                            "usage": {
+                                "completion_tokens": 10,
+                                "estimated_prompt_tokens": 5,
+                                "thinking_budget_applied": True,
+                                "thinking_budget_action": "stop",
+                                "thinking_budget_force_skipped_closed": False,
+                            },
+                            "_thinking_budget_context_ids": [1, 2, 3],
+                        }
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A complete restarted proof.</solution>"
+                            "<self_evaluation>All steps checked.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_finalize":
+                    return {
+                        "success": True,
+                        "text": (
+                            run.FINAL_PARTIAL_FORCE_TEXT
+                            + "A useful reduction was found, but its final "
+                            "lower-bound lemma remains unproved."
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {
+                            "completion_tokens": 20,
+                            "estimated_prompt_tokens": 3,
+                        },
+                        "server_url": "http://test",
+                        "latency_s": 1.0,
+                    }
+                if stage == "proof_verify":
+                    return {
+                        "success": True,
+                        "text": (
+                            "<evaluation>The proof is complete.</evaluation>"
+                            "<suggestions>No repair needed.</suggestions>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                raise AssertionError(stage)
+
+        scheduler = FakeScheduler()
+        result = await run.run_candidate_pipeline(
+            "Prove the claim.",
+            0,
+            1,
+            scheduler,
+            pipeline_cfg(
+                proof_max_new_tokens=512,
+                proof_generation_thinking_budgets=[480],
+                thinking_budget_handoff_mode="lossless_partial",
+                thinking_budget_restart_strategy="deadline_aware",
+                thinking_budget_final_round_tokens=100,
+            ),
+        )
+        candidate = result["candidate"]
+
+        self.assertEqual(
+            [stage for stage, _, _ in scheduler.calls],
+            [
+                "proof_generation",
+                "proof_finalize",
+                "proof_generation",
+                "proof_verify",
+            ],
+        )
+        restarted_call = scheduler.calls[2]
+        self.assertEqual(restarted_call[2]["thinking_budget_tokens"], 100)
+        self.assertEqual(
+            restarted_call[2]["thinking_budget_force_text"],
+            run.RESTART_FINALIZE_FORCE_TEXT,
+        )
+        self.assertIn(
+            "Treat this as the final proof-writing attempt",
+            str(restarted_call[1]),
+        )
+        self.assertEqual(candidate["budget_restart_count"], 1)
+        self.assertEqual(
+            candidate["proof_handoff_output"][0]["finish_reason"],
+            "partial_passthrough",
+        )
+        self.assertIn(
+            "A useful reduction was found",
+            candidate["proof_handoffs"][0]["text"],
+        )
         self.assertEqual(
             candidate["proof_solution"],
             "A complete restarted proof.",

@@ -24,9 +24,14 @@ STRUCTURED_PARTIAL_FORCE_PREFIX = (
 )
 RESTART_FINALIZE_FORCE_TEXT = (
     "\nWe must stop exploratory reasoning now and write the final answer. "
-    "Synthesize the strongest rigorous proof supported by the work above, "
-    "resolve remaining gaps where possible, and state any unavoidable gap "
-    "honestly. Do not continue searching.\n</think>\n\n<solution>\n"
+    "Audit every construction, calculation, and impossibility claim against "
+    "the exact problem before using it. Do not cite an omitted argument, an "
+    "official solution, numerical evidence, or a supposedly standard fact "
+    "without proving the needed statement. Remove any claim that is not fully "
+    "justified. If a complete proof cannot be finished, give the strongest "
+    "rigorous partial proof and assign score 0 or 0.5 honestly rather than "
+    "claiming completeness. Do not continue searching.\n"
+    "</think>\n\n<solution>\n"
 )
 HANDOFF_ASSISTANT_PREFIX = "\n</think>\n\n<handoff>\n"
 HANDOFF_REQUIRED_SECTIONS = (
@@ -39,6 +44,8 @@ HANDOFF_REQUIRED_SECTIONS = (
 )
 HANDOFF_VARIANTS = ("evidence_first", "lemma_ledger", "continuation_frontier")
 DEFAULT_HANDOFF_VARIANT = HANDOFF_VARIANTS[0]
+HANDOFF_MODES = ("model", "lossless_partial")
+DEFAULT_HANDOFF_MODE = HANDOFF_MODES[0]
 RESTART_STRATEGIES = ("standard", "deadline_aware")
 DEFAULT_RESTART_STRATEGY = RESTART_STRATEGIES[0]
 HANDOFF_SECTION_MAX_TOKENS = {

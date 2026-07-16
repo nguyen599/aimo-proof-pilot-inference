@@ -458,5 +458,133 @@ Implementation:
   completion tokens.
 - It records the raw prompt, handoff, output, finish reason, real cutoff state,
   parseable proof state, proof length, latency, and throughput for every case.
-- The focused handoff suite passes with 11 tests after adding rendered-prompt
-  insertion coverage.
+- The focused handoff suite passes with 31 tests after adding rendered-prompt
+  insertion, restart-budget, and forced-finalization coverage.
+
+### Fresh restart controls
+
+The lossless handoff and an empty restart control were each tested on the same
+saved sunny-lines problem with a 122,000-token reasoning boundary and 126,000
+total completion tokens:
+
+| Restart input | Prompt tokens | Completion tokens | Throughput | Closed thinking | Parseable proof |
+|---|---:|---:|---:|---|---|
+| lossless untrusted partial report | 5,199 | 122,036 | 136.34 tok/s | no | no |
+| empty restart control | 631 | 122,070 | 140.19 tok/s | no | no |
+
+Both fresh attempts reached the reasoning boundary without emitting
+`</think>`. The empty control continued broad case enumeration. The lossless
+handoff recovered more concrete construction work near its tail, but it also
+continued researching until cutoff and therefore produced no visible
+`<solution>`.
+
+This comparison rules out two simple hypotheses:
+
+- resetting context alone does not make this checkpoint voluntarily finish;
+- carrying the previous partial report losslessly does not, by itself, reserve
+  output budget.
+
+The next test changes only the deadline policy. It caps fresh reasoning at
+100,000 tokens, then appends an explicit `</think><solution>` transition and
+spends the remainder of a 125,000-token completion allowance on the visible
+proof. This leaves approximately 25,000 tokens for a rigorous answer while
+keeping the full lossless handoff and deadline-aware restart instruction.
+
+Implementation commit: `46af604` (`Reserve output budget in proof restarts`).
+The evaluator records whether forced finalization ran and the number of tokens
+generated after the transition. A behavioral unit test verifies that the
+second request receives exactly
+`max_tokens - reasoning_tokens - force_text_tokens`.
+
+### Live result: deadline-aware restart without reserved output
+
+The lossless handoff was also tested with a stronger deadline-aware restart
+instruction, while retaining the original 122,000-token thinking boundary and
+126,000-token total completion allowance:
+
+```text
+prompt_tokens=5199
+completion_tokens=124073
+finish_reason=stop
+tokens_per_second=131.81
+closed_thinking=true
+parseable_proof=true
+proof_chars=6333
+self_score=1
+```
+
+This is a formatting completion improvement over both fresh controls, but it
+is not a rigorous-proof success. The generated answer explicitly says that the
+impossibility of `k=2` and `k>=4` is only sketched and appeals to an unstated
+"official solution" for the missing combinatorial argument. It then
+incorrectly assigns itself score `1`.
+
+The measured outcomes for this case are therefore:
+
+| Metric | Result |
+|---|---:|
+| Parser-valid XML | 1/1 |
+| Reached a visible proof | 1/1 |
+| Self-reported complete | 1/1 |
+| Manually rigorous proof | 0/1 |
+
+The deadline wording can induce a late transition out of thinking, but with
+only about 2,000 tokens left it encourages an unsupported proof sketch. It is
+not selected as the production policy by itself. The reserved-output
+experiment is required to determine whether an earlier transition leaves
+enough space to close the missing arguments honestly.
+
+### Live result: force finalization after 100,000 reasoning tokens
+
+The first reserved-output policy forced the transition after 100,000 reasoning
+tokens within a 125,000-token allowance:
+
+```text
+prompt_tokens=5282
+completion_tokens=108782
+finish_reason=stop
+hit_unfinished_thinking_budget=true
+budget_forced_finalization=true
+forced_finalization_tokens=8710
+tokens_per_second=143.54
+parseable_proof=true
+proof_chars=7186
+self_score=1
+```
+
+The forced transition worked exactly as implemented, and the model stopped
+well before exhausting the available visible-output budget. The proof is still
+rejected under manual mathematical review:
+
+- the `k=3`, `n=3` construction uses a line of slope `-1` while calling it
+  sunny;
+- the description of the six uncovered points first lists an incorrect
+  variable-length row;
+- the `k>=4` impossibility argument claims that the triangular lattice has no
+  three collinear points on a non-forbidden slope, which is false in general;
+- maximal coverage by mixed non-sunny line families is asserted without a
+  sufficient extremal proof;
+- the self-evaluation calls these steps complete and rigorous despite the
+  errors.
+
+Measured outcome:
+
+| Metric | Result |
+|---|---:|
+| Forced transition executed | 1/1 |
+| Parser-valid XML | 1/1 |
+| Self-reported complete | 1/1 |
+| Manually rigorous proof | 0/1 |
+
+Reserving 25,000 output tokens is therefore sufficient for formatting, but the
+model's late proof synthesis inherits unchecked claims from its long search.
+The next comparison moves the forced transition earlier and strengthens the
+finalization instruction: audit every construction and impossibility claim,
+never appeal to an omitted or official solution, and prefer an honest partial
+proof with score `0` or `0.5` over a false claim of completeness.
+
+## Current validation
+
+- Targeted Ruff checks pass.
+- Python compilation checks pass.
+- Full repository suite: 138 tests passed, 36 subtests passed.
