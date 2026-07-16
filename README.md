@@ -19,8 +19,6 @@ controller before loading any model on GPU.
 For general NII command routing, one-node shared-filesystem operations, and
 command-history inspection, see
 [NII_CONTROL_PANEL.md](NII_CONTROL_PANEL.md).
-The deployable Gradio Space and relay daemon sources are versioned under
-[`control-panel-nguyen/`](control-panel-nguyen/).
 
 ## Docker usage
 
