@@ -539,6 +539,9 @@ enough space to close the missing arguments honestly.
 The first reserved-output policy forced the transition after 100,000 reasoning
 tokens within a 125,000-token allowance:
 
+Artifact:
+`/tmp/thinking-handoff-restart-passthrough-force100k-sft750-20260717`
+
 ```text
 prompt_tokens=5282
 completion_tokens=108782
@@ -582,6 +585,65 @@ The next comparison moves the forced transition earlier and strengthens the
 finalization instruction: audit every construction and impossibility claim,
 never appeal to an omitted or official solution, and prefer an honest partial
 proof with score `0` or `0.5` over a false claim of completeness.
+
+### Live result: stricter audit at 80,000 and 60,000 reasoning tokens
+
+The next two runs kept the same problem, lossless handoff, 125,000-token total
+completion allowance, temperature `1.0`, and top-p `0.95`. They used the
+stricter final audit instruction and changed only the forced-transition
+boundary:
+
+Artifacts:
+
+- 80,000:
+  `/tmp/thinking-handoff-restart-force80k-auditv2-sft750-20260717`
+- 60,000:
+  `/tmp/thinking-handoff-restart-force60k-auditv2-sft750-20260717`
+
+| Reasoning boundary | Completion tokens | Forced visible tokens | Finish reason | Closed `solution` | Valid XML |
+|---|---:|---:|---|---|---|
+| 80,000 | 125,000 | 44,822 | `length` | no | no |
+| 60,000 | 125,000 | 64,861 | `length` | no | no |
+
+Both runs emitted `</think><solution>` at the configured boundary, proving that
+the control flow and reserved-token accounting worked. Neither emitted
+`</solution>`, `<self_evaluation>`, or `<score>`. Their visible output continued
+open-ended case analysis until the full 125,000-token request limit.
+
+Moving the transition earlier therefore made formatting completion worse on
+this case. The model did not use the larger visible-output reserve to synthesize
+and audit a bounded proof; it resumed exploratory solving inside the
+`solution` section.
+
+Combined result for the tested forced boundaries:
+
+| Boundary | Parser-valid proof | Manually rigorous proof |
+|---|---:|---:|
+| 100,000 | 1/1 | 0/1 |
+| 80,000 | 0/1 | 0/1 |
+| 60,000 | 0/1 | 0/1 |
+
+No tested boundary increased rigorous proof completion on the sunny-lines
+case. The 100,000-token boundary is the only parser-valid result, but its proof
+contains fatal mathematical errors. The final-round budget remains opt-in
+rather than becoming a production default.
+
+## Current decision
+
+- Select `lossless_partial` over model-written handoffs. Across temperatures
+  `1.0`, `0.7`, and `0.6`, model reducers were structurally usable only after
+  substantial repair and could introduce contradictions or lose mathematical
+  state.
+- Keep `deadline_aware` available for fresh proof restarts.
+- Keep `thinking_budget_final_round_tokens=0` as the backward-compatible
+  default. Values `60,000`, `80,000`, and `100,000` did not produce a rigorous
+  proof in the live comparison.
+- Treat parser validity and self-reported score as insufficient. A run counts
+  as complete only when the XML closes and the mathematical proof survives
+  external review.
+- The next promising experiment is a separate bounded synthesis call over the
+  lossless research record, rather than moving the same-context force boundary
+  again.
 
 ## Current validation
 

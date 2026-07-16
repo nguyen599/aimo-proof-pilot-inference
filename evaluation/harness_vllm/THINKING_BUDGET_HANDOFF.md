@@ -52,6 +52,13 @@ The 100,000-token value above is an experiment configuration for a
 [`EXPERIMENT.md`](../runs/thinking-handoff-opt-sft750-20260717/EXPERIMENT.md)
 for the measured completion and proof-quality results before adopting it.
 
+Current live evidence does not justify a nonzero production default. On the
+same difficult proof, forcing at 100,000 tokens produced valid XML with an
+incorrect proof, while forcing at 80,000 or 60,000 tokens exhausted the full
+125,000-token allowance without closing `<solution>`. Keep the final-round
+budget opt-in and evaluate mathematical correctness separately from parser
+validity.
+
 ## Prompt optimization
 
 `optimize_thinking_handoff.py` reuses saved long reasoning contexts. It removes
