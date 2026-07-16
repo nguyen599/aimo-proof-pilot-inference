@@ -30,26 +30,6 @@ the local GPU worker processes. Environment variables remain supported as
 defaults, but explicit CLI options are easier to audit in saved launch logs.
 
 ```bash
-export NVIDIA_VISIBLE_DEVICES=all
-export NCCL_IB_HCA=mlx5_ibn1,mlx5_ibn2,mlx5_ibn3,mlx5_ibn4,mlx5_ibn5,mlx5_ibn6,mlx5_ibn7,mlx5_ibn8
-export NCCL_IB_PCI_RELAXED_ORDERING=1
-export NCCL_CROSS_NIC=1
-
-export TMP=/tmp
-export TMPDIR=/tmp
-export HF_HOME=/tmp/hf_home
-export HUGGINGFACE_HUB_CACHE=/tmp/hf_cache
-export HF_HUB_CACHE=/tmp/hf_cache
-export TRANSFORMERS_CACHE=/tmp/hf_cache
-export XDG_CACHE_HOME=/tmp/xdg_cache
-export HF_XET_CACHE=/tmp/hf_xet
-export HF_HUB_DISABLE_XET=1
-mkdir -p \
-  /tmp/hf_home \
-  /tmp/hf_cache \
-  /tmp/xdg_cache/huggingface/xet/logs \
-  /tmp/hf_xet
-
 python -m evaluation.harness_vllm.run \
   --node-rank "${NODE_RANK:?set the node rank from 0 through 7}" \
   --world-size 8 \
@@ -69,6 +49,9 @@ python -m evaluation.harness_vllm.run \
   --max-concurrent-problems 2 \
   --refine-rounds 1
 ```
+
+The NII image already provides the CUDA/NCCL and shared `/tmp` cache
+environment. Do not repeat those exports in each rank wrapper.
 
 `max_concurrent_requests` defaults to `AIMO_REQUESTS_PER_GPU` multiplied by
 the selected local GPU count. The example therefore allows 256 local scheduler
