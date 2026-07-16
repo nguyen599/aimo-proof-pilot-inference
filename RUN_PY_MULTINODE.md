@@ -22,6 +22,11 @@ verification, meta-verification, and refinement calls. Rank 0 merges candidates
 in global ID order, runs final selection, and writes the submission. Other
 ranks never write the final CSV.
 
+If an unfinished proof reaches its thinking budget while a refine round remains,
+the candidate uses that round for a structured context-reset handoff before
+verification. See
+[`evaluation/harness_vllm/THINKING_BUDGET_HANDOFF.md`](evaluation/harness_vllm/THINKING_BUDGET_HANDOFF.md).
+
 ## Launch
 
 Run the same command once on every node. Set `NODE_RANK` to `0` through `7`;

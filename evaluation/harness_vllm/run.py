@@ -35,6 +35,33 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 from tqdm.auto import tqdm
 import nest_asyncio
 
+try:
+    from evaluation.harness_vllm.thinking_handoff import (
+        DEFAULT_HANDOFF_VARIANT,
+        FINAL_PARTIAL_FORCE_TEXT,
+        HANDOFF_ASSISTANT_PREFIX,
+        HANDOFF_VARIANTS,
+        append_restart_instruction,
+        build_handoff_instruction,
+        build_handoff_repair_instruction,
+        build_user_turn_prompt_ids,
+        parse_handoff_response,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "evaluation":
+        raise
+    from thinking_handoff import (  # type: ignore[no-redef]
+        DEFAULT_HANDOFF_VARIANT,
+        FINAL_PARTIAL_FORCE_TEXT,
+        HANDOFF_ASSISTANT_PREFIX,
+        HANDOFF_VARIANTS,
+        append_restart_instruction,
+        build_handoff_instruction,
+        build_handoff_repair_instruction,
+        build_user_turn_prompt_ids,
+        parse_handoff_response,
+    )
+
 # Apply the patch to allow nested event loops
 nest_asyncio.apply()
 
@@ -60,6 +87,18 @@ def is_fatal_inference_error(exc: BaseException) -> bool:
     if isinstance(exc, APIConnectionError):
         return True
     return isinstance(exc, APIStatusError) and exc.status_code >= 500
+
+
+def environment_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value, got {value!r}")
 
 DEFAULT_VLLM_EXTRA_ARGS = (
     "--generation-config vllm --quantization fp8 --kv-cache-dtype fp8 --block-size 256 "
@@ -158,10 +197,20 @@ class CFG:
         122_000,
         122_000,
     ]
-    thinking_budget_force_text = (
-        "\n</think>\n\n<solution>\n"
-        "We were unable to produce a complete proof. However, the strongest "
-        "partial progress is as follows:\n"
+    thinking_budget_force_text = FINAL_PARTIAL_FORCE_TEXT
+    thinking_budget_handoff_enabled = environment_flag(
+        "AIMO_THINKING_BUDGET_HANDOFF_ENABLED",
+        True,
+    )
+    thinking_budget_handoff_max_tokens = int(
+        os.environ.get("AIMO_THINKING_BUDGET_HANDOFF_MAX_TOKENS", "4096")
+    )
+    thinking_budget_handoff_temperature = float(
+        os.environ.get("AIMO_THINKING_BUDGET_HANDOFF_TEMPERATURE", "0.7")
+    )
+    thinking_budget_handoff_prompt_variant = os.environ.get(
+        "AIMO_THINKING_BUDGET_HANDOFF_PROMPT_VARIANT",
+        DEFAULT_HANDOFF_VARIANT,
     )
     deepseek_thinking_budget_force_text = (
         "\nWe should now write the final solution due time limit.\n"
@@ -431,6 +480,10 @@ class PipelineConfig:
     thinking_budget_enabled: bool
     proof_generation_thinking_budgets: list[int]
     thinking_budget_force_text: str
+    thinking_budget_handoff_enabled: bool
+    thinking_budget_handoff_max_tokens: int
+    thinking_budget_handoff_temperature: float
+    thinking_budget_handoff_prompt_variant: str
     deepseek_thinking_budget_force_text: str
     verifier_thinking_budget_tokens: int
     verifier_thinking_budget_force_text: str
@@ -1627,6 +1680,7 @@ def parse_detail_int(detail: str, key: str) -> Optional[int]:
 def stage_file_alias(stage: str) -> str:
     return {
         "proof_generation": "proof_gen",
+        "proof_handoff": "proof_handoff",
         "proof_refine": "proof_refine",
         "proof_verify": "verify",
         "proof_meta_verify": "meta",
@@ -2811,6 +2865,11 @@ class ChatScheduler:
         detail: str = "",
         thinking_budget_tokens: Optional[int] = None,
         thinking_budget_force_text: str = "",
+        thinking_budget_action: str = "finalize",
+        prompt_token_ids: Optional[list[int]] = None,
+        max_tokens_override: Optional[int] = None,
+        response_prefix: str = "",
+        return_context_ids: bool = False,
     ) -> dict[str, Any]:
 
         response: Optional[dict[str, Any]] = None
@@ -2837,6 +2896,11 @@ class ChatScheduler:
                         detail,
                         thinking_budget_tokens,
                         thinking_budget_force_text,
+                        thinking_budget_action,
+                        prompt_token_ids,
+                        max_tokens_override,
+                        response_prefix,
+                        return_context_ids,
                     )
         except Exception:
             if progress is not None:
@@ -2884,6 +2948,11 @@ class ChatScheduler:
         detail: str = "",
         thinking_budget_tokens: Optional[int] = None,
         thinking_budget_force_text: str = "",
+        thinking_budget_action: str = "finalize",
+        prompt_token_ids: Optional[list[int]] = None,
+        max_tokens_override: Optional[int] = None,
+        response_prefix: str = "",
+        return_context_ids: bool = False,
     ) -> dict[str, Any]:
         client = self._clients[index]
         call_log_path: Optional[Path] = None
@@ -2896,28 +2965,44 @@ class ChatScheduler:
             extra_body["min_tokens"] = self.sampling.min_new_tokens
         if stage in {"proof_verify"}:
             extra_body["repetition_penalty"] = 1.05
-        assistant_prefix = None
-        if isinstance(prompt, str):
-            messages = [{"role": "user", "content": prompt}]
-        else:
-            messages = [dict(message) for message in prompt]
-            if not messages or any(
-                message.get("role") not in {"system", "user", "assistant"}
-                or not isinstance(message.get("content"), str)
-                for message in messages
-            ):
-                raise ValueError(
-                    "prompt messages must contain valid role/content pairs"
-                )
+        if thinking_budget_action not in {"finalize", "stop"}:
+            raise ValueError(
+                "thinking_budget_action must be either 'finalize' or 'stop'"
+            )
         started = time.time()
-        rendered_prompt, prompt_ids = self._render_completion_prompt(
-            messages, assistant_prefix
-        )
+        assistant_prefix = None
+        if prompt_token_ids is not None:
+            prompt_ids = self._token_ids_to_list(prompt_token_ids)
+            rendered_prompt = self.tokenizer.decode(
+                prompt_ids,
+                skip_special_tokens=False,
+            )
+        else:
+            assistant_prefix = None
+            if isinstance(prompt, str):
+                messages = [{"role": "user", "content": prompt}]
+            else:
+                messages = [dict(message) for message in prompt]
+                if not messages or any(
+                    message.get("role") not in {"system", "user", "assistant"}
+                    or not isinstance(message.get("content"), str)
+                    for message in messages
+                ):
+                    raise ValueError(
+                        "prompt messages must contain valid role/content pairs"
+                    )
+            rendered_prompt, prompt_ids = self._render_completion_prompt(
+                messages, assistant_prefix
+            )
         prompt_tokens = len(prompt_ids)
         self._maybe_log_stage_prompt(stage, detail, rendered_prompt, prompt_tokens)
-        configured_max_tokens = self.stage_max_new_tokens.get(
-            stage, self.sampling.max_new_tokens
+        configured_max_tokens = (
+            int(max_tokens_override)
+            if max_tokens_override is not None
+            else self.stage_max_new_tokens.get(stage, self.sampling.max_new_tokens)
         )
+        if configured_max_tokens < 1:
+            raise ValueError("max_tokens_override must be positive")
         max_tokens = self._adjust_max_tokens_for_context(
             stage,
             prompt_tokens,
@@ -3100,7 +3185,10 @@ class ChatScheduler:
                 budget_tokens: Optional[int] = None
                 if (
                     thinking_budget_tokens is not None
-                    and thinking_budget_force_text
+                    and (
+                        thinking_budget_force_text
+                        or thinking_budget_action == "stop"
+                    )
                     and max_tokens > 1
                 ):
                     budget_tokens = min(
@@ -3159,6 +3247,17 @@ class ChatScheduler:
                             usage = second_segment["usage"]
                     else:
                         finish_reason = "thinking_budget_reached"
+                elif thinking_budget_applied and thinking_budget_action == "stop":
+                    finish_reason = "thinking_budget_reached"
+                    logging.info(
+                        "Stopped unfinished thinking for handoff stage=%s detail=%s "
+                        "reason=%s budget=%s streamed=%d",
+                        stage,
+                        detail,
+                        thinking_stop_reason,
+                        budget_tokens,
+                        streamed_tokens,
+                    )
                 elif thinking_budget_applied:
                     intervention_text = thinking_budget_force_text
                     append_intervention_to_output = True
@@ -3229,6 +3328,7 @@ class ChatScheduler:
                 usage["thinking_budget_stop_reason"] = (
                     thinking_stop_reason if thinking_budget_applied else None
                 )
+                usage["thinking_budget_action"] = thinking_budget_action
                 usage["repetition_guard_applied"] = repetition_guard_applied
                 usage["repetition_guard_line"] = first_segment.get("repetition_line")
                 usage["repetition_guard_kind"] = first_segment.get("repetition_kind")
@@ -3236,7 +3336,7 @@ class ChatScheduler:
                 usage["thinking_budget_force_skipped_closed"] = (
                     thinking_budget_skipped_closed
                 )
-                text = (assistant_prefix or "") + "".join(text_parts)
+                text = response_prefix + (assistant_prefix or "") + "".join(text_parts)
                 result = {
                     "stage": stage,
                     "success": True,
@@ -3247,6 +3347,18 @@ class ChatScheduler:
                     "server_url": self.base_urls[index],
                     "latency_s": time.time() - started,
                 }
+                if (
+                    thinking_budget_applied
+                    and thinking_budget_action == "stop"
+                    and not thinking_budget_skipped_closed
+                ):
+                    result["_thinking_budget_context_ids"] = (
+                        prompt_ids + generated_token_ids
+                    )
+                if return_context_ids:
+                    result["_completion_context_ids"] = (
+                        prompt_ids + generated_token_ids
+                    )
                 self._append_llm_call_output(call_log_path, result)
                 return result
             if thinking_budget_tokens is not None:
@@ -3266,7 +3378,7 @@ class ChatScheduler:
                 extra_body=request_extra_body or None,
             )
             choice = response.choices[0]
-            text = (assistant_prefix or "") + (choice.text or "")
+            text = response_prefix + (assistant_prefix or "") + (choice.text or "")
             usage = response_usage_to_dict(getattr(response, "usage", None))
             usage["requested_max_tokens"] = max_tokens
             usage["estimated_prompt_tokens"] = prompt_tokens
@@ -3280,6 +3392,11 @@ class ChatScheduler:
                 "server_url": self.base_urls[index],
                 "latency_s": time.time() - started,
             }
+            if return_context_ids:
+                completion_ids = self._token_ids_to_list(
+                    self.tokenizer.encode(choice.text or "", add_special_tokens=False)
+                )
+                result["_completion_context_ids"] = prompt_ids + completion_ids
             self._append_llm_call_output(call_log_path, result)
             return result
         except Exception as exc:
@@ -3509,6 +3626,159 @@ def resolve_proof_generation_temperature(
     return float(cfg.default_temperature)
 
 
+def response_hit_unfinished_thinking_budget(response: dict[str, Any]) -> bool:
+    usage = response.get("usage") or {}
+    return bool(
+        usage.get("thinking_budget_applied")
+        and usage.get("thinking_budget_action") == "stop"
+        and not usage.get("thinking_budget_force_skipped_closed")
+        and response.get("_thinking_budget_context_ids")
+    )
+
+
+async def request_proof_attempt_handoff(
+    *,
+    scheduler: ChatScheduler,
+    generation_response: dict[str, Any],
+    attempt_idx: int,
+    round_idx: int,
+    cfg: PipelineConfig,
+    progress: Optional[PipelineProgress],
+) -> tuple[Optional[dict[str, Any]], list[dict[str, Any]]]:
+    context_ids = generation_response.get("_thinking_budget_context_ids")
+    if not context_ids:
+        return None, []
+
+    outputs: list[dict[str, Any]] = []
+    prompt_ids = build_user_turn_prompt_ids(
+        scheduler.tokenizer,
+        context_ids,
+        build_handoff_instruction(
+            getattr(
+                cfg,
+                "thinking_budget_handoff_prompt_variant",
+                DEFAULT_HANDOFF_VARIANT,
+            )
+        ),
+        close_open_thinking=True,
+    )
+    previous_context_ids: Optional[list[int]] = None
+    for handoff_try in range(2):
+        if handoff_try > 0:
+            if not previous_context_ids:
+                break
+            prompt_ids = build_user_turn_prompt_ids(
+                scheduler.tokenizer,
+                previous_context_ids,
+                build_handoff_repair_instruction(),
+                close_open_thinking=False,
+            )
+        response = await scheduler.call(
+            "proof_handoff",
+            "",
+            progress=progress,
+            detail=(
+                f"candidate={attempt_idx} round={round_idx} "
+                f"try={handoff_try + 1}"
+            ),
+            temperature=float(
+                getattr(cfg, "thinking_budget_handoff_temperature", 0.7)
+            ),
+            prompt_token_ids=prompt_ids,
+            max_tokens_override=int(
+                getattr(cfg, "thinking_budget_handoff_max_tokens", 4096)
+            ),
+            response_prefix=HANDOFF_ASSISTANT_PREFIX,
+            return_context_ids=True,
+        )
+        previous_context_ids = response.pop("_completion_context_ids", None)
+        parsed = parse_handoff_response(response.get("text", ""))
+        output = make_output(
+            "proof_handoff",
+            response,
+            parsed,
+            round_idx=round_idx,
+            handoff_try=handoff_try + 1,
+            prompt_variant=getattr(
+                cfg,
+                "thinking_budget_handoff_prompt_variant",
+                DEFAULT_HANDOFF_VARIANT,
+            ),
+        )
+        outputs.append(output)
+        if parsed["is_valid"]:
+            return parsed, outputs
+        if progress is not None:
+            progress.log(
+                "candidate=%d round=%d stage=handoff status=invalid try=%d missing=%s",
+                attempt_idx,
+                round_idx,
+                handoff_try + 1,
+                ",".join(parsed["missing_sections"]),
+            )
+    return None, outputs
+
+
+async def finalize_budget_stopped_generation(
+    *,
+    scheduler: ChatScheduler,
+    generation_response: dict[str, Any],
+    force_text: str,
+    attempt_idx: int,
+    round_idx: int,
+    cfg: PipelineConfig,
+    progress: Optional[PipelineProgress],
+) -> dict[str, Any]:
+    context_ids = list(generation_response.get("_thinking_budget_context_ids") or [])
+    if not context_ids:
+        return generation_response
+    force_ids = scheduler._token_ids_to_list(
+        scheduler.tokenizer.encode(force_text, add_special_tokens=False)
+    )
+    used_tokens = int(
+        (generation_response.get("usage") or {}).get("completion_tokens") or 0
+    )
+    remaining_tokens = max(
+        1,
+        int(cfg.proof_max_new_tokens) - used_tokens - len(force_ids),
+    )
+    continuation = await scheduler.call(
+        "proof_finalize",
+        "",
+        progress=progress,
+        detail=f"candidate={attempt_idx} round={round_idx} budget_fallback=1",
+        prompt_token_ids=context_ids + force_ids,
+        max_tokens_override=remaining_tokens,
+        response_prefix=force_text,
+    )
+    combined = dict(generation_response)
+    combined["stage"] = "proof_generation"
+    combined["text"] = (
+        str(generation_response.get("text") or "")
+        + str(continuation.get("text") or "")
+    )
+    combined["finish_reason"] = continuation.get("finish_reason")
+    combined["server_url"] = continuation.get("server_url")
+    combined["latency_s"] = float(generation_response.get("latency_s") or 0.0) + float(
+        continuation.get("latency_s") or 0.0
+    )
+    usage = dict(generation_response.get("usage") or {})
+    continuation_usage = continuation.get("usage") or {}
+    final_completion_tokens = (
+        used_tokens
+        + len(force_ids)
+        + int(continuation_usage.get("completion_tokens") or 0)
+    )
+    usage["completion_tokens"] = final_completion_tokens
+    usage["total_tokens"] = int(usage.get("estimated_prompt_tokens") or 0) + (
+        final_completion_tokens
+    )
+    usage["thinking_budget_fallback_finalized"] = True
+    combined["usage"] = usage
+    combined.pop("_thinking_budget_context_ids", None)
+    return combined
+
+
 def resolve_candidate_prompt_family(
     attempt_idx: int,
     total_candidates: int,
@@ -3617,6 +3887,15 @@ def make_generation_only_candidate(
         "prompt_family": initial_generation.get("prompt_family"),
         "generation_mode": initial_generation.get("generation_mode"),
         "proof_generation_output": initial_generation.get("generation_output"),
+        "proof_generation_outputs": initial_generation.get(
+            "generation_outputs",
+            [initial_generation.get("generation_output")],
+        ),
+        "proof_handoff_output": initial_generation.get("handoff_outputs", []),
+        "proof_handoffs": initial_generation.get("handoffs", []),
+        "budget_restart_count": int(
+            initial_generation.get("consumed_refine_rounds") or 0
+        ),
         "proof_verify_output": [],
         "proof_meta_verify_output": [],
         "proof_refine_output": [],
@@ -3752,72 +4031,161 @@ async def generate_single_attempt(
         generation_prompt = build_opd_proof_generation_prompt(question)
         generation_parser = parse_generation_response
         thinking_budget_force_text = cfg.thinking_budget_force_text
-    if progress is not None:
-        progress.log(
-            "candidate=%d stage=generation status=start mode=%s prompt_family=%s",
-            attempt_idx,
-            generation_mode,
-            prompt_family,
+    generation_outputs: list[dict[str, Any]] = []
+    handoff_outputs: list[dict[str, Any]] = []
+    handoffs: list[dict[str, Any]] = []
+    solve_round_idx = 0
+    active_prompt = generation_prompt
+
+    while True:
+        can_restart = bool(
+            getattr(cfg, "thinking_budget_handoff_enabled", False)
+            and solve_round_idx < cfg.refine_rounds
         )
-    generation_response = await scheduler.call(
-        "proof_generation",
-        generation_prompt,
-        progress=progress,
-        detail=(
-            f"candidate={attempt_idx} round=0 mode={generation_mode} "
-            f"prompt_family={prompt_family}"
-        ),
-        temperature=resolve_proof_generation_temperature(attempt_idx, cfg),
-        thinking_budget_tokens=resolve_thinking_budget_tokens(attempt_idx, cfg),
-        thinking_budget_force_text=thinking_budget_force_text,
-    )
-    log_generation_visible_output(
-        "proof_generation",
-        generation_response.get("text", ""),
-        problem_id=problem_id,
-        attempt_idx=attempt_idx,
-        round_idx=0,
-    )
-    generation_parsed = generation_parser(
-        generation_response.get("text", ""),
-        require_self_evaluation=True,
-    )
-    generation_parsed["generation_mode"] = generation_mode
-    generation_parsed["prompt_family"] = prompt_family
-    if not require_valid_candidate_response(
-        generation_parsed,
-        problem_id=problem_id,
-        attempt_idx=attempt_idx,
-        stage="proof_generation",
-        round_idx=0,
-    ):
-        return None
-    proof = generation_parsed["proof"]
-    generation_output = make_output(
-        "proof_generation",
-        generation_response,
-        generation_parsed,
-        prompt_family=prompt_family,
-    )
-    if progress is not None:
-        progress.log(
-            "candidate=%d stage=generation status=parsed mode=%s has_solution=%s "
-            "has_self_evaluation=%s proof_chars=%d self_score=%s",
-            attempt_idx,
-            generation_mode,
-            generation_parsed["has_solution_section"],
-            generation_parsed["has_self_evaluation_section"],
-            len(proof),
-            generation_parsed.get("self_score"),
+        if progress is not None:
+            progress.log(
+                "candidate=%d round=%d stage=generation status=start mode=%s "
+                "prompt_family=%s budget_action=%s",
+                attempt_idx,
+                solve_round_idx,
+                generation_mode,
+                prompt_family,
+                "stop" if can_restart else "finalize",
+            )
+        generation_response = await scheduler.call(
+            "proof_generation",
+            active_prompt,
+            progress=progress,
+            detail=(
+                f"candidate={attempt_idx} round={solve_round_idx} "
+                f"mode={generation_mode} prompt_family={prompt_family}"
+            ),
+            temperature=resolve_proof_generation_temperature(attempt_idx, cfg),
+            thinking_budget_tokens=resolve_thinking_budget_tokens(attempt_idx, cfg),
+            thinking_budget_force_text=thinking_budget_force_text,
+            thinking_budget_action="stop" if can_restart else "finalize",
         )
-    return {
-        "attempt_idx": attempt_idx,
-        "prompt_family": prompt_family,
-        "generation_output": generation_output,
-        "generation_parsed": generation_parsed,
-        "generation_mode": generation_mode,
-        "proof": proof,
-    }
+
+        if can_restart and response_hit_unfinished_thinking_budget(
+            generation_response
+        ):
+            if progress is not None:
+                progress.log(
+                    "candidate=%d round=%d stage=handoff status=start",
+                    attempt_idx,
+                    solve_round_idx,
+                )
+            handoff_parsed, new_handoff_outputs = await request_proof_attempt_handoff(
+                scheduler=scheduler,
+                generation_response=generation_response,
+                attempt_idx=attempt_idx,
+                round_idx=solve_round_idx,
+                cfg=cfg,
+                progress=progress,
+            )
+            handoff_outputs.extend(new_handoff_outputs)
+            if handoff_parsed is not None:
+                generation_outputs.append(
+                    make_output(
+                        "proof_generation",
+                        generation_response,
+                        {},
+                        round_idx=solve_round_idx,
+                        prompt_family=prompt_family,
+                        budget_stopped=True,
+                        consumed_by_handoff=True,
+                    )
+                )
+                handoffs.append(handoff_parsed)
+                solve_round_idx += 1
+                active_prompt = append_restart_instruction(
+                    generation_prompt,
+                    handoff_parsed["text"],
+                    solve_round_idx,
+                )
+                if progress is not None:
+                    progress.log(
+                        "candidate=%d round=%d stage=handoff status=complete "
+                        "restart_round=%d handoff_chars=%d",
+                        attempt_idx,
+                        solve_round_idx - 1,
+                        solve_round_idx,
+                        len(handoff_parsed["text"]),
+                    )
+                continue
+
+            logging.warning(
+                "Handoff generation failed candidate=%d round=%d; "
+                "falling back to final partial-proof completion",
+                attempt_idx,
+                solve_round_idx,
+            )
+            generation_response = await finalize_budget_stopped_generation(
+                scheduler=scheduler,
+                generation_response=generation_response,
+                force_text=thinking_budget_force_text,
+                attempt_idx=attempt_idx,
+                round_idx=solve_round_idx,
+                cfg=cfg,
+                progress=progress,
+            )
+
+        log_generation_visible_output(
+            "proof_generation",
+            generation_response.get("text", ""),
+            problem_id=problem_id,
+            attempt_idx=attempt_idx,
+            round_idx=solve_round_idx,
+        )
+        generation_parsed = generation_parser(
+            generation_response.get("text", ""),
+            require_self_evaluation=True,
+        )
+        generation_parsed["generation_mode"] = generation_mode
+        generation_parsed["prompt_family"] = prompt_family
+        generation_output = make_output(
+            "proof_generation",
+            generation_response,
+            generation_parsed,
+            round_idx=solve_round_idx,
+            prompt_family=prompt_family,
+        )
+        generation_outputs.append(generation_output)
+        if not require_valid_candidate_response(
+            generation_parsed,
+            problem_id=problem_id,
+            attempt_idx=attempt_idx,
+            stage="proof_generation",
+            round_idx=solve_round_idx,
+        ):
+            return None
+        proof = generation_parsed["proof"]
+        if progress is not None:
+            progress.log(
+                "candidate=%d round=%d stage=generation status=parsed mode=%s "
+                "has_solution=%s has_self_evaluation=%s proof_chars=%d self_score=%s "
+                "budget_restarts=%d",
+                attempt_idx,
+                solve_round_idx,
+                generation_mode,
+                generation_parsed["has_solution_section"],
+                generation_parsed["has_self_evaluation_section"],
+                len(proof),
+                generation_parsed.get("self_score"),
+                len(handoffs),
+            )
+        return {
+            "attempt_idx": attempt_idx,
+            "prompt_family": prompt_family,
+            "generation_output": generation_output,
+            "generation_outputs": generation_outputs,
+            "handoff_outputs": handoff_outputs,
+            "handoffs": handoffs,
+            "consumed_refine_rounds": solve_round_idx,
+            "generation_parsed": generation_parsed,
+            "generation_mode": generation_mode,
+            "proof": proof,
+        }
 
 
 async def run_verification_round(
@@ -4125,6 +4493,13 @@ async def run_single_attempt(
         initial_generation.get("prompt_family") or PROMPT_FAMILY_OPD
     )
     proof = initial_generation["proof"]
+    consumed_refine_rounds = max(
+        0,
+        min(
+            int(initial_generation.get("consumed_refine_rounds") or 0),
+            int(cfg.refine_rounds),
+        ),
+    )
 
     proof_verify_output: list[dict[str, Any]] = []
     proof_meta_verify_output: list[dict[str, Any]] = []
@@ -4151,7 +4526,7 @@ async def run_single_attempt(
         except (TypeError, ValueError):
             return -1.0
 
-    for round_idx in range(cfg.refine_rounds + 1):
+    for round_idx in range(consumed_refine_rounds, cfg.refine_rounds + 1):
         if progress is not None:
             progress.log(
                 "candidate=%d round=%d/%d stage=verification status=start verify_n=%d proof_chars=%d",
@@ -4355,6 +4730,13 @@ async def run_single_attempt(
         "prompt_family": prompt_family,
         "generation_mode": initial_generation.get("generation_mode"),
         "proof_generation_output": generation_output,
+        "proof_generation_outputs": initial_generation.get(
+            "generation_outputs",
+            [generation_output],
+        ),
+        "proof_handoff_output": initial_generation.get("handoff_outputs", []),
+        "proof_handoffs": initial_generation.get("handoffs", []),
+        "budget_restart_count": consumed_refine_rounds,
         "proof_verify_output": proof_verify_output,
         "proof_meta_verify_output": proof_meta_verify_output,
         "proof_refine_output": proof_refine_output,
@@ -5224,6 +5606,10 @@ class ProofRuntime:
         thinking_budget_enabled: bool,
         proof_generation_thinking_budgets: list[int],
         thinking_budget_force_text: str,
+        thinking_budget_handoff_enabled: bool,
+        thinking_budget_handoff_max_tokens: int,
+        thinking_budget_handoff_temperature: float,
+        thinking_budget_handoff_prompt_variant: str,
         deepseek_thinking_budget_force_text: str,
         verifier_thinking_budget_tokens: int,
         verifier_thinking_budget_force_text: str,
@@ -5315,6 +5701,7 @@ class ProofRuntime:
         )
         self.stage_token_limits = {
             "proof_generation": proof_max_new_tokens,
+            "proof_handoff": thinking_budget_handoff_max_tokens,
             "proof_refine": proof_max_new_tokens,
             "proof_verify": verifier_max_new_tokens,
             "proof_meta_verify": meta_max_new_tokens,
@@ -5326,6 +5713,14 @@ class ProofRuntime:
         normalized_selector_mode = selector_mode.strip().lower()
         if normalized_selector_mode not in {"llm", "score"}:
             raise ValueError("selector_mode must be either 'llm' or 'score'")
+        normalized_handoff_variant = (
+            thinking_budget_handoff_prompt_variant.strip().lower()
+        )
+        if normalized_handoff_variant not in HANDOFF_VARIANTS:
+            raise ValueError(
+                "thinking_budget_handoff_prompt_variant must be one of "
+                + ", ".join(HANDOFF_VARIANTS)
+            )
         self.pipeline_config = PipelineConfig(
             proof_max_new_tokens=proof_max_new_tokens,
             default_temperature=float(temperature),
@@ -5347,6 +5742,19 @@ class ProofRuntime:
                 int(value) for value in proof_generation_thinking_budgets
             ],
             thinking_budget_force_text=thinking_budget_force_text,
+            thinking_budget_handoff_enabled=bool(
+                thinking_budget_handoff_enabled
+            ),
+            thinking_budget_handoff_max_tokens=max(
+                1,
+                int(thinking_budget_handoff_max_tokens),
+            ),
+            thinking_budget_handoff_temperature=float(
+                thinking_budget_handoff_temperature
+            ),
+            thinking_budget_handoff_prompt_variant=(
+                normalized_handoff_variant
+            ),
             deepseek_thinking_budget_force_text=(
                 deepseek_thinking_budget_force_text
             ),
@@ -5921,6 +6329,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--meta-n", type=int)
     pipeline.add_argument("--refine-rounds", type=int)
     pipeline.add_argument("--refine-review-n", type=int)
+    pipeline.add_argument(
+        "--thinking-budget-handoff-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    pipeline.add_argument("--thinking-budget-handoff-max-tokens", type=int)
+    pipeline.add_argument("--thinking-budget-handoff-temperature", type=float)
+    pipeline.add_argument(
+        "--thinking-budget-handoff-prompt-variant",
+        choices=HANDOFF_VARIANTS,
+    )
     pipeline.add_argument("--problem-timeout-seconds", type=int)
     pipeline.add_argument("--selection-reserve-seconds", type=int)
     pipeline.add_argument("--selector-mode", choices=("llm", "score"))
@@ -5984,6 +6403,16 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "meta_n": "meta_n",
         "refine_rounds": "refine_rounds",
         "refine_review_n": "refine_review_n",
+        "thinking_budget_handoff_enabled": "thinking_budget_handoff_enabled",
+        "thinking_budget_handoff_max_tokens": (
+            "thinking_budget_handoff_max_tokens"
+        ),
+        "thinking_budget_handoff_temperature": (
+            "thinking_budget_handoff_temperature"
+        ),
+        "thinking_budget_handoff_prompt_variant": (
+            "thinking_budget_handoff_prompt_variant"
+        ),
         "problem_timeout_seconds": "problem_timeout_seconds",
         "selection_reserve_seconds": "selection_reserve_seconds",
         "selector_mode": "selector_mode",
@@ -6064,6 +6493,19 @@ def run(cfg: type[CFG] = CFG) -> None:
         raise ValueError("AIMO_PIPELINES_PER_PROBLEM must be at least 1")
     if int(cfg.refine_rounds) < 0:
         raise ValueError("AIMO_REFINE_ROUNDS cannot be negative")
+    if int(cfg.thinking_budget_handoff_max_tokens) < 1:
+        raise ValueError(
+            "AIMO_THINKING_BUDGET_HANDOFF_MAX_TOKENS must be positive"
+        )
+    if float(cfg.thinking_budget_handoff_temperature) < 0:
+        raise ValueError(
+            "AIMO_THINKING_BUDGET_HANDOFF_TEMPERATURE cannot be negative"
+        )
+    if cfg.thinking_budget_handoff_prompt_variant not in HANDOFF_VARIANTS:
+        raise ValueError(
+            "AIMO_THINKING_BUDGET_HANDOFF_PROMPT_VARIANT must be one of "
+            + ", ".join(HANDOFF_VARIANTS)
+        )
     selected_gpus, resolved_tp, resolved_dp = resolve_gpu_parallel_layout(cfg)
     resolved_max_concurrent_requests = resolve_max_concurrent_requests(
         cfg,
@@ -6105,6 +6547,18 @@ def run(cfg: type[CFG] = CFG) -> None:
             "proof_generation_thinking_budgets": list(
                 cfg.proof_generation_thinking_budgets
             ),
+            "thinking_budget_handoff_enabled": bool(
+                cfg.thinking_budget_handoff_enabled
+            ),
+            "thinking_budget_handoff_max_tokens": int(
+                cfg.thinking_budget_handoff_max_tokens
+            ),
+            "thinking_budget_handoff_temperature": float(
+                cfg.thinking_budget_handoff_temperature
+            ),
+            "thinking_budget_handoff_prompt_variant": str(
+                cfg.thinking_budget_handoff_prompt_variant
+            ),
             "vllm_extra_args": str(cfg.vllm_extra_args),
             "served_model_name": str(cfg.served_model_name),
             "mock_llm": bool(cfg.mock_llm),
@@ -6122,6 +6576,8 @@ def run(cfg: type[CFG] = CFG) -> None:
         "meta_policy=%s strict_pass_meta=%s max_concurrent_problems=%s "
         "candidates=%s deepseek_math_v2_candidates=%s gpus=%s tp=%s dp=%s "
         "max_concurrent_requests=%s requests_per_gpu=%s "
+        "thinking_handoff=%s handoff_variant=%s handoff_tokens=%s "
+        "handoff_temperature=%s "
         "node_rank=%s/%s distributed_run=%s output=%s",
         cfg.stream_vllm,
         cfg.stream_vllm_server_log,
@@ -6136,6 +6592,10 @@ def run(cfg: type[CFG] = CFG) -> None:
         resolved_dp,
         resolved_max_concurrent_requests,
         cfg.requests_per_gpu,
+        cfg.thinking_budget_handoff_enabled,
+        cfg.thinking_budget_handoff_prompt_variant,
+        cfg.thinking_budget_handoff_max_tokens,
+        cfg.thinking_budget_handoff_temperature,
         distributed.rank,
         distributed.world_size,
         distributed.run_id or "local",
@@ -6190,6 +6650,18 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.proof_generation_thinking_budgets
             ),
             thinking_budget_force_text=cfg.thinking_budget_force_text,
+            thinking_budget_handoff_enabled=(
+                cfg.thinking_budget_handoff_enabled
+            ),
+            thinking_budget_handoff_max_tokens=(
+                cfg.thinking_budget_handoff_max_tokens
+            ),
+            thinking_budget_handoff_temperature=(
+                cfg.thinking_budget_handoff_temperature
+            ),
+            thinking_budget_handoff_prompt_variant=(
+                cfg.thinking_budget_handoff_prompt_variant
+            ),
             deepseek_thinking_budget_force_text=(
                 cfg.deepseek_thinking_budget_force_text
             ),
