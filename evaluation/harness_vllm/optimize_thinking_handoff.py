@@ -27,6 +27,7 @@ try:
         assemble_handoff,
         build_empty_restart_handoff,
         build_lossless_partial_handoff,
+        build_structured_partial_force_text,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
@@ -58,6 +59,7 @@ except ModuleNotFoundError as exc:
         assemble_handoff,
         build_empty_restart_handoff,
         build_lossless_partial_handoff,
+        build_structured_partial_force_text,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
         build_handoff_repair_instruction,
@@ -118,6 +120,7 @@ def parse_args() -> argparse.Namespace:
             "partial_sectioned",
             "partial_passthrough",
             "empty_baseline",
+            "structured_force_passthrough",
         ),
         default="fresh_sectioned",
     )
@@ -349,7 +352,28 @@ def call_handoff(
             ),
         }
 
-    if generation_mode == "empty_baseline":
+    if generation_mode == "structured_force_passthrough":
+        force_text = build_structured_partial_force_text(variant)
+        force_ids = tokenizer.encode(force_text, add_special_tokens=False)
+        if hasattr(force_ids, "tolist"):
+            force_ids = force_ids.tolist()
+        prompt_ids = prepared["pre_force_ids"] + [int(value) for value in force_ids]
+        attempt = complete(
+            prompt_ids,
+            "structured_force",
+            assistant_prefix=force_text,
+            attempt_max_tokens=max_tokens,
+        )
+        attempt["structured_report"] = attempt["raw_output"]
+        attempt["context_metadata"] = {
+            "pre_force_tokens": len(prepared["pre_force_ids"]),
+            "force_prefix_tokens": len(force_ids),
+        }
+        attempts.append(attempt)
+        raw_output = build_lossless_partial_handoff(attempt["raw_output"])
+        parsed = parse_handoff_response(raw_output)
+        finish_reason = "structured_force_passthrough"
+    elif generation_mode == "empty_baseline":
         prompt_ids = []
         raw_output = build_empty_restart_handoff()
         parsed = parse_handoff_response(raw_output)
@@ -667,6 +691,7 @@ def call_handoff(
                 "context_metadata": attempt.get("context_metadata"),
                 "window": attempt.get("window"),
                 "digest": attempt.get("digest"),
+                "structured_report": attempt.get("structured_report"),
                 "finish_reason": attempt["finish_reason"],
                 "temperature": attempt["temperature"],
                 "usage": attempt["usage"],

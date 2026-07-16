@@ -15,6 +15,13 @@ FINAL_PARTIAL_FORCE_TEXT = (
 FINAL_PARTIAL_FORCE_MARKER = (
     "We were unable to produce a complete proof. However, the strongest"
 )
+STRUCTURED_PARTIAL_FORCE_PREFIX = (
+    "\n</think>\n\n<solution>\n"
+    "We were unable to produce a complete proof within this reasoning budget. "
+    "Stop solving now and write a compact research transfer note for a fresh "
+    "independent attempt. Recover only mathematical state already present in "
+    "your reasoning; do not derive new claims or guess the final answer.\n\n"
+)
 HANDOFF_ASSISTANT_PREFIX = "\n</think>\n\n<handoff>\n"
 HANDOFF_REQUIRED_SECTIONS = (
     "established",
@@ -303,6 +310,44 @@ def build_empty_restart_handoff() -> str:
                 "Start a fresh independent proof from the original problem."
             ),
         }
+    )
+
+
+def build_structured_partial_force_text(
+    variant: str = DEFAULT_HANDOFF_VARIANT,
+) -> str:
+    """Force a bounded research ledger directly from the exhausted context."""
+
+    guidance = handoff_variant_guidance(variant)
+    return (
+        STRUCTURED_PARTIAL_FORCE_PREFIX
+        + f"""Global emphasis: {guidance}
+
+Use exactly these plain-text headings:
+
+VERIFIED:
+- Only facts, equations, constructions, or partial lemmas fully justified above.
+
+UNVERIFIED:
+- Concrete potentially useful claims or patterns that still need proof.
+
+FAILED:
+- Routes already tried, each followed by its exact obstruction.
+
+BOTTLENECK:
+- The narrowest unresolved mathematical point.
+
+NEXT:
+- At most five concrete steps for a fresh solver.
+
+Rules:
+- Treat an item as UNVERIFIED unless its proof was completed above.
+- Preserve exact formulas, examples, and counterexamples when useful.
+- Explicitly retain contradictions instead of silently choosing one side.
+- Do not restate the full problem or its output format.
+- Do not continue solving, add new arguments, or claim completeness.
+- Keep the entire transfer note below 1,200 words.
+"""
     )
 
 

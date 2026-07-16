@@ -30,6 +30,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
     build_lossless_partial_handoff,
+    build_structured_partial_force_text,
     build_handoff_section_from_digests_prompt_ids,
     build_handoff_section_from_partial_progress_prompt_ids,
     build_handoff_section_instruction,
@@ -638,6 +639,18 @@ class HandoffPromptTests(unittest.TestCase):
             parsed["sections"]["next_steps"],
         )
 
+    def test_structured_partial_force_requires_an_extract_only_ledger(self):
+        force_text = build_structured_partial_force_text("evidence_first")
+
+        self.assertTrue(force_text.startswith("\n</think>\n\n<solution>"))
+        self.assertIn("Stop solving now", force_text)
+        self.assertIn("VERIFIED:", force_text)
+        self.assertIn("UNVERIFIED:", force_text)
+        self.assertIn("FAILED:", force_text)
+        self.assertIn("BOTTLENECK:", force_text)
+        self.assertIn("NEXT:", force_text)
+        self.assertIn("do not derive new claims", force_text)
+
     def test_optimizer_builds_lossless_partial_handoff_without_model_call(self):
         class FakeOpenAI:
             def __init__(self, **kwargs):
@@ -721,6 +734,77 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertEqual(
             result["attempts"][0]["context_metadata"]["baseline"],
             "fresh_restart_without_mathematical_handoff",
+        )
+
+    def test_optimizer_wraps_structured_forced_report_losslessly(self):
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    text=(
+                        "VERIFIED:\n- Exact construction A.\n\n"
+                        "UNVERIFIED:\n- General claim B.\n\n"
+                        "FAILED:\n- Route C lacks a bound.\n\n"
+                        "BOTTLENECK:\n- Missing lower bound.\n\n"
+                        "NEXT:\n- Prove the lower bound."
+                    ),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=120_000,
+                completion_tokens=80,
+                total_tokens=120_080,
+            ),
+        )
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return response
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+                self.completions = FakeCompletions()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "record": SimpleNamespace(output_text="unused"),
+                        "pre_force_ids": FakeTokenizer.encode("prior reasoning"),
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": False,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant="evidence_first",
+                    temperature=0.6,
+                    max_tokens=4096,
+                    generation_mode="structured_force_passthrough",
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                )
+
+        self.assertTrue(result["parsed"]["is_valid"])
+        self.assertEqual(result["finish_reason"], "structured_force_passthrough")
+        self.assertEqual(result["usage"]["completion_tokens"], 80)
+        self.assertIn(
+            "Exact construction A.",
+            result["parsed"]["sections"]["promising"],
+        )
+        self.assertEqual(
+            result["attempts"][0]["context_metadata"]["pre_force_tokens"],
+            len("prior reasoning"),
         )
 
     def test_optimizer_repairs_one_invalid_handoff(self):
