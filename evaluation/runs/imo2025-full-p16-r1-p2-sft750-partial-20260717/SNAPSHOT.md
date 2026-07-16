@@ -23,7 +23,9 @@ Contents:
 - `artifacts/submission.csv`: partial two-row model output.
 - `artifacts/problems/`: four per-rank JSON state files for the two completed
   problems.
-- `logs/`: point-in-time launcher logs and rank PID files.
+- `logs/`: point-in-time launcher logs, rank PID files, and raw per-call input/output traces under `rank0/llm_calls/` and `rank1/llm_calls/`.
 - `SNAPSHOT.txt`: source paths, process state, sizes, and submission hash.
+- `LLM_CALLS_SNAPSHOT.txt`: raw-call snapshot time, source paths, file counts, and byte counts.
+- `LLM_CALLS_SHA256SUMS.txt`: checksums for every copied raw-call trace.
 
 Creating this snapshot did not stop or restart the live inference processes.
