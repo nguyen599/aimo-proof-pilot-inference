@@ -22,15 +22,14 @@ test "$(docker image inspect "$IMAGE" \
   --format "{{ index .Config.Labels \"org.opencontainers.image.revision\" }}")" = "$COMMIT"
 ```
 
-The runtime venv (patched SGLang + kernels) is fetched at first boot from a
-revision-pinned, sha256-verified HF mirror (`chankhavu/proof-pilot-env`), so
-every deployment materializes an identical SGLang; boot fails loud if the
-archive ever differs from the pin. Because SGLang is never pip-installed -- it
-lives inside that archive -- this pin is what makes the SGLang version
-reproducible. The mirror is private, so set `HF_TOKEN` (a read token). To fetch
-from the original public Kaggle dataset instead, set
-`RUNTIME_DATASET=threerabbits/proof-pilot-env` (still sha256-verified, but not
-revision-pinned).
+The runtime venv (patched SGLang + kernels) is **baked into the image** at
+`/opt/pp`. It is downloaded, sha256-verified, relocated, and topped with the
+pinned PyPI deps once at build time (from a revision-pinned mirror), so the
+final image is self-contained: **no runtime download and no `HF_TOKEN` for the
+runtime**, and every image tag carries an identical, frozen SGLang. Only the
+(public) model weights are fetched at boot -- so a plain
+`docker run ... submission` needs no secrets at all. At boot the entrypoint just
+applies the checked-in SGLang patches (fast, in-place) and resolves the models.
 
 ### Prepare persistent storage
 

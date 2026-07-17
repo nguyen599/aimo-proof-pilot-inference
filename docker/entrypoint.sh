@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 REPO="${REPO:-/opt/aimo-proof-pilot-inference}"
 WORKSPACE=/workspace
-RUNTIME_ROOT=/workspace/pp
+# The SGLang runtime is baked into the image at /opt/pp; overridable for the
+# legacy download-at-boot path (RUNTIME_ROOT=/workspace/pp).
+RUNTIME_ROOT="${RUNTIME_ROOT:-/opt/pp}"
 HF_HOME="${HF_HOME:-/workspace/.hf_home}"
 VENV="${VENV:-$RUNTIME_ROOT/venv}"
 STATE_DIR=/workspace/.proof-pilot
@@ -176,7 +178,7 @@ ensure_runtime() {
     [[ -x "$stage_root/venv/bin/python" ]] || die "extracted runtime has no venv Python"
     [[ -x "$stage_root/pybase/bin/python3" ]] || die "extracted runtime has no base Python"
 
-    sed -i 's|^home = .*|home = /workspace/pp/pybase/bin|' "$stage_root/venv/pyvenv.cfg"
+    sed -i "s|^home = .*|home = $RUNTIME_ROOT/pybase/bin|" "$stage_root/venv/pyvenv.cfg"
     mv "$stage_root" "$RUNTIME_ROOT"
     log "runtime installed at $RUNTIME_ROOT"
 }
@@ -206,7 +208,8 @@ install_dependencies_and_patches() {
     fi
 
     log "applying the checked-in SGLang patch set"
-    bash "$REPO/sglang_patches/apply_patches.sh" "$VENV"
+    bash "$REPO/sglang_patches/apply_patches.sh" "$VENV" \
+        "$RUNTIME_ROOT/proof-pilot/deploy/w4a8/humming_w4a8.py"
 }
 
 require_config_file() {
@@ -299,6 +302,10 @@ start_server() {
     rm -f "$STATE_DIR/server-ready"
     : > "$SERVER_LOG"
     log "starting production server on $SERVER_HOST:$SERVER_PORT"
+    # Point the humming (W4A8) helpers at the runtime root (baked at /opt/pp),
+    # not launch_server.py's /workspace/pp default. Inert for the BF16 path.
+    export HUMMING_PATH="${HUMMING_PATH:-$RUNTIME_ROOT}"
+    export W4A8_HELPER_DIR="${W4A8_HELPER_DIR:-$RUNTIME_ROOT/proof-pilot/deploy/w4a8}"
     "$VENV/bin/python" "$REPO/evaluation/harness/launch_server.py" \
         --config "$CONFIG_SOURCE" \
         > >(tee -a "$SERVER_LOG") 2>&1 &

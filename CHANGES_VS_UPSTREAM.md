@@ -26,7 +26,7 @@ present in both `config.yaml` and `config-dynamic.yaml`.
 |---|---|---|---|
 | **Auto data-parallel width** | `config.yaml` `model.data_parallel_size` | `auto` (derive from GPU count) or an explicit int | `4` in `config.yaml`; `auto` in `config-dynamic.yaml` |
 | **fp8 KV cache** | `model.kv_cache_dtype` | `fp8_e4m3` / `auto` (bf16) / `fp8_e5m2` | `auto` (bf16) in `config.yaml`; `fp8_e4m3` in `config-dynamic.yaml` |
-| **Pinned SGLang runtime** | `docker/entrypoint.sh` | `RUNTIME_HF_REPO`, `RUNTIME_HF_REVISION`, `RUNTIME_ARCHIVE_SHA256`, `RUNTIME_DATASET` (Kaggle override) | HF mirror `chankhavu/proof-pilot-env@5c0bf00b`, sha256-verified |
+| **SGLang runtime baked into the image** | `Dockerfile` (multi-stage) | build args `RUNTIME_HF_REPO`/`RUNTIME_HF_REVISION`/`RUNTIME_ARCHIVE_SHA256`; `--secret id=hf_token` at build | venv downloaded + sha256-verified + relocated + deps-installed at build, frozen at `/opt/pp` |
 | **Dropped hardcoded `CUDA_VISIBLE_DEVICES`** | `Dockerfile` | — (derived from `tp*dp`) | required for auto-dp; no knob |
 
 `config-dynamic.yaml` is a **new profile** for sub-8-GPU nodes (auto-dp + fp8 KV);
