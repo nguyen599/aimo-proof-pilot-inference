@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -131,6 +132,45 @@ class RuntimeConfigTests(unittest.TestCase):
             )
             model = active_model(load_config(path))
         self.assertEqual(model.data_parallel_size, 7)
+
+    def test_data_parallel_size_auto_derives_from_gpu_count(self):
+        def configure(config):
+            config["model"]["tensor_parallel_size"] = 2
+            config["model"]["data_parallel_size"] = "auto"
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_config(directory, configure)
+            config = load_config(path)  # 'auto' passes validation unresolved
+            with mock.patch.dict(os.environ, {"PP_GPU_COUNT": "4"}):
+                model = active_model(config)
+        self.assertEqual(model.data_parallel_size, 2)  # 4 GPUs / tp 2
+
+    def test_data_parallel_size_auto_requires_divisible_gpu_count(self):
+        def configure(config):
+            config["model"]["tensor_parallel_size"] = 4
+            config["model"]["data_parallel_size"] = "auto"
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_config(directory, configure)
+            config = load_config(path)
+            with mock.patch.dict(os.environ, {"PP_GPU_COUNT": "6"}):
+                with self.assertRaisesRegex(ValueError, "not divisible"):
+                    active_model(config)
+
+    def test_dynamic_profile_config_validates_and_resolves(self):
+        # config-dynamic.yaml is the shipped auto-dp + fp8-KV profile; it must
+        # validate against the same strict schema and resolve across node sizes.
+        path = REPO / "config-dynamic.yaml"
+        config = load_config(path)
+        self.assertEqual(config["model"]["kv_cache_dtype"], "fp8_e4m3")
+        self.assertEqual(config["model"]["data_parallel_size"], "auto")
+        for gpus, expected_dp in (("2", 1), ("4", 2), ("8", 4)):
+            with self.subTest(gpus=gpus):
+                with mock.patch.dict(os.environ, {"PP_GPU_COUNT": gpus}):
+                    model = active_model(config)
+                self.assertEqual(model.tensor_parallel_size, 2)
+                self.assertEqual(model.data_parallel_size, expected_dp)
+                self.assertEqual(model.kv_cache_dtype, "fp8_e4m3")
 
     def test_search_completion_budget_is_not_coupled_to_server_context(self):
         def configure(config):

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,49 @@ def _positive_int(value: Any, name: str) -> int:
     return value
 
 
+def detect_gpu_count() -> int:
+    """GPUs visible on this node, for ``data_parallel_size: auto``.
+
+    ``PP_GPU_COUNT`` overrides detection (used by tests, or to pin a count
+    explicitly); otherwise nvidia-smi is the source of truth for the physical
+    GPUs on the node -- the same query the entrypoint's GPU gate uses.
+    """
+    override = os.environ.get("PP_GPU_COUNT")
+    if override is not None:
+        if not override.isdigit() or int(override) <= 0:
+            raise ValueError(f"PP_GPU_COUNT must be a positive integer, got {override!r}")
+        return int(override)
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(
+            "data_parallel_size=auto needs GPUs, but nvidia-smi failed "
+            f"({exc}); set PP_GPU_COUNT or an explicit data_parallel_size"
+        ) from exc
+    count = sum(1 for line in output.splitlines() if line.strip())
+    if count <= 0:
+        raise ValueError("data_parallel_size=auto found no GPUs via nvidia-smi")
+    return count
+
+
+def _resolve_data_parallel_size(model: dict[str, Any]) -> int:
+    """Concrete dp width. ``auto`` = (visible GPUs) // tensor_parallel_size."""
+    tp = model["tensor_parallel_size"]
+    dp = model["data_parallel_size"]
+    if dp != "auto":
+        return dp
+    visible = detect_gpu_count()
+    if visible % tp != 0:
+        raise ValueError(
+            f"visible GPU count {visible} is not divisible by "
+            f"tensor_parallel_size {tp}; set an explicit data_parallel_size"
+        )
+    return visible // tp
+
+
 def load_config(path: Path) -> dict[str, Any]:
     config = yaml.safe_load(path.read_text())
     if not isinstance(config, dict):
@@ -79,7 +124,8 @@ def load_config(path: Path) -> dict[str, Any]:
             raise ValueError(f"models.{key} must be an absolute path")
     model = config["model"]
     _positive_int(model["tensor_parallel_size"], "model.tensor_parallel_size")
-    _positive_int(model["data_parallel_size"], "model.data_parallel_size")
+    if model["data_parallel_size"] != "auto":
+        _positive_int(model["data_parallel_size"], "model.data_parallel_size")
     if type(model["quantized"]) is not bool or type(model["dflash"]) is not bool:
         raise ValueError("model.quantized and model.dflash must be booleans")
     if not isinstance(model["kv_cache_dtype"], str) or not model["kv_cache_dtype"]:
@@ -186,6 +232,6 @@ def active_model(config: dict[str, Any]) -> ActiveModel:
     return ActiveModel(
         mode="humming_w4a8" if quantized else "bf16", target=target, draft=draft,
         tensor_parallel_size=model["tensor_parallel_size"],
-        data_parallel_size=model["data_parallel_size"],
+        data_parallel_size=_resolve_data_parallel_size(model),
         kv_cache_dtype=model["kv_cache_dtype"], quantized=quantized, dflash=dflash,
     )

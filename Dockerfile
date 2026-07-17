@@ -45,7 +45,6 @@ ENV UV_LINK_MODE=copy \
     HF_XET_HIGH_PERFORMANCE=0 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
     REPO=/opt/aimo-proof-pilot-inference \
     VENV=/workspace/pp/venv \
     IMAGE_REVISION=$VCS_REF
