@@ -443,10 +443,12 @@ class ProofSearchTests(unittest.TestCase):
                     for index, score in enumerate((1.0, 0.5, 0.0, 1.0, 0.5, 0.0))
                 ],
             )
-            selected = search._sample_nonideal_reviews(proof, 2, 2, 0)
-            repeated = search._sample_nonideal_reviews(proof, 2, 2, 0)
+            selected = search._select_reviews(proof, 2, 2, 0, "random_nonideal")
+            repeated = search._select_reviews(proof, 2, 2, 0, "random_nonideal")
             # ideal (score 1) reviews are never selected
-            all_available = search._sample_nonideal_reviews(proof, 10, 2, 0)
+            all_available = search._select_reviews(proof, 10, 2, 0, "random_nonideal")
+            # "worst" strategy: the lowest-scoring reviews, may include ideal ones
+            worst = search._select_reviews(proof, 4, 2, 0, "worst")
 
         self.assertEqual(len(selected), 2)
         self.assertTrue(all(item.score < 1.0 for item in selected))  # non-ideal only
@@ -457,6 +459,8 @@ class ProofSearchTests(unittest.TestCase):
         # 4 of 6 reviews are non-ideal (the two 1.0s excluded); capped request returns all 4
         self.assertEqual(len(all_available), 4)
         self.assertTrue(all(item.score < 1.0 for item in all_available))
+        # worst-4 of scores (1,0.5,0,1,0.5,0) = [0, 0, 0.5, 0.5], lowest first
+        self.assertEqual([item.score for item in worst], [0.0, 0.0, 0.5, 0.5])
 
     def test_ranking_prefers_more_valid_votes_after_equal_mean(self):
         with tempfile.TemporaryDirectory() as directory:

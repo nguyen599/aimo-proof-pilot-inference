@@ -13,7 +13,8 @@ parser and self-eval items lives in [`evaluation/PARSING_VS_GOLD.md`](evaluation
 | `verifier_sees_self_evaluation` | `true` | Feed the prover's self-eval **text** into the verifier prompt. | `true` — gold (Kaggle + training) feeds it; in-distribution. |
 | `refiner_sees_self_evaluation` | `false` | Feed the parent self-eval into the refiner bundle. Upstream fed it; we drop it. | `false` — gold's Kaggle inference drops it (self-score ~92% "1", noise). |
 | `refine_parents` | `4` | Parents merged per refine call (was 1). Stratified random from the top-`top_proofs` pool. | `4` = gold's `refine_inputs`. |
-| `reviews_per_refine_parent` | `3` | Random **non-ideal** (score<1) reviews per parent (was 1 worst). | `3` = gold's `verify_k` (gold includes all ≤3). |
+| `reviews_per_refine_parent` | `3` | Reviews per parent in the bundle (was 1). | `3` = gold's `verify_k` (gold includes all ≤3). |
+| `refine_review_strategy` | `random_nonideal` | Which reviews: `random_nonideal` (seeded random, score<1, varied per call) or `worst` (Geremie's deterministic lowest-scoring, may include ideal). | — (a design choice; gold uses *all* reviews) |
 | `lenient_parsing` | `true` | Gold search-based extraction (recover missing `</solution>`, tolerate surrounding text, ignore tag case, allow empty self-eval/suggestions) vs upstream's strict whole-document `fullmatch`. | `true` — gold parses leniently; the OPD model omits `</solution>`. |
 
 Each is validated as the right type by the strict schema (`eval_config.py`) and
@@ -42,14 +43,16 @@ knobs above defaulting to gold.
 standalone always-on fix, since strict mode deliberately re-imposes the full
 structure.)
 
-## Algorithm change without a strategy toggle (documented, count-configurable)
+## Refinement topology
 
-The **refinement selection strategy** changed from "one parent × its single
-worst review" to "`refine_parents` stratified-random parents × `reviews_per_refine_parent`
-random non-ideal reviews each". The **counts** are knobs (above); the *strategy*
-itself (stratified parents, random non-ideal reviews) is the intended new
-default, not a toggle. Round width is unchanged (`proofs_per_round` refine calls
-per round). See the refinement section of `PARSING_VS_GOLD.md`.
+The refinement changed from "one parent × its single worst review" to
+"`refine_parents` stratified-random parents × `reviews_per_refine_parent` reviews
+each". Counts, parent selection, and review strategy are all configurable:
+`refine_parents`, `reviews_per_refine_parent`, and `refine_review_strategy`
+(`random_nonideal` default, or `worst` for Geremie's deterministic lowest-scoring
+reviews). Parent selection is always stratified-random from the top-`top_proofs`
+pool. Round width is unchanged (`proofs_per_round` refine calls per round). See
+the refinement section of `PARSING_VS_GOLD.md`.
 
 ## Non-code / tooling additions (no behavior change)
 
@@ -67,9 +70,9 @@ refiner_sees_self_evaluation: true     # upstream fed it
 lenient_parsing: false                 # upstream's strict parser
 refine_parents: 1                      # single-parent refine
 reviews_per_refine_parent: 1           # one review per parent
+refine_review_strategy: worst          # upstream's lowest-scoring review
 ```
 
-This restores upstream's single-parent, strict-parse refinement — **except** the
-refinement review is still a random non-ideal one rather than the deterministic
-worst, and the float-score fix still applies. Those two are deliberate and not
-reverted by config.
+This restores upstream's single-parent, single-worst-review, strict-parse
+refinement. The only residual difference is the float-score fix, which is a
+blatant bug fix and always applies.

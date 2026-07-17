@@ -366,16 +366,40 @@ class ProblemSearch:
             )
         return groups
 
-    def _sample_nonideal_reviews(
+    def _select_reviews(
         self,
         proof: Proof,
         limit: int,
         round_index: int,
         call_index: int,
+        strategy: str,
     ) -> list[Verification]:
-        """Up to `limit` of the proof's non-ideal (score < 1) reviews, chosen by a
-        seeded shuffle. Fewer than `limit` if the proof has fewer non-ideal reviews;
-        empty if every review scored 1 (a perfect proof needs no repair review)."""
+        """Up to `limit` of the proof's reviews for a refine bundle.
+
+        strategy "worst" (Geremie's original): the lowest-scoring reviews,
+        deterministic (score, then seeded tie-break). May include ideal (score 1)
+        reviews when the proof has fewer than `limit` non-ideal ones. The same
+        parent contributes the same worst reviews to every call it appears in.
+
+        strategy "random_nonideal" (default): a seeded random sample of the
+        non-ideal (score < 1) reviews, varied per call; fewer than `limit` if the
+        proof has fewer non-ideal reviews, empty if every review scored 1.
+        """
+        if strategy == "worst":
+            ranked = sorted(
+                proof.verifications,
+                key=lambda v: (
+                    v.score,
+                    stable_seed(
+                        self.config["seed"],
+                        self.problem_id,
+                        proof.proof_id,
+                        f"refine-worst-round-{round_index}",
+                        v.sample_id,
+                    ),
+                ),
+            )
+            return ranked[:limit]
         nonideal = [v for v in proof.verifications if v.score < 1.0]
         order = sorted(
             range(len(nonideal)),
@@ -424,6 +448,9 @@ class ProblemSearch:
             n_calls = self.config["proofs_per_round"]  # keep round width
             parents_per_call = min(self.config["refine_parents"], len(pool))
             reviews_per_parent = self.config["reviews_per_refine_parent"]
+            review_strategy = self.config.get(
+                "refine_review_strategy", "random_nonideal"
+            )
             groups = self._stratified_parents(
                 pool, parents_per_call, n_calls, round_index
             )
@@ -436,8 +463,12 @@ class ProblemSearch:
                         parent.self_evaluation if refiner_self_eval else "",
                         [
                             (review.score, review.analysis)
-                            for review in self._sample_nonideal_reviews(
-                                parent, reviews_per_parent, round_index, call_index
+                            for review in self._select_reviews(
+                                parent,
+                                reviews_per_parent,
+                                round_index,
+                                call_index,
+                                review_strategy,
                             )
                         ],
                     )

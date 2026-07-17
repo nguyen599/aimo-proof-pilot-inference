@@ -157,7 +157,11 @@ its own `<solution>/<self_evaluation>/<score>` (parsed by `parse_generation`), s
 each refined proof still produces its own self-eval and self-score that feed its
 verifier and its ranking.
 
-Note the refiner topology still differs from gold beyond self-eval: gold merges
-**up to 4 candidates with all their reviews**; this harness sends **one parent
-with one selected review**. That is a separate search-topology question, not a
-self-eval routing one.
+Refiner topology (separate from self-eval routing): this harness now merges
+**`refine_parents` (default 4) stratified-random parents** per refine call, each
+contributing **`reviews_per_refine_parent` (default 3)** reviews chosen by
+**`refine_review_strategy`** (`random_nonideal` default, or `worst` for Geremie's
+deterministic lowest-scoring). Gold merges up to 4 candidates with *all* their
+(≤3) reviews; the defaults here approximate that, with the difference that gold
+includes ideal reviews too while `random_nonideal` keeps only score<1. Round
+width is unchanged (`proofs_per_round` calls/round).

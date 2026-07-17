@@ -26,7 +26,8 @@ SERVER_KEYS = {
 }
 SEARCH_KEYS = {
     "proofs_per_round", "verifications_per_proof", "top_proofs",
-    "refine_parents", "reviews_per_refine_parent", "max_rounds",
+    "refine_parents", "reviews_per_refine_parent", "refine_review_strategy",
+    "max_rounds",
     "early_stop_threshold", "temperature", "top_p", "max_completion_tokens",
     "solution_continuation_tokens", "verifier_continuation_tokens",
     "min_valid_verifications", "verifier_sees_self_evaluation",
@@ -211,6 +212,10 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("search.refiner_sees_self_evaluation must be a boolean")
     if type(search["lenient_parsing"]) is not bool:
         raise ValueError("search.lenient_parsing must be a boolean")
+    if search["refine_review_strategy"] not in {"worst", "random_nonideal"}:
+        raise ValueError(
+            "search.refine_review_strategy must be 'worst' or 'random_nonideal'"
+        )
 
     return config
 
