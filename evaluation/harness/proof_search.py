@@ -332,26 +332,60 @@ class ProblemSearch:
             }
         )
 
-    def _selected_reviews(
+    def _stratified_parents(
         self,
-        proof: Proof,
+        pool: list[Proof],
+        parents_per_call: int,
+        n_calls: int,
         round_index: int,
-    ) -> list[Verification]:
-        limit = self.config["analyses_per_refinement"]
-        ranked = sorted(
-            proof.verifications,
-            key=lambda verification: (
-                verification.score,
-                stable_seed(
-                    self.config["seed"],
-                    self.problem_id,
-                    proof.proof_id,
-                    f"round-{round_index}",
-                    verification.sample_id,
-                ),
+    ) -> list[list[Proof]]:
+        """Assign `parents_per_call` distinct parents to each of `n_calls` refine
+        calls, drawn from `pool`, so every pool member is used ~equally (stratified)
+        and never over- or under-represented. Deterministic: a seeded permutation of
+        the pool, then a rotating window -- so the parents are pseudo-random but the
+        coverage is even and reproducible."""
+        size = len(pool)
+        order = sorted(
+            range(size),
+            key=lambda idx: stable_seed(
+                self.config["seed"],
+                self.problem_id,
+                f"refine-parents-round-{round_index}",
+                pool[idx].proof_id,
             ),
         )
-        return ranked[:limit]
+        shuffled = [pool[k] for k in order]
+        groups: list[list[Proof]] = []
+        for call in range(n_calls):
+            base = (call * parents_per_call) % size
+            # parents_per_call <= size, so these indices are distinct within a call
+            groups.append(
+                [shuffled[(base + j) % size] for j in range(parents_per_call)]
+            )
+        return groups
+
+    def _sample_nonideal_reviews(
+        self,
+        proof: Proof,
+        limit: int,
+        round_index: int,
+        call_index: int,
+    ) -> list[Verification]:
+        """Up to `limit` of the proof's non-ideal (score < 1) reviews, chosen by a
+        seeded shuffle. Fewer than `limit` if the proof has fewer non-ideal reviews;
+        empty if every review scored 1 (a perfect proof needs no repair review)."""
+        nonideal = [v for v in proof.verifications if v.score < 1.0]
+        order = sorted(
+            range(len(nonideal)),
+            key=lambda idx: stable_seed(
+                self.config["seed"],
+                self.problem_id,
+                proof.proof_id,
+                f"refine-reviews-round-{round_index}-call-{call_index}",
+                nonideal[idx].sample_id,
+            ),
+        )
+        return [nonideal[k] for k in order[:limit]]
 
     def _round_candidates(self, round_index: int) -> list[Candidate]:
         stage = f"round-{round_index:02d}/generate"
@@ -371,45 +405,54 @@ class ProblemSearch:
                     )
                 )
         else:
-            parents = [
+            # Pool of refinement parents: the top-ranked verified proofs from
+            # earlier rounds (cumulative). Each refine call merges refine_parents
+            # of them (stratified for even coverage), each contributing up to
+            # reviews_per_refine_parent random non-ideal reviews.
+            pool = [
                 proof
                 for proof in self.ranked()
                 if proof.round_index < round_index
             ][: self.config["top_proofs"]]
-            if not parents:
+            if not pool:
                 raise RuntimeError(f"{self.problem_id} has no verified proof to refine")
-            proof_index = 0
             # Gold drops the prover self-evaluation from the refiner bundle
             # (v2/pool_loop.py: with_self_eval=False, "unreliable ~92% self-score 1").
-            # Default matches gold; set refiner_sees_self_evaluation=true to include it.
             refiner_self_eval = self.config.get("refiner_sees_self_evaluation", False)
-            for parent in parents:
-                reviews = self._selected_reviews(parent, round_index)
-                if len(reviews) != self.config["analyses_per_refinement"]:
-                    raise RuntimeError(
-                        f"{parent.proof_id} has too few verifier analyses to refine"
-                    )
-                for review in reviews:
-                    proof_id = f"r{round_index:02d}-p{proof_index:04d}"
-                    messages = refinement_messages(
-                        self.problem,
+            n_calls = self.config["proofs_per_round"]  # keep round width
+            parents_per_call = min(self.config["refine_parents"], len(pool))
+            reviews_per_parent = self.config["reviews_per_refine_parent"]
+            groups = self._stratified_parents(
+                pool, parents_per_call, n_calls, round_index
+            )
+            for call_index in range(n_calls):
+                proof_id = f"r{round_index:02d}-p{call_index:04d}"
+                bundle = [
+                    (
                         parent.proof_id,
                         parent.proof,
                         parent.self_evaluation if refiner_self_eval else "",
-                        review.score,
-                        review.analysis,
+                        [
+                            (review.score, review.analysis)
+                            for review in self._sample_nonideal_reviews(
+                                parent, reviews_per_parent, round_index, call_index
+                            )
+                        ],
                     )
-                    candidates.append(
-                        Candidate(
-                            proof_id=proof_id,
-                            round_index=round_index,
-                            parent_id=parent.proof_id,
-                            generation=self._spec(
-                                f"{stage}/{proof_id}", stage, messages
-                            ),
-                        )
+                    for parent in groups[call_index]
+                ]
+                messages = refinement_messages(self.problem, bundle)
+                candidates.append(
+                    Candidate(
+                        proof_id=proof_id,
+                        round_index=round_index,
+                        # multi-parent ancestry (audit only), comma-joined
+                        parent_id=",".join(parent.proof_id for parent in groups[call_index]),
+                        generation=self._spec(
+                            f"{stage}/{proof_id}", stage, messages
+                        ),
                     )
-                    proof_index += 1
+                )
         return candidates
 
     def _admit_candidate(self, candidate: Candidate, record: dict) -> Proof | None:

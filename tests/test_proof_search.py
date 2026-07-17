@@ -323,8 +323,8 @@ def small_config() -> dict:
         "proofs_per_round": 2,
         "verifications_per_proof": 2,
         "top_proofs": 1,
-        "refinements_per_proof": 2,
-        "analyses_per_refinement": 2,
+        "refine_parents": 1,
+        "reviews_per_refine_parent": 1,
         "max_rounds": 2,
         "early_stop_threshold": 0.99999,
         "temperature": 1.0,
@@ -405,26 +405,30 @@ class ProofSearchTests(unittest.TestCase):
         self.assertNotIn("===SYSTEM===", messages[0]["content"])
         self.assertIn("Problem:\nProve it.", messages[1]["content"])
         refined = refinement_messages(
-            "Prove it.", "r01-p0000", "Candidate proof.", "Candidate audit.",
-            0.0, "Fatal review.",
+            "Prove it.",
+            [
+                (
+                    "r01-p0000",
+                    "Candidate proof.",
+                    "Candidate audit.",
+                    [(0.0, "Fatal review.")],
+                )
+            ],
         )
         user = refined[1]["content"]
         self.assertIn('<candidate id="r01-p0000">', user)
         self.assertIn('<verifier_review score="0">\nFatal review.', user)
         self.assertEqual(user.count("<verifier_review "), 1)
 
-    def test_lowest_reviews_are_selected_deterministically(self):
+    def test_nonideal_reviews_are_sampled_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:
-            config = small_config()
-            config["analyses_per_refinement"] = 4
-            config["refinements_per_proof"] = 4
             search = ProblemSearch(
                 problem_id="1",
                 problem="Prove the claim.",
                 output_dir=Path(directory),
                 client=ScriptedClient(),
                 semaphore=asyncio.Semaphore(4),
-                config=config,
+                config=small_config(),
             )
             proof = Proof(
                 proof_id="r01-p0000",
@@ -439,14 +443,20 @@ class ProofSearchTests(unittest.TestCase):
                     for index, score in enumerate((1.0, 0.5, 0.0, 1.0, 0.5, 0.0))
                 ],
             )
-            selected = search._selected_reviews(proof, 2)
-            repeated = search._selected_reviews(proof, 2)
+            selected = search._sample_nonideal_reviews(proof, 2, 2, 0)
+            repeated = search._sample_nonideal_reviews(proof, 2, 2, 0)
+            # ideal (score 1) reviews are never selected
+            all_available = search._sample_nonideal_reviews(proof, 10, 2, 0)
 
-        self.assertEqual([item.score for item in selected], [0.0, 0.0, 0.5, 0.5])
-        self.assertEqual(
+        self.assertEqual(len(selected), 2)
+        self.assertTrue(all(item.score < 1.0 for item in selected))  # non-ideal only
+        self.assertEqual(  # deterministic
             [item.sample_id for item in selected],
             [item.sample_id for item in repeated],
         )
+        # 4 of 6 reviews are non-ideal (the two 1.0s excluded); capped request returns all 4
+        self.assertEqual(len(all_available), 4)
+        self.assertTrue(all(item.score < 1.0 for item in all_available))
 
     def test_ranking_prefers_more_valid_votes_after_equal_mean(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -552,16 +562,16 @@ class ProofSearchTests(unittest.TestCase):
         # the candidate bundle must not carry an empty <self_evaluation></...> pair.
         # (refiner.txt itself names <self_evaluation> as the OUTPUT format, so the
         # bare tag is always present -- assert on the audit text and the empty pair.)
-        dropped = refinement_messages("P", "P0", "the proof", "", 0.5, "the review")[1][
-            "content"
-        ]
+        dropped = refinement_messages(
+            "P", [("P0", "the proof", "", [(0.5, "the review")])]
+        )[1]["content"]
         self.assertNotIn("my self-audit", dropped)
         self.assertNotIn("<self_evaluation>\n\n</self_evaluation>", dropped)
         self.assertIn("the review", dropped)  # verifier review still present
         # opt-in: the self-eval is included when supplied
-        kept = refinement_messages("P", "P0", "the proof", "my self-audit", 0.5, "the review")[
-            1
-        ]["content"]
+        kept = refinement_messages(
+            "P", [("P0", "the proof", "my self-audit", [(0.5, "the review")])]
+        )[1]["content"]
         self.assertIn("my self-audit", kept)
 
     def test_refinement_parent_selection_uses_the_cumulative_pool(self):

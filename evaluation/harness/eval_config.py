@@ -26,7 +26,7 @@ SERVER_KEYS = {
 }
 SEARCH_KEYS = {
     "proofs_per_round", "verifications_per_proof", "top_proofs",
-    "refinements_per_proof", "analyses_per_refinement", "max_rounds",
+    "refine_parents", "reviews_per_refine_parent", "max_rounds",
     "early_stop_threshold", "temperature", "top_p", "max_completion_tokens",
     "solution_continuation_tokens", "verifier_continuation_tokens",
     "min_valid_verifications", "verifier_sees_self_evaluation",
@@ -163,7 +163,7 @@ def load_config(path: Path) -> dict[str, Any]:
     search = config["search"]
     for key in (
         "proofs_per_round", "verifications_per_proof", "top_proofs",
-        "refinements_per_proof", "analyses_per_refinement", "max_rounds",
+        "refine_parents", "reviews_per_refine_parent", "max_rounds",
         "max_completion_tokens", "solution_continuation_tokens",
         "verifier_continuation_tokens", "min_valid_verifications",
         "concurrency", "request_timeout_seconds",
@@ -171,33 +171,21 @@ def load_config(path: Path) -> dict[str, Any]:
         _positive_int(search[key], f"search.{key}")
     if search["top_proofs"] > search["proofs_per_round"]:
         raise ValueError("search.top_proofs cannot exceed search.proofs_per_round")
-    if (
-        search["top_proofs"] * search["refinements_per_proof"]
-        != search["proofs_per_round"]
-    ):
+    # Each refine call merges refine_parents distinct parents drawn from the
+    # top_proofs-sized pool, so it cannot ask for more parents than the pool holds.
+    if search["refine_parents"] > search["top_proofs"]:
         raise ValueError(
-            "search.top_proofs * search.refinements_per_proof must equal "
-            "search.proofs_per_round"
+            "search.refine_parents cannot exceed search.top_proofs"
         )
-    if search["analyses_per_refinement"] != search["refinements_per_proof"]:
+    if search["reviews_per_refine_parent"] > search["verifications_per_proof"]:
         raise ValueError(
-            "search.analyses_per_refinement must equal "
-            "search.refinements_per_proof"
-        )
-    if search["analyses_per_refinement"] > search["verifications_per_proof"]:
-        raise ValueError(
-            "search.analyses_per_refinement cannot exceed "
+            "search.reviews_per_refine_parent cannot exceed "
             "search.verifications_per_proof"
         )
     if search["min_valid_verifications"] > search["verifications_per_proof"]:
         raise ValueError(
             "search.min_valid_verifications cannot exceed "
             "search.verifications_per_proof"
-        )
-    if search["min_valid_verifications"] < search["analyses_per_refinement"]:
-        raise ValueError(
-            "search.min_valid_verifications cannot be less than "
-            "search.analyses_per_refinement"
         )
     if not 0 < search["early_stop_threshold"] <= 1:
         raise ValueError("search.early_stop_threshold must be in (0, 1]")

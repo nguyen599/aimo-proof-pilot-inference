@@ -179,8 +179,8 @@ class RuntimeConfigTests(unittest.TestCase):
                 proofs_per_round=32,
                 verifications_per_proof=8,
                 top_proofs=8,
-                refinements_per_proof=4,
-                analyses_per_refinement=4,
+                refine_parents=4,
+                reviews_per_refine_parent=3,
                 max_completion_tokens=32768,
                 solution_continuation_tokens=8192,
                 verifier_continuation_tokens=4096,
@@ -279,11 +279,10 @@ class RuntimeConfigTests(unittest.TestCase):
 
     def test_search_shape_validation_rejects_inconsistent_profiles(self):
         invalid_values = (
-            ("proofs_per_round", 31),
-            ("analyses_per_refinement", 3),
-            ("verifications_per_proof", 3),
-            ("min_valid_verifications", 3),
-            ("min_valid_verifications", 17),
+            ("top_proofs", 33),                 # > proofs_per_round
+            ("refine_parents", 9),              # > top_proofs
+            ("reviews_per_refine_parent", 17),  # > verifications_per_proof
+            ("min_valid_verifications", 17),    # > verifications_per_proof
         )
         for key, value in invalid_values:
             with (
@@ -295,8 +294,8 @@ class RuntimeConfigTests(unittest.TestCase):
                         proofs_per_round=32,
                         verifications_per_proof=16,
                         top_proofs=8,
-                        refinements_per_proof=4,
-                        analyses_per_refinement=4,
+                        refine_parents=4,
+                        reviews_per_refine_parent=3,
                         min_valid_verifications=4,
                     )
                     config["search"][key] = value

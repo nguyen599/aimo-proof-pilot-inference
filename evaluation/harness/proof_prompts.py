@@ -106,26 +106,28 @@ def verification_messages(
 
 def refinement_messages(
     problem: str,
-    candidate_id: str,
-    proof: str,
-    self_evaluation: str,
-    review_score: float,
-    review: str,
+    candidates: list[tuple[str, str, str, list[tuple[float, str]]]],
 ) -> list[dict[str, str]]:
-    parts = [
-        f'<candidate id="{candidate_id}">',
-        "<proof>",
-        proof,
-        "</proof>",
-        f'<verifier_review score="{review_score:g}">',
-        review,
-        "</verifier_review>",
-    ]
-    # Omit the self-evaluation block entirely when empty (matches gold's
-    # build_refine_bundle, which drops it rather than sending an empty element).
-    if self_evaluation:
-        parts += ["<self_evaluation>", self_evaluation, "</self_evaluation>"]
-    parts.append("</candidate>")
+    """Merge one or more parent candidates into a refiner prompt, gold-style.
+
+    Each candidate is (candidate_id, proof, self_evaluation, reviews), where
+    reviews is a list of (score, review_text). Mirrors gold's build_refine_bundle:
+    per candidate, the proof, then each verifier review, then the self-evaluation
+    only if non-empty (omitted, not sent empty, when dropped).
+    """
+    parts: list[str] = []
+    for candidate_id, proof, self_evaluation, reviews in candidates:
+        parts.append(f'<candidate id="{candidate_id}">')
+        parts += ["<proof>", proof, "</proof>"]
+        for review_score, review in reviews:
+            parts += [
+                f'<verifier_review score="{review_score:g}">',
+                review,
+                "</verifier_review>",
+            ]
+        if self_evaluation:
+            parts += ["<self_evaluation>", self_evaluation, "</self_evaluation>"]
+        parts.append("</candidate>")
     rendered = (
         template("refiner.txt")
         .replace("{problem}", problem)
