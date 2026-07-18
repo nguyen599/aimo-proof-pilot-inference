@@ -51,6 +51,8 @@ class FA4FP8KVPatchTests(unittest.TestCase):
         self.assertIn("fp8_kv_dequant: bool = False", kernel_patch)
         self.assertIn("self.fp8_kv_dequant = fp8_kv_dequant", kernel_patch)
         self.assertIn("get_flash_attn_version() in (3, 4)", vllm_patch)
+        self.assertIn('kv_cache_dtype in ("fp8", "fp8_e4m3")', vllm_patch)
+        self.assertIn("and block_size != 128", vllm_patch)
         self.assertIn(
             "FA4 FP8 KV cache on SM90 requires block_size=128",
             vllm_patch,
