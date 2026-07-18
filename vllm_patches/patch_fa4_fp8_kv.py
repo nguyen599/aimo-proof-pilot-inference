@@ -39,6 +39,7 @@ REQUIRED_MARKERS = {
     ),
     Path("v1/attention/backends/flash_attn.py"): (
         "get_flash_attn_version() in (3, 4)",
+        "FA4 FP8 KV cache on SM90 requires block_size=128",
         "self.vllm_flash_attn_version != 4",
     ),
     Path("vllm_flash_attn/flash_attn_interface.py"): (

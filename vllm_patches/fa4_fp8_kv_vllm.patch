@@ -1,5 +1,5 @@
 diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
-index db5b0dda3..28992b3b7 100644
+index db5b0dda3..2f5bbd851 100644
 --- a/vllm/v1/attention/backends/flash_attn.py
 +++ b/vllm/v1/attention/backends/flash_attn.py
 @@ -170,7 +170,7 @@ class FlashAttentionBackend(AttentionBackend):
@@ -11,6 +11,17 @@ index db5b0dda3..28992b3b7 100644
                  and current_platform.is_device_capability_family(90)
              )
          return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+@@ -369,2 +369,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
+-        self.max_num_splits = 0  # No upper bound on the number of splits.
++        if (
++            get_flash_attn_version() == 4
++            and self.kv_cache_dtype == torch.float8_e4m3fn
++            and self.block_size != 128
++        ):
++            raise ValueError("FA4 FP8 KV cache on SM90 requires block_size=128")
++
++        self.max_num_splits = 0  # No upper bound on the number of splits.
+         self.aot_schedule = get_flash_attn_version() == 3
 @@ -732,7 +732,12 @@ class FlashAttentionImpl(AttentionImpl):
                  "heads in the layer"
              )

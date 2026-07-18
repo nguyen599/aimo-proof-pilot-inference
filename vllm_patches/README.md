@@ -72,9 +72,14 @@ VLLM_PLUGINS=olmo3_sink vllm serve /path/to/opd-32b-deploy \
   --trust-remote-code \
   --tensor-parallel-size 1 \
   --kv-cache-dtype fp8 \
-  --block-size 256 \
+  --block-size 128 \
+  --attention-config '{"flash_attn_version":4}' \
   --reasoning-parser deepseek_v4
 ```
+
+FA4 FP8 KV on SM90 requires `--block-size 128`. The installer adds an engine
+validation that rejects other page sizes before model loading. FA3 retains its
+normal block-size choices.
 
 Do not rename the checkpoint architecture to `Olmo3ForCausalLM`. The stock
 model has no sink parameters and would silently change every attention
