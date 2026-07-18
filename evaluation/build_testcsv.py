@@ -75,6 +75,16 @@ def main() -> int:
         for r in batch:
             row = r["row"]
             rid = str(row[id_col]) if id_col else str(r["row_idx"])
+            # datasets-server silently truncates large cells; refuse to emit one
+            # so the output is guaranteed byte-exact with the source dataset.
+            if prob_col in (r.get("truncated_cells") or []):
+                print(
+                    f"ERROR: problem at id {rid} was truncated by datasets-server; "
+                    "the output would not be bit-exact. Build from the dataset file "
+                    "directly instead.",
+                    file=sys.stderr,
+                )
+                return 2
             problem = row[prob_col]
             if not isinstance(problem, str) or not problem.strip():
                 print(f"ERROR: empty problem at id {rid}", file=sys.stderr)
