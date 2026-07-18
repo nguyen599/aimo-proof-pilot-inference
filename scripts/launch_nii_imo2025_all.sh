@@ -14,6 +14,7 @@ DFLASH_MODEL_PATH="${AIMO_DFLASH_MODEL_PATH:-/tmp/models/dflash-32b-draft-v2test
 DIST_ROOT="${AIMO_DISTRIBUTED_ROOT:-/tmp/aimo-proof-pilot-inference-distributed}"
 LAUNCH_ROOT="${AIMO_LAUNCH_ROOT:-/tmp/aimo-proof-pilot-inference-launch}/${RUN_ID}"
 MASTER_PORT="${MASTER_PORT:-29617}"
+MAX_CONCURRENT_PROBLEMS="${AIMO_MAX_CONCURRENT_PROBLEMS:-6}"
 
 physical_rank="${GLOBAL_RANK:-${NODE_RANK:-}}"
 case "$physical_rank" in
@@ -216,7 +217,7 @@ args=(
     --served-model-name proof-model
     --server-timeout 7200
     --pipelines-per-problem 36
-    --max-concurrent-problems 6
+    --max-concurrent-problems "$MAX_CONCURRENT_PROBLEMS"
     --refine-rounds 4
     --thinking-budget-handoff-enabled
     --thinking-budget-handoff-mode lossless_partial
