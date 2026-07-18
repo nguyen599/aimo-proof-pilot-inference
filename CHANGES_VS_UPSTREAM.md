@@ -26,12 +26,22 @@ present in both `config.yaml` and `config-dynamic.yaml`.
 |---|---|---|---|
 | **Auto data-parallel width** | `config.yaml` `model.data_parallel_size` | `auto` (derive from GPU count) or an explicit int | `4` in `config.yaml`; `auto` in `config-dynamic.yaml` |
 | **fp8 KV cache** | `model.kv_cache_dtype` | `fp8_e4m3` / `auto` (bf16) / `fp8_e5m2` | `auto` (bf16) in `config.yaml`; `fp8_e4m3` in `config-dynamic.yaml` |
+| **Triton attention (Blackwell sm120)** | `server.attention_backend: triton` | `fa3` (Hopper) / `fa4` / `triton` (sm120) | fa3; triton in `config-blackwell.yaml`. launch_server auto-sets `FLASHINFER_CUDA_ARCH_LIST` (9.0a Hopper / 12.0f Blackwell) + `--triton-attention-num-kv-splits 32` |
 | **SGLang runtime baked into the image** | `Dockerfile` (multi-stage) | build args `RUNTIME_HF_REPO`/`RUNTIME_HF_REVISION`/`RUNTIME_ARCHIVE_SHA256`; `--secret id=hf_token` at build | venv downloaded + sha256-verified + relocated + deps-installed at build, frozen at `/opt/pp` |
 | **Dropped hardcoded `CUDA_VISIBLE_DEVICES`** | `Dockerfile` | — (derived from `tp*dp`) | required for auto-dp; no knob |
 
 `config-dynamic.yaml` is a **new profile** for sub-8-GPU nodes (auto-dp + fp8 KV);
-`config.yaml` stays byte-faithful to upstream's 8×H200 topology except for the
-knobs above defaulting to gold.
+`config-blackwell.yaml` is a **new profile** for 8× RTX PRO 6000 Blackwell (sm120,
+no NVLink): triton attention (the only sink-correct backend on sm120), TP=2/auto-dp,
+fp8 KV, **DFlash off** (see note). `config.yaml` stays byte-faithful to upstream's
+8×H200 topology except for the knobs above defaulting to gold.
+
+**Blackwell + DFlash limitation:** DFlash needs a triton draft backend on sm120,
+but the DFlash ring worker (`dflash_worker_v2_ring.py`) hard-requires fa3/fa4 for
+the draft, and Yi-Chia's triton-capable draft is TP=1-only. So TP=2 + DFlash +
+triton is supported by no existing code path; `config-blackwell.yaml` runs without
+speculation. Enabling it would require a triton-capable TP-sharded ring worker
+(new work, unvalidated).
 
 ## Blatant bug fixes (always on, no knob)
 

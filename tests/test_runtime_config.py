@@ -349,15 +349,18 @@ class RuntimeConfigTests(unittest.TestCase):
 
         launcher = (HARNESS / "launch_server.py").read_text()
         self.assertIn("str(server[\"attention_backend\"])", launcher)
-        self.assertNotIn("triton", launcher)
+        # triton is now supported (Blackwell sm120): the launcher adds its kv-splits.
+        self.assertIn("--triton-attention-num-kv-splits", launcher)
+        # DFlash's ring worker still restricts the DRAFT backend to fa3/fa4, so
+        # DFlash is unavailable with a triton draft (Blackwell) -- documented.
         worker = (REPO / "sglang_patches/dflash_worker_v2_ring.py").read_text()
         self.assertIn("draft_backend not in {\"fa3\", \"fa4\"}", worker)
 
     def test_attention_backend_validation_rejects_invalid_profiles(self):
         invalid_values = (
-            ("attention_backend", "triton"),
-            ("page_size", 128),
-            ("deterministic_inference", False),
+            ("attention_backend", "flashinfer"),  # not one of fa3/fa4/triton
+            ("page_size", 128),                    # fa3 requires page_size=1
+            ("deterministic_inference", False),    # fa3 requires deterministic
         )
         for key, value in invalid_values:
             with (
@@ -377,6 +380,44 @@ class RuntimeConfigTests(unittest.TestCase):
                 )
                 with self.assertRaises(ValueError):
                     load_config(path)
+
+    def test_triton_backend_profile_is_accepted(self):
+        # Blackwell: triton is valid with page_size=1; deterministic optional.
+        def configure(config):
+            config["server"].update(attention_backend="triton", page_size=1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_config(directory, configure, name="triton.yaml")
+            server = load_config(path)["server"]
+        self.assertEqual(server["attention_backend"], "triton")
+        # triton with a non-1 page_size is rejected
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_config(
+                directory,
+                lambda c: c["server"].update(
+                    attention_backend="triton", page_size=128
+                ),
+                name="triton_bad.yaml",
+            )
+            with self.assertRaises(ValueError):
+                load_config(path)
+
+    def test_flashinfer_arch_mapping(self):
+        from launch_server import flashinfer_cuda_arch
+        from unittest import mock
+        import subprocess as sp
+
+        def fake(cap):
+            m = mock.Mock()
+            m.stdout = cap + "\n"
+            return m
+
+        with mock.patch.object(sp, "run", return_value=fake("9.0")):
+            self.assertEqual(flashinfer_cuda_arch(), "9.0a")   # Hopper
+        with mock.patch.object(sp, "run", return_value=fake("12.0")):
+            self.assertEqual(flashinfer_cuda_arch(), "12.0f")  # Blackwell sm120
+        with mock.patch.object(sp, "run", side_effect=OSError):
+            self.assertEqual(flashinfer_cuda_arch(), "9.0a")   # fallback
 
 
 if __name__ == "__main__":

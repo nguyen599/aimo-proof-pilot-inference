@@ -142,8 +142,8 @@ def load_config(path: Path) -> dict[str, Any]:
         "dflash_num_draft_tokens", "dflash_window_size",
     ):
         _positive_int(server[key], f"server.{key}")
-    if server["attention_backend"] not in {"fa3", "fa4"}:
-        raise ValueError("server.attention_backend must be fa3 or fa4")
+    if server["attention_backend"] not in {"fa3", "fa4", "triton"}:
+        raise ValueError("server.attention_backend must be fa3, fa4, or triton")
     if type(server["deterministic_inference"]) is not bool:
         raise ValueError("server.deterministic_inference must be a boolean")
     if server["attention_backend"] == "fa4":
@@ -151,11 +151,17 @@ def load_config(path: Path) -> dict[str, Any]:
             raise ValueError("FA4 requires server.page_size=128")
         if server["deterministic_inference"]:
             raise ValueError("FA4 does not support deterministic inference")
-    else:
+    elif server["attention_backend"] == "fa3":
         if server["page_size"] != 1:
             raise ValueError("FA3 requires server.page_size=1")
         if not server["deterministic_inference"]:
             raise ValueError("FA3 requires deterministic inference")
+    else:
+        # triton: the only sink-correct backend on Blackwell sm120. Supports both
+        # deterministic and non-deterministic (it is in sglang's radix-deterministic
+        # set), so deterministic_inference is left to the config; page_size stays 1.
+        if server["page_size"] != 1:
+            raise ValueError("triton requires server.page_size=1")
     if not 0 < server["mem_fraction_static"] < 1:
         raise ValueError("server.mem_fraction_static must be between 0 and 1")
     if not 0 < server["swa_full_tokens_ratio"] <= 1:
