@@ -36,6 +36,8 @@ def main() -> None:
     server_log = args.server_log.read_text()
     humming_layers = server_log.count("HUMMING_W4A8_LAYER_READY")
     draft_w4a16_layers = server_log.count("DFLASH_DRAFT_W4A16_LAYER_READY")
+    fp8_kv_requested = model.kv_cache_dtype.startswith("fp8")
+    fp8_kv_vllm_parity = "fp8_kv_vllm_parity=true" in server_log
 
     assert target_config["torch_dtype"] == "bfloat16"
     assert server["tp_size"] == model.tensor_parallel_size
@@ -56,6 +58,14 @@ def main() -> None:
     assert server["attention_backend"] == expected["attention_backend"]
     assert server["page_size"] == expected["page_size"]
     assert models["data"][0]["id"] == str(model.target)
+    if fp8_kv_requested:
+        assert expected["attention_backend"] == "fa3"
+        assert (
+            "fp8_kv_vllm_parity=true" in server_log
+            or "fp8_kv_vllm_parity=false" in server_log
+        )
+    if fp8_kv_vllm_parity:
+        assert "SGLANG_FP8_KV_VLLM_PARITY target scales ready" in server_log
 
     if model.quantized:
         assert target_config["quantization_config"]["quant_method"] == "compressed-tensors"
@@ -76,6 +86,8 @@ def main() -> None:
         assert server["speculative_num_draft_tokens"] == expected["dflash_num_draft_tokens"]
         assert server["speculative_draft_window_size"] == expected["dflash_window_size"]
         assert server["speculative_draft_attention_backend"] == expected["attention_backend"]
+        if fp8_kv_vllm_parity:
+            assert "SGLANG_FP8_KV_VLLM_PARITY draft scales ready" in server_log
         expected_ring = expected["page_size"] == 1
         assert f"draft_kv_ring={expected_ring}" in server_log
         if expected_ring:
@@ -127,6 +139,7 @@ def main() -> None:
             "humming_target_layer_count": humming_layers,
             "dflash_draft_w4a16_layer_count": draft_w4a16_layers,
             "dflash_ring": "DFLASH draft KV ring" in server_log,
+            "fp8_kv_vllm_parity": fp8_kv_vllm_parity,
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

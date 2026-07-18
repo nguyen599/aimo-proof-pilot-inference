@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from functools import partial
 from typing import Iterable, Optional, Tuple
 
@@ -54,6 +55,45 @@ from sglang.srt.speculative.dflash_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FP8_KV_VLLM_PARITY_ENV = "SGLANG_FP8_KV_VLLM_PARITY"
+
+
+def _install_vllm_parity_fp8_scales(
+    attention: RadixAttention,
+    *,
+    layer_id: int,
+) -> None:
+    if os.environ.get(_FP8_KV_VLLM_PARITY_ENV) != "1":
+        return
+    if os.environ.get("SGLANG_LOAD_KV_SCALE") == "1":
+        raise RuntimeError(
+            "SGLANG_FP8_KV_VLLM_PARITY and SGLANG_LOAD_KV_SCALE are mutually exclusive"
+        )
+
+    installed = []
+    for name in ("q_scale", "k_scale", "v_scale"):
+        if getattr(attention, name, None) is not None:
+            continue
+        if hasattr(attention, name):
+            delattr(attention, name)
+        attention.register_buffer(
+            name,
+            torch.tensor(1.0, dtype=torch.float32),
+            persistent=False,
+        )
+        setattr(attention, f"{name}_float", 1.0)
+        installed.append(name)
+
+    if layer_id == 0:
+        logger.info(
+            "SGLANG_FP8_KV_VLLM_PARITY draft scales ready: "
+            "q=%s k=%s v=%s installed=%s",
+            float(attention.q_scale),
+            float(attention.k_scale),
+            float(attention.v_scale),
+            installed,
+        )
 
 
 def _rope_theta(config) -> float:
@@ -128,6 +168,7 @@ class DFlashAttention(nn.Module):
             num_kv_heads=self.num_kv_heads, layer_id=layer_id,
             sliding_window_size=sliding_window, attn_type=AttentionType.ENCODER_ONLY,
         )
+        _install_vllm_parity_fp8_scales(self.attn, layer_id=layer_id)
 
     def _apply_qk_norm(
         self, q: torch.Tensor, k: torch.Tensor

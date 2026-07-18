@@ -34,6 +34,26 @@ def attention_arguments(server: dict) -> list[str]:
     return arguments
 
 
+def configure_fp8_kv_vllm_parity(
+    env: dict[str, str],
+    *,
+    kv_cache_dtype: str,
+    attention_backend: str,
+) -> bool:
+    """Enable the patched vLLM-compatible FA3 query-scale contract."""
+
+    if not kv_cache_dtype.startswith("fp8"):
+        return False
+    if attention_backend != "fa3":
+        raise RuntimeError("FP8 KV parity requires the FA3 attention backend")
+
+    value = env.get("SGLANG_FP8_KV_VLLM_PARITY", "1")
+    if value not in {"0", "1"}:
+        raise ValueError("SGLANG_FP8_KV_VLLM_PARITY must be 0 or 1")
+    env["SGLANG_FP8_KV_VLLM_PARITY"] = value
+    return value == "1"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
@@ -59,6 +79,11 @@ def main() -> None:
     env["SGLANG_ENABLE_OVERLAP_PLAN_STREAM"] = "1"
     env["SGLANG_SWA_EVICTION_INTERVAL_MULTIPLIER"] = "0.125"
     env["SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW"] = "1"
+    fp8_kv_vllm_parity = configure_fp8_kv_vllm_parity(
+        env,
+        kv_cache_dtype=model.kv_cache_dtype,
+        attention_backend=str(server["attention_backend"]),
+    )
 
     nvrtc_dir = venv / "lib/python3.12/site-packages/nvidia/cu13/lib"
     nvrtc_lib = nvrtc_dir / "libnvrtc.so.13"
@@ -134,6 +159,7 @@ def main() -> None:
         f"[proof-pilot-server] mode={model.mode} dflash={str(model.dflash).lower()} "
         f"tp={model.tensor_parallel_size} dp={model.data_parallel_size} "
         f"model={model.target} draft={model.draft} kv={model.kv_cache_dtype} "
+        f"fp8_kv_vllm_parity={str(fp8_kv_vllm_parity).lower()} "
         f"attention={server['attention_backend']} page_size={server['page_size']} "
         f"deterministic={str(server['deterministic_inference']).lower()} "
         f"port={server['port']} ctx={server['context_length']}", flush=True,

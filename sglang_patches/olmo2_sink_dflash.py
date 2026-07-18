@@ -66,6 +66,54 @@ logger = logging.getLogger(__name__)
 
 _is_cuda = is_cuda()
 
+_FP8_KV_VLLM_PARITY_ENV = "SGLANG_FP8_KV_VLLM_PARITY"
+
+
+def _install_vllm_parity_fp8_scales(
+    attention: RadixAttention,
+    *,
+    layer_id: int,
+) -> None:
+    """Give FA3 the explicit unit-scale contract used by vLLM.
+
+    BF16 checkpoints do not contain KV scales. Stock SGLang therefore leaves
+    RadixAttention scales as ``None`` and its FA3 backend raw-casts Q/K/V.
+    vLLM instead keeps explicit unit Q/K/V scales, statically quantizes Q, and
+    forwards all three descales to FA3. The backend patch consumes these
+    non-persistent buffers when the opt-in parity mode is enabled.
+    """
+
+    if os.environ.get(_FP8_KV_VLLM_PARITY_ENV) != "1":
+        return
+    if os.environ.get("SGLANG_LOAD_KV_SCALE") == "1":
+        raise RuntimeError(
+            "SGLANG_FP8_KV_VLLM_PARITY and SGLANG_LOAD_KV_SCALE are mutually exclusive"
+        )
+
+    installed = []
+    for name in ("q_scale", "k_scale", "v_scale"):
+        if getattr(attention, name, None) is not None:
+            continue
+        if hasattr(attention, name):
+            delattr(attention, name)
+        attention.register_buffer(
+            name,
+            torch.tensor(1.0, dtype=torch.float32),
+            persistent=False,
+        )
+        setattr(attention, f"{name}_float", 1.0)
+        installed.append(name)
+
+    if layer_id == 0:
+        logger.info(
+            "SGLANG_FP8_KV_VLLM_PARITY target scales ready: "
+            "q=%s k=%s v=%s installed=%s",
+            float(attention.q_scale),
+            float(attention.k_scale),
+            float(attention.v_scale),
+            installed,
+        )
+
 
 # Aligned with HF's implementation, using sliding window inclusive with the last token
 # SGLang assumes exclusive
@@ -184,6 +232,7 @@ class Olmo2Attention(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
         )
+        _install_vllm_parity_fp8_scales(self.attn, layer_id=layer_id)
         # Static fp8 KV-cache scales (opt-in via SGLANG_LOAD_KV_SCALE=1). compressed-tensors
         # returns no KVCacheMethod for RadixAttention, so attn.quant_method stays None, the
         # k_scale/v_scale params are never created, and the loader silently drops the checkpoint's

@@ -21,6 +21,8 @@
 #       hook from converting the INT4 DFlash draft from W4A16 to W4A8
 #   patch_humming_sm90_config.py (script) pin the H200 Humming helper to the
 #       numerically verified M=256 kernel configuration for every row count
+#   patch_fp8_kv_vllm_parity.py (script) opt-in vLLM-compatible FP8 query
+#       quantization and Q/K/V descales for the SGLang FA3 backend
 #
 # Usage: bash apply_patches.sh <venv_path>
 set -euo pipefail
@@ -50,6 +52,7 @@ find "$SROOT/models" "$SROOT/speculative" -name '*.pyc' -delete 2>/dev/null || t
 "$VENV/bin/python" "$SRC/patch_canonical_greedy.py" "$VENV"
 "$VENV/bin/python" "$SRC/patch_dflash_sampling.py" "$VENV"
 "$VENV/bin/python" "$SRC/patch_speculative_finish.py" "$VENV"
+"$VENV/bin/python" "$SRC/patch_fp8_kv_vllm_parity.py" "$VENV"
 "$VENV/bin/python" "$SRC/patch_w4a8_runtime_marker.py" "$VENV"
 "$VENV/bin/python" "$SRC/patch_humming_target_scope.py" \
   /workspace/pp/proof-pilot/deploy/w4a8/humming_w4a8.py

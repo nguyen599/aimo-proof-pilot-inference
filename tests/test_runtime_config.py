@@ -16,7 +16,11 @@ HARNESS = REPO / "evaluation" / "harness"
 sys.path.insert(0, str(HARNESS))
 
 from eval_config import active_model, load_config  # noqa: E402
-from launch_server import attention_arguments, decode_graph_batches  # noqa: E402
+from launch_server import (  # noqa: E402
+    attention_arguments,
+    configure_fp8_kv_vllm_parity,
+    decode_graph_batches,
+)
 
 class RuntimeConfigTests(unittest.TestCase):
     @classmethod
@@ -271,6 +275,46 @@ class RuntimeConfigTests(unittest.TestCase):
         batches = decode_graph_batches(96)
         self.assertEqual(batches[:16], list(range(1, 17)))
         self.assertEqual(batches[-1], 96)
+
+    def test_fp8_kv_enables_vllm_parity_for_fa3(self):
+        env = {}
+        self.assertTrue(
+            configure_fp8_kv_vllm_parity(
+                env,
+                kv_cache_dtype="fp8_e4m3",
+                attention_backend="fa3",
+            )
+        )
+        self.assertEqual(env["SGLANG_FP8_KV_VLLM_PARITY"], "1")
+
+    def test_fp8_kv_parity_can_be_explicitly_disabled_for_ab(self):
+        env = {"SGLANG_FP8_KV_VLLM_PARITY": "0"}
+        self.assertFalse(
+            configure_fp8_kv_vllm_parity(
+                env,
+                kv_cache_dtype="fp8_e4m3",
+                attention_backend="fa3",
+            )
+        )
+
+    def test_fp8_kv_rejects_non_fa3_backend(self):
+        with self.assertRaisesRegex(RuntimeError, "requires the FA3"):
+            configure_fp8_kv_vllm_parity(
+                {},
+                kv_cache_dtype="fp8_e4m3",
+                attention_backend="fa4",
+            )
+
+    def test_bf16_kv_does_not_change_environment(self):
+        env = {}
+        self.assertFalse(
+            configure_fp8_kv_vllm_parity(
+                env,
+                kv_cache_dtype="auto",
+                attention_backend="fa3",
+            )
+        )
+        self.assertNotIn("SGLANG_FP8_KV_VLLM_PARITY", env)
 
     def test_submission_wrapper_requires_explicit_config(self):
         launcher = (REPO / "run_submission.sh").read_text()
