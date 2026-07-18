@@ -7,7 +7,7 @@ set -euo pipefail
 
 RUN_ID="${AIMO_RUN_ID:?set AIMO_RUN_ID to a unique run identifier}"
 SOURCE_REPO="${AIMO_SOURCE_REPO:-/tmp/aimo-proof-pilot-inference-runtime/repo}"
-SOURCE_REF="${AIMO_SOURCE_REF:-711d58b709c3f52748cf97f75af19221c4de8cce}"
+SOURCE_REF="main"
 VENV="${AIMO_VENV:-/tmp/aimo-proof-pilot-inference-runtime/venv-vllm-0.25.1}"
 MODEL_PATH="${AIMO_MODEL_PATH:-/tmp/models/olmo3-opd-sft-750-vllm}"
 DFLASH_MODEL_PATH="${AIMO_DFLASH_MODEL_PATH:-/tmp/models/dflash-32b-draft-v2test-phaseL}"
