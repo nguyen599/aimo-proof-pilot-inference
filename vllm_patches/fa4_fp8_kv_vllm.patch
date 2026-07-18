@@ -1,0 +1,96 @@
+diff --git a/vllm/v1/attention/backends/flash_attn.py b/vllm/v1/attention/backends/flash_attn.py
+index db5b0dda3..28992b3b7 100644
+--- a/vllm/v1/attention/backends/flash_attn.py
++++ b/vllm/v1/attention/backends/flash_attn.py
+@@ -170,7 +170,7 @@ class FlashAttentionBackend(AttentionBackend):
+             if current_platform.is_xpu():
+                 return True
+             return (
+-                get_flash_attn_version() == 3
++                get_flash_attn_version() in (3, 4)
+                 and current_platform.is_device_capability_family(90)
+             )
+         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+@@ -732,7 +732,12 @@ class FlashAttentionImpl(AttentionImpl):
+                 "heads in the layer"
+             )
+
+-        self.supports_quant_query_input = flash_attn_supports_quant_query_input()
++        # FA4's SM90 FP8-KV path accepts unquantized Q and applies the K/V
++        # descales in the attention kernel.
++        self.supports_quant_query_input = (
++            flash_attn_supports_quant_query_input()
++            and self.vllm_flash_attn_version != 4
++        )
+
+         vllm_config = get_current_vllm_config_or_none()
+         dcp_a2a = (
+diff --git a/vllm/vllm_flash_attn/flash_attn_interface.py b/vllm/vllm_flash_attn/flash_attn_interface.py
+index bef811f6e..8e2c96472 100644
+--- a/vllm/vllm_flash_attn/flash_attn_interface.py
++++ b/vllm/vllm_flash_attn/flash_attn_interface.py
+@@ -388,6 +388,42 @@ def flash_attn_varlen_func(
+
+         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+
++        # SM90 FA4 consumes FP16 Q and FP8 E4M3 paged K/V, applying the K/V
++        # descales in the attention kernel.
++        fa4_fp8_kv_dequant = (
++            k.dtype == torch.float8_e4m3fn
++            and torch.cuda.get_device_capability()[0] == 9
++        )
++        if fa4_fp8_kv_dequant:
++            if q.dtype != torch.float16:
++                q = q.to(torch.float16)
++            fa4_q_descale = None
++
++            # vLLM .expand()s the scalar descales into stride-0 broadcasts, but the
++            # cute interface needs stride-1 on num_kv_heads. A (1, 1) descale (TP>1:
++            # 1 KV head/rank + batch=1 decode) counts as "contiguous", so .contiguous()
++            # no-ops; clone() forces a real stride-1 copy (also fixes the derived q_descale).
++            fa4_k_descale = (
++                k_descale.clone(memory_format=torch.contiguous_format)
++                if k_descale is not None
++                else None
++            )
++            fa4_v_descale = (
++                v_descale.clone(memory_format=torch.contiguous_format)
++                if v_descale is not None
++                else None
++            )
++            # The kernel produces FP16 output; copy it into vLLM's model-dtype
++            # output buffer after the call.
++            fa4_out_buf = out
++            fa4_out = None
++        else:
++            fa4_q_descale = None
++            fa4_k_descale = None
++            fa4_v_descale = None
++            fa4_out_buf = None
++            fa4_out = out
++
+         out, softmax_lse = _flash_attn_fwd(
+             q,
+             k,
+@@ -406,12 +442,20 @@ def flash_attn_varlen_func(
+             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,
+             num_splits=num_splits,
+             return_lse=return_softmax_lse,
+-            out=out,
++            out=fa4_out,
+             learnable_sink=s_aux,
+             mask_mod=mask_mod,
+             aux_tensors=aux_tensors,
+             output_scale=output_scale,
++            q_descale=fa4_q_descale,
++            k_descale=fa4_k_descale,
++            v_descale=fa4_v_descale,
++            fp8_kv_dequant=fa4_fp8_kv_dequant,
+         )
++        if fa4_out_buf is not None:
++            # Copy the FP16 kernel output into vLLM's model-dtype buffer.
++            fa4_out_buf.copy_(out)
++            out = fa4_out_buf
+     else:
+         raise ValueError(f"Unsupported FA version: {fa_version}")
+     return (out, softmax_lse) if return_softmax_lse else out

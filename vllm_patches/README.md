@@ -28,6 +28,9 @@ serve Proof Pilot OLMo3Sink checkpoints with vLLM.
 - Adds `disable_above_context_len` to `--speculative-config` on vLLM `0.25.1`.
   When the largest request in a batch reaches the threshold, the V1 runner skips
   the drafter, clears pending draft tokens, and continues target-only decoding.
+- Adds the SM90 FA4 FP8-KV path and its vLLM routing on vLLM `0.25.1`.
+  Queries remain unquantized at the layer boundary while FA4 applies the K/V
+  descales in the attention kernel.
 
 The target implementation supports vLLM `0.23.1rc1.dev699` through `0.25.1`.
 The DFlash implementation and context cutoff target vLLM `0.25.1` V1. The CUDA
@@ -44,11 +47,12 @@ bash vllm_patches/install.sh /path/to/venv
 
 The script installs the local plugin without resolving dependencies, then
 starts a fresh Python process to verify model registration and importability.
-On vLLM `0.25.1`, it applies and verifies the context-cutoff patch before
-installing the plugin. The patcher is idempotent and keeps one
-`*.pre_dflash_context_cutoff` backup beside each modified vLLM source file.
+On vLLM `0.25.1`, it applies and verifies the FA4 FP8-KV and context-cutoff
+patches before installing the plugin. Both patchers are idempotent and keep one
+backup beside each modified vLLM source file.
 
-Set `AIMO_VLLM_APPLY_DFLASH_CONTEXT_CUTOFF=0` to install only the model plugin.
+Set `AIMO_VLLM_APPLY_DFLASH_CONTEXT_CUTOFF=0` to skip the context-cutoff patch.
+Set `AIMO_VLLM_APPLY_FA4_FP8_KV=0` to leave the bundled FA4 sources unchanged.
 Other vLLM versions keep the plugin behavior and skip this versioned source
 patch.
 
@@ -126,4 +130,10 @@ To apply only this patch to an existing vLLM `0.25.1` environment:
 
 ```bash
 python vllm_patches/patch_dflash_context_cutoff.py /path/to/venv
+```
+
+To apply only the FA4 FP8-KV sources and routing:
+
+```bash
+python vllm_patches/patch_fa4_fp8_kv.py /path/to/venv
 ```

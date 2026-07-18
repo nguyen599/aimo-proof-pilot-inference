@@ -16,6 +16,13 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 VLLM_VERSION="$($PYTHON_BIN -c 'import vllm; print(vllm.__version__)')"
+APPLY_FA4_FP8_KV="${AIMO_VLLM_APPLY_FA4_FP8_KV:-1}"
+if [[ "$APPLY_FA4_FP8_KV" == "1" && "$VLLM_VERSION" == "0.25.1" ]]; then
+  "$PYTHON_BIN" "$ROOT/patch_fa4_fp8_kv.py" "$PYTHON_BIN"
+elif [[ "$APPLY_FA4_FP8_KV" == "1" ]]; then
+  echo "[vllm-patch] skipping FA4 FP8-KV patch for vLLM $VLLM_VERSION"
+fi
+
 APPLY_CONTEXT_CUTOFF="${AIMO_VLLM_APPLY_DFLASH_CONTEXT_CUTOFF:-1}"
 if [[ "$APPLY_CONTEXT_CUTOFF" == "1" && "$VLLM_VERSION" == "0.25.1" ]]; then
   "$PYTHON_BIN" "$ROOT/patch_dflash_context_cutoff.py" "$PYTHON_BIN"
