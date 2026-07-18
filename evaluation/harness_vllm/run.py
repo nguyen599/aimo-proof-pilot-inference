@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import asyncio
+import concurrent.futures
 import contextlib
 import csv
 import gzip
@@ -2739,6 +2740,7 @@ class ChatScheduler:
         mock_llm: bool = False,
         stage_max_new_tokens: Optional[dict[str, int]] = None,
         request_timeout_seconds: float = 900.0,
+        request_worker_count: Optional[int] = None,
         stream_responses: bool = True,
         context_length: int = 0,
         context_margin_tokens: int = 64,
@@ -2778,6 +2780,48 @@ class ChatScheduler:
         self._previewed_prompt_hashes: set[tuple[str, str]] = set()
         self.max_concurrent_requests = max(1, max_concurrent_requests)
         self._semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+        worker_count = min(
+            self.max_concurrent_requests,
+            max(1, int(request_worker_count or 32)),
+        )
+        if worker_count == 1:
+            shared_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="llm-request",
+            )
+            self._generation_executor = shared_executor
+            self._priority_executor = shared_executor
+            self._generation_worker_count = 1
+            self._priority_worker_count = 0
+        else:
+            self._priority_worker_count = max(1, min(8, worker_count // 4))
+            self._generation_worker_count = (
+                worker_count - self._priority_worker_count
+            )
+            self._generation_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._generation_worker_count,
+                thread_name_prefix="llm-generation",
+            )
+            self._priority_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._priority_worker_count,
+                thread_name_prefix="llm-priority",
+            )
+        self._executors_closed = False
+        logging.info(
+            "LLM request executors ready: generation_workers=%d "
+            "priority_workers=%d max_concurrent_requests=%d",
+            self._generation_worker_count,
+            self._priority_worker_count,
+            self.max_concurrent_requests,
+        )
+
+    def close(self) -> None:
+        if self._executors_closed:
+            return
+        self._executors_closed = True
+        executors = {self._generation_executor, self._priority_executor}
+        for executor in executors:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def _token_ids_to_list(token_ids: Any) -> list[int]:
@@ -2994,6 +3038,7 @@ class ChatScheduler:
         response_prefix: str = "",
         return_context_ids: bool = False,
         visible_output_limit_tokens: Optional[int] = None,
+        priority: bool = False,
     ) -> dict[str, Any]:
 
         response: Optional[dict[str, Any]] = None
@@ -3009,7 +3054,13 @@ class ChatScheduler:
                 else:
                     if progress is not None and self.stream_responses:
                         stream_id = f"{stage}-{request_index}"
-                    response = await asyncio.to_thread(
+                    executor = (
+                        self._priority_executor
+                        if priority or stage != "proof_generation"
+                        else self._generation_executor
+                    )
+                    response = await asyncio.get_running_loop().run_in_executor(
+                        executor,
                         self._call_sync,
                         stage,
                         prompt,
@@ -4440,6 +4491,7 @@ async def generate_single_attempt(
             ),
             thinking_budget_force_text=round_force_text,
             thinking_budget_action="stop" if can_restart else "finalize",
+            priority=solve_round_idx > 0,
         )
 
         if can_restart and response_hit_unfinished_thinking_budget(
@@ -6294,6 +6346,7 @@ class ProofRuntime:
         self.logdir = logdir
         self.gpu_group = gpu_group
         self.max_concurrent_requests = max(1, max_concurrent_requests)
+        self.request_worker_count = max(1, int(max_num_seqs))
         self.pipelines_per_problem = max(1, pipelines_per_problem)
         if not 0 <= int(deepseek_math_v2_candidate_count) <= self.pipelines_per_problem:
             raise ValueError(
@@ -6519,6 +6572,7 @@ class ProofRuntime:
                 mock_llm=self.mock_llm,
                 stage_max_new_tokens=self.stage_token_limits,
                 request_timeout_seconds=float(self.problem_timeout_seconds),
+                request_worker_count=self.request_worker_count,
                 stream_responses=self.stream_vllm,
                 context_length=self.vllm_config.num_ctx,
                 tokenizer=self.tokenizer,
@@ -6779,6 +6833,9 @@ class ProofRuntime:
             )
 
     def close(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.close()
+            self._scheduler = None
         if self._manager is not None:
             self._manager.stop()
             self._manager = None

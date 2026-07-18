@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1229,6 +1231,84 @@ class VisibleOutputLimitSchedulerTests(unittest.TestCase):
         self.assertGreater(result["usage"]["visible_output_forced_tokens"], 0)
         self.assertTrue(parsed["is_valid_candidate_response"])
         self.assertEqual(parsed["self_score"], 0.0)
+
+
+class PriorityRequestSchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_followup_requests_do_not_wait_behind_initial_generations(self):
+        generation_release = threading.Event()
+        started: list[tuple[str, str]] = []
+        started_lock = threading.Lock()
+
+        def fake_call(stage, prompt, *args):
+            del args
+            with started_lock:
+                started.append((stage, prompt))
+            if stage == "proof_generation" and prompt != "restart":
+                generation_release.wait(timeout=5)
+            return {
+                "success": True,
+                "text": "ok",
+                "finish_reason": "stop",
+                "usage": {},
+            }
+
+        with patch.object(run, "OpenAI", return_value=SimpleNamespace()):
+            scheduler = run.ChatScheduler(
+                base_urls=["http://test/v1"],
+                api_key="test",
+                model="test",
+                sampling=run.SamplingConfig(
+                    max_new_tokens=128,
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=-1,
+                    min_new_tokens=0,
+                    min_p=None,
+                ),
+                max_concurrent_requests=16,
+                request_worker_count=4,
+                tokenizer=FakeTokenizer(),
+                stream_responses=False,
+            )
+        scheduler._call_sync = fake_call
+        initial_tasks = [
+            asyncio.create_task(scheduler.call("proof_generation", f"initial-{idx}"))
+            for idx in range(4)
+        ]
+        try:
+            for _ in range(100):
+                with started_lock:
+                    initial_started = sum(
+                        stage == "proof_generation" and prompt != "restart"
+                        for stage, prompt in started
+                    )
+                if initial_started == 3:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(initial_started, 3)
+
+            await asyncio.wait_for(
+                scheduler.call("proof_finalize", "finalize"),
+                timeout=1,
+            )
+            await asyncio.wait_for(
+                scheduler.call("proof_generation", "restart", priority=True),
+                timeout=1,
+            )
+            with started_lock:
+                self.assertIn(("proof_finalize", "finalize"), started)
+                self.assertIn(("proof_generation", "restart"), started)
+                self.assertEqual(
+                    sum(
+                        stage == "proof_generation" and prompt != "restart"
+                        for stage, prompt in started
+                    ),
+                    3,
+                )
+        finally:
+            generation_release.set()
+            await asyncio.gather(*initial_tasks, return_exceptions=True)
+            scheduler.close()
 
 
 class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
