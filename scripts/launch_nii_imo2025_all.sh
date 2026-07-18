@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Launch one distributed controller and one local TP2/DP4 vLLM server on each
-# node in the four-node NII allocation. Submit this script to member "all".
+# selected NII node. The default is the four-node "all" allocation; set
+# AIMO_NII_NODE_RANK=0 and AIMO_WORLD_SIZE=1 for a single member node.
 
 RUN_ID="${AIMO_RUN_ID:?set AIMO_RUN_ID to a unique run identifier}"
 SOURCE_REPO="${AIMO_SOURCE_REPO:-/tmp/aimo-proof-pilot-inference-runtime/repo}"
@@ -14,14 +15,29 @@ DIST_ROOT="${AIMO_DISTRIBUTED_ROOT:-/tmp/aimo-proof-pilot-inference-distributed}
 LAUNCH_ROOT="${AIMO_LAUNCH_ROOT:-/tmp/aimo-proof-pilot-inference-launch}/${RUN_ID}"
 MASTER_PORT="${MASTER_PORT:-29617}"
 
-physical_rank="${AIMO_NII_NODE_RANK:-${GLOBAL_RANK:-${NODE_RANK:-}}}"
+physical_rank="${GLOBAL_RANK:-${NODE_RANK:-}}"
 case "$physical_rank" in
-    0|1|2|3) node_rank="$physical_rank" ;;
+    0|1|2|3|"") ;;
     *)
         echo "Expected NII rank 0 through 3, got ${physical_rank:-unset}" >&2
         exit 2
         ;;
 esac
+
+node_rank="${AIMO_NII_NODE_RANK:-$physical_rank}"
+world_size="${AIMO_WORLD_SIZE:-4}"
+if ! [[ "$node_rank" =~ ^[0-9]+$ ]]; then
+    echo "Expected a nonnegative logical node rank, got ${node_rank:-unset}" >&2
+    exit 2
+fi
+if ! [[ "$world_size" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Expected a positive world size, got ${world_size:-unset}" >&2
+    exit 2
+fi
+if [ "$node_rank" -ge "$world_size" ]; then
+    echo "Logical node rank $node_rank must be smaller than world size $world_size" >&2
+    exit 2
+fi
 
 mkdir -p "$LAUNCH_ROOT"
 rank_log="$LAUNCH_ROOT/rank_${node_rank}.log"
@@ -39,7 +55,7 @@ on_exit() {
 }
 trap on_exit EXIT
 
-echo "[$(date -u +%FT%TZ)] launch rank=${node_rank}/4 physical_rank=${physical_rank} host=$(hostname)"
+echo "[$(date -u +%FT%TZ)] launch rank=${node_rank}/${world_size} physical_rank=${physical_rank:-unknown} host=$(hostname)"
 
 if [ "$node_rank" -eq 0 ]; then
     if [ ! -d "$SOURCE_REPO/.git" ]; then
@@ -181,7 +197,7 @@ fi
 args=(
     "$VENV/bin/python" -m evaluation.harness_vllm.run
     --node-rank "$node_rank"
-    --world-size 4
+    --world-size "$world_size"
     --master-addr "$MASTER_ADDR"
     --master-port "$MASTER_PORT"
     --distributed-run-id "$RUN_ID"
