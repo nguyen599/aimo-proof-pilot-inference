@@ -204,6 +204,16 @@ def main() -> int:
     print("\n=== summary ===")
     for s, ok in results.items():
         print(f"  {'OK  ' if ok else 'FAIL'}  {s}")
+    n = len(results)
+    n_ok = sum(1 for ok in results.values() if ok)
+    checked = ", ".join(results)
+    # One self-contained final line: survives a truncated `opd-status` tail and
+    # names every folder that was checked, so "did it do all of them?" is answered.
+    if n_ok == n:
+        print(f"\nRESULT: {n_ok}/{n} folders verified OK  [{checked}]")
+    else:
+        bad = ", ".join(s for s, ok in results.items() if not ok)
+        print(f"\nRESULT: FAILED — {n - n_ok}/{n} bad: {bad}  (checked: {checked})")
     return 0 if all(results.values()) else 1
 
 
