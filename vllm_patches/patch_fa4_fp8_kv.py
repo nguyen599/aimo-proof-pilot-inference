@@ -26,6 +26,7 @@ TARGET_PATHS = (
     Path("vllm_flash_attn/cute/utils.py"),
     Path("v1/attention/backends/flash_attn.py"),
     Path("vllm_flash_attn/flash_attn_interface.py"),
+    Path("config/vllm.py"),
 )
 
 REQUIRED_MARKERS = {
@@ -46,6 +47,11 @@ REQUIRED_MARKERS = {
     Path("vllm_flash_attn/flash_attn_interface.py"): (
         "fa4_fp8_kv_dequant = (",
         "fp8_kv_dequant=fa4_fp8_kv_dequant",
+    ),
+    Path("config/vllm.py"): (
+        "def validate_fa4_fp8_kv_block_size",
+        "current_platform.is_device_capability_family(90)",
+        "FA4 FP8 KV cache on SM90 requires block_size=128",
     ),
 }
 

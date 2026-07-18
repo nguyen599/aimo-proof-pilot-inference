@@ -58,6 +58,22 @@ class FA4FP8KVPatchTests(unittest.TestCase):
             vllm_patch,
         )
         self.assertIn("fp8_kv_dequant=fa4_fp8_kv_dequant", vllm_patch)
+        self.assertIn("diff --git a/vllm/config/vllm.py", vllm_patch)
+        self.assertIn("def validate_fa4_fp8_kv_block_size", vllm_patch)
+        self.assertIn(
+            "current_platform.is_device_capability_family(90)",
+            vllm_patch,
+        )
+
+    def test_installer_verifies_early_config_guard(self) -> None:
+        config_path = Path("config/vllm.py")
+
+        self.assertIn(config_path, patch_module.TARGET_PATHS)
+        self.assertIn(config_path, patch_module.REQUIRED_MARKERS)
+        self.assertIn(
+            "def validate_fa4_fp8_kv_block_size",
+            patch_module.REQUIRED_MARKERS[config_path],
+        )
 
     def test_git_apply_helper_is_idempotence_detectable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

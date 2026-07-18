@@ -118,3 +118,28 @@ index bef811f6e..8e2c96472 100644
      else:
          raise ValueError(f"Unsupported FA version: {fa_version}")
      return (out, softmax_lse) if return_softmax_lse else out
+diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
+index ab4b81cbf..41dc5a8b1 100644
+--- a/vllm/config/vllm.py
++++ b/vllm/config/vllm.py
+@@ -2201,3 +2201,20 @@ class VllmConfig:
++    @model_validator(mode="after")
++    def validate_fa4_fp8_kv_block_size(self) -> "VllmConfig":
++        if (
++            self.attention_config.flash_attn_version == 4
++            and self.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
++        ):
++            from vllm.platforms import current_platform
++
++            if (
++                current_platform.is_device_capability_family(90)
++                and self.cache_config.block_size != 128
++            ):
++                raise ValueError(
++                    "FA4 FP8 KV cache on SM90 requires block_size=128"
++                )
++        return self
++
+     @model_validator(mode="after")
+     def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
+         if self.model_config is None:

@@ -77,9 +77,9 @@ VLLM_PLUGINS=olmo3_sink vllm serve /path/to/opd-32b-deploy \
   --reasoning-parser deepseek_v4
 ```
 
-FA4 FP8 KV on SM90 requires `--block-size 128`. The installer adds an engine
-validation that rejects an omitted or different page size during attention
-backend selection, before checkpoint shards are loaded. FA3 retains its normal
+FA4 FP8 KV on SM90 requires `--block-size 128`. The installer adds top-level
+configuration validation that rejects an omitted or different page size before
+engine workers start or checkpoint shards are loaded. FA3 retains its normal
 block-size choices.
 
 Do not rename the checkpoint architecture to `Olmo3ForCausalLM`. The stock
