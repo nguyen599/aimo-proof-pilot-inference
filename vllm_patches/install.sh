@@ -16,7 +16,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 VLLM_VERSION="$($PYTHON_BIN -c 'import vllm; print(vllm.__version__)')"
-APPLY_FA4_FP8_KV="${AIMO_VLLM_APPLY_FA4_FP8_KV:-1}"
+APPLY_FA4_FP8_KV="${AIMO_VLLM_APPLY_FA4_FP8_KV:-0}"
 if [[ "$APPLY_FA4_FP8_KV" == "1" && "$VLLM_VERSION" == "0.25.1" ]]; then
   "$PYTHON_BIN" "$ROOT/patch_fa4_fp8_kv.py" "$PYTHON_BIN"
 elif [[ "$APPLY_FA4_FP8_KV" == "1" ]]; then

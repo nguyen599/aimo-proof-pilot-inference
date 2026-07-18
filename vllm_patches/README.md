@@ -47,14 +47,15 @@ bash vllm_patches/install.sh /path/to/venv
 
 The script installs the local plugin without resolving dependencies, then
 starts a fresh Python process to verify model registration and importability.
-On vLLM `0.25.1`, it applies and verifies the FA4 FP8-KV and context-cutoff
-patches before installing the plugin. Both patchers are idempotent and keep one
-backup beside each modified vLLM source file.
+On vLLM `0.25.1`, it applies and verifies the context-cutoff patch before
+installing the plugin. The FA4 FP8-KV patch is opt-in because FA3 was faster in
+the matched H200 benchmark. Both patchers are idempotent and keep one backup
+beside each modified vLLM source file.
 
 Set `AIMO_VLLM_APPLY_DFLASH_CONTEXT_CUTOFF=0` to skip the context-cutoff patch.
-Set `AIMO_VLLM_APPLY_FA4_FP8_KV=0` to leave the bundled FA4 sources unchanged.
-Other vLLM versions keep the plugin behavior and skip this versioned source
-patch.
+The FA4 FP8-KV patch defaults to disabled. Set
+`AIMO_VLLM_APPLY_FA4_FP8_KV=1` explicitly to install it. Other vLLM versions
+keep the plugin behavior and skip this versioned source patch.
 
 To install with an explicit interpreter instead:
 
@@ -140,7 +141,7 @@ To apply only this patch to an existing vLLM `0.25.1` environment:
 python vllm_patches/patch_dflash_context_cutoff.py /path/to/venv
 ```
 
-To apply only the FA4 FP8-KV sources and routing:
+To apply only the FA4 FP8-KV sources and routing explicitly:
 
 ```bash
 python vllm_patches/patch_fa4_fp8_kv.py /path/to/venv

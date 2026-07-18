@@ -11,6 +11,7 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 PATCH_ROOT = REPO / "vllm_patches"
 PATCH_PATH = PATCH_ROOT / "patch_fa4_fp8_kv.py"
+INSTALL_PATH = PATCH_ROOT / "install.sh"
 SPEC = importlib.util.spec_from_file_location("fa4_fp8_kv_patch", PATCH_PATH)
 assert SPEC is not None and SPEC.loader is not None
 patch_module = importlib.util.module_from_spec(SPEC)
@@ -18,6 +19,18 @@ SPEC.loader.exec_module(patch_module)
 
 
 class FA4FP8KVPatchTests(unittest.TestCase):
+    def test_full_installer_keeps_fa4_fp8_patch_opt_in(self) -> None:
+        source = INSTALL_PATH.read_text()
+
+        self.assertIn(
+            'APPLY_FA4_FP8_KV="${AIMO_VLLM_APPLY_FA4_FP8_KV:-0}"',
+            source,
+        )
+        self.assertNotIn(
+            'APPLY_FA4_FP8_KV="${AIMO_VLLM_APPLY_FA4_FP8_KV:-1}"',
+            source,
+        )
+
     def test_resolve_vllm_root_preserves_venv_python_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             venv = Path(temporary) / "venv"
