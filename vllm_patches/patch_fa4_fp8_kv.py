@@ -13,6 +13,7 @@ from pathlib import Path
 
 SUPPORTED_VERSION = "0.25.1"
 BACKUP_SUFFIX = ".pre_fa4_fp8_kv"
+SYMLINK_BACKUP_SUFFIX = ".pre_fa4_fp8_kv_symlink"
 
 PATCH_FILES = (
     "fa4_fp8_kv_flash_attn.patch",
@@ -145,6 +146,72 @@ def _verify_sources(vllm_root: Path) -> None:
                 raise RuntimeError(f"Missing {marker!r} in {path}")
 
 
+def _restore_materialized_parents(
+    materialized: list[tuple[Path, Path]],
+) -> None:
+    for path, backup in reversed(materialized):
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+        backup.rename(path)
+
+
+def _materialize_symlinked_target_parents(
+    vllm_root: Path,
+) -> list[tuple[Path, Path]]:
+    """Keep overlay installs from following parent symlinks into a base venv."""
+    materialized: list[tuple[Path, Path]] = []
+    try:
+        for relative_path in TARGET_PATHS:
+            parent = vllm_root
+            for component in relative_path.parts[:-1]:
+                candidate = parent / component
+                if candidate.is_symlink():
+                    backup = candidate.with_name(
+                        candidate.name + SYMLINK_BACKUP_SUFFIX
+                    )
+                    temporary = candidate.with_name(
+                        f".{candidate.name}.fa4_fp8_kv_materializing"
+                    )
+                    if backup.exists() or backup.is_symlink():
+                        raise RuntimeError(
+                            f"Refusing to replace {candidate}: backup exists at {backup}"
+                        )
+                    if temporary.exists() or temporary.is_symlink():
+                        raise RuntimeError(
+                            f"Refusing to replace {candidate}: temporary path exists "
+                            f"at {temporary}"
+                        )
+
+                    source = candidate.resolve(strict=True)
+                    try:
+                        shutil.copytree(source, temporary, symlinks=True)
+                    except Exception:
+                        if temporary.is_dir() and not temporary.is_symlink():
+                            shutil.rmtree(temporary)
+                        elif temporary.exists() or temporary.is_symlink():
+                            temporary.unlink()
+                        raise
+
+                    candidate.rename(backup)
+                    try:
+                        temporary.rename(candidate)
+                    except Exception:
+                        backup.rename(candidate)
+                        raise
+                    materialized.append((candidate, backup))
+                    print(
+                        f"[vllm-patch] materialized symlinked directory: "
+                        f"{candidate}"
+                    )
+                parent = candidate
+    except Exception:
+        _restore_materialized_parents(materialized)
+        raise
+    return materialized
+
+
 def install(target: Path) -> None:
     vllm_root, version = resolve_vllm_root(target)
     if version != SUPPORTED_VERSION:
@@ -154,29 +221,30 @@ def install(target: Path) -> None:
 
     patch_root = Path(__file__).resolve().parent
     site_packages = vllm_root.parent
-    patch_states: list[tuple[Path, str]] = []
-    for patch_name in PATCH_FILES:
-        patch_path = patch_root / patch_name
-        if not patch_path.is_file():
-            raise RuntimeError(f"Missing patch payload: {patch_path}")
-        if _git_apply_check(site_packages, patch_path, reverse=False):
-            state = "pending"
-        elif _git_apply_check(site_packages, patch_path, reverse=True):
-            state = "installed"
-        else:
-            raise RuntimeError(
-                f"Patch does not match vLLM {version}: {patch_path.name}"
-            )
-        patch_states.append((patch_path, state))
-
+    materialized = _materialize_symlinked_target_parents(vllm_root)
     originals: dict[Path, tuple[bytes, int]] = {}
-    for relative_path in TARGET_PATHS:
-        path = vllm_root / relative_path
-        if not path.is_file():
-            raise RuntimeError(f"Missing FA4 FP8-KV patch target: {path}")
-        originals[path] = (path.read_bytes(), path.stat().st_mode)
-
     try:
+        patch_states: list[tuple[Path, str]] = []
+        for patch_name in PATCH_FILES:
+            patch_path = patch_root / patch_name
+            if not patch_path.is_file():
+                raise RuntimeError(f"Missing patch payload: {patch_path}")
+            if _git_apply_check(site_packages, patch_path, reverse=False):
+                state = "pending"
+            elif _git_apply_check(site_packages, patch_path, reverse=True):
+                state = "installed"
+            else:
+                raise RuntimeError(
+                    f"Patch does not match vLLM {version}: {patch_path.name}"
+                )
+            patch_states.append((patch_path, state))
+
+        for relative_path in TARGET_PATHS:
+            path = vllm_root / relative_path
+            if not path.is_file():
+                raise RuntimeError(f"Missing FA4 FP8-KV patch target: {path}")
+            originals[path] = (path.read_bytes(), path.stat().st_mode)
+
         for patch_path, state in patch_states:
             if state == "installed":
                 print(f"[vllm-patch] verified: {patch_path.name}")
@@ -192,6 +260,7 @@ def install(target: Path) -> None:
         for path, (content, mode) in originals.items():
             path.write_bytes(content)
             os.chmod(path, mode)
+        _restore_materialized_parents(materialized)
         raise
 
     print(f"[vllm-patch] FA4 FP8-KV sources verified for vLLM {version}")

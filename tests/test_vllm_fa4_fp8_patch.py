@@ -75,6 +75,59 @@ class FA4FP8KVPatchTests(unittest.TestCase):
             patch_module.REQUIRED_MARKERS[config_path],
         )
 
+    def test_materializes_symlinked_parent_without_mutating_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "base-config"
+            source.mkdir()
+            (source / "vllm.py").write_text("value = 'base'\n")
+
+            overlay = root / "overlay"
+            overlay.mkdir()
+            (overlay / "config").symlink_to(source, target_is_directory=True)
+
+            with mock.patch.object(
+                patch_module,
+                "TARGET_PATHS",
+                (Path("config/vllm.py"),),
+            ):
+                materialized = patch_module._materialize_symlinked_target_parents(
+                    overlay
+                )
+
+            self.assertEqual(len(materialized), 1)
+            self.assertFalse((overlay / "config").is_symlink())
+            self.assertTrue(
+                (overlay / f"config{patch_module.SYMLINK_BACKUP_SUFFIX}").is_symlink()
+            )
+            (overlay / "config/vllm.py").write_text("value = 'overlay'\n")
+            self.assertEqual((source / "vllm.py").read_text(), "value = 'base'\n")
+
+    def test_materialized_parent_is_restored_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "base-config"
+            source.mkdir()
+            (source / "vllm.py").write_text("value = 'base'\n")
+
+            overlay = root / "overlay"
+            overlay.mkdir()
+            link = overlay / "config"
+            link.symlink_to(source, target_is_directory=True)
+
+            with mock.patch.object(
+                patch_module,
+                "TARGET_PATHS",
+                (Path("config/vllm.py"),),
+            ):
+                materialized = patch_module._materialize_symlinked_target_parents(
+                    overlay
+                )
+                patch_module._restore_materialized_parents(materialized)
+
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), source.resolve())
+
     def test_git_apply_helper_is_idempotence_detectable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

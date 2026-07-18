@@ -80,7 +80,9 @@ VLLM_PLUGINS=olmo3_sink vllm serve /path/to/opd-32b-deploy \
 FA4 FP8 KV on SM90 requires `--block-size 128`. The installer adds top-level
 configuration validation that rejects an omitted or different page size before
 engine workers start or checkpoint shards are loaded. FA3 retains its normal
-block-size choices.
+block-size choices. For copy-on-write overlays, the patcher materializes any
+symlinked target directory before editing it, so the base vLLM environment is
+not modified.
 
 Do not rename the checkpoint architecture to `Olmo3ForCausalLM`. The stock
 model has no sink parameters and would silently change every attention
