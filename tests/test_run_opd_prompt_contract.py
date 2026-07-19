@@ -386,6 +386,36 @@ class RunOpdPromptContractTests(unittest.TestCase):
 
         self.assertEqual(result["final_score"], 0.5)
         self.assertTrue(result["fatal_score_cap_applied"])
+        self.assertTrue(result["validated_low_score_cap_applied"])
+        self.assertEqual(result["final_status"], "validated_low_score")
+
+    def test_validated_nonperfect_review_blocks_selector_eligibility(self):
+        verifier_results = [
+            {
+                "verifier_index": index,
+                "verifier_role": role[0],
+                "score": score,
+                "evaluation": "unresolved gap" if score == 0.5 else "passes",
+            }
+            for index, (role, score) in enumerate(
+                zip(run.VERIFIER_AUDIT_ROLES, [1.0, 1.0, 1.0, 0.5])
+            )
+        ]
+        meta_results = {
+            index: [{"score": 1.0}] for index in range(len(verifier_results))
+        }
+
+        result = run.aggregate_proof_label(
+            verifier_results,
+            meta_results,
+            min_valid_low=1,
+            strict_pass_meta=True,
+            meta_n=1,
+        )
+
+        self.assertEqual(result["final_score"], 0.5)
+        self.assertTrue(result["validated_low_score_cap_applied"])
+        self.assertFalse(result["fatal_score_cap_applied"])
         self.assertEqual(result["final_status"], "validated_low_score")
 
     def test_prover_uses_trained_system_user_prompt(self):

@@ -61,6 +61,7 @@ def test_report_includes_role_scores_and_fatal_cap():
                 "aggregation": {
                     "final_score": 0.5,
                     "final_status": "validated_low_score",
+                    "validated_low_score_cap_applied": True,
                     "fatal_score_cap_applied": True,
                     "verifier_score_summaries": [
                         {
@@ -75,7 +76,9 @@ def test_report_includes_role_scores_and_fatal_cap():
 
     report = replay.render_report(payload)
 
-    assert "| 6 | 1.0 | 0.5 | validated_low_score | True |" in report
+    assert (
+        "| 6 | 1.0 | 0.5 | validated_low_score | True | True |" in report
+    )
     assert "counterexample=0.0" in report
 
 

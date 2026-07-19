@@ -255,8 +255,8 @@ def render_report(payload: dict[str, Any]) -> str:
     lines = [
         "# Verifier audit replay",
         "",
-        "| Problem | Old score | New score | Status | Fatal cap | Role scores |",
-        "| --- | ---: | ---: | --- | --- | --- |",
+        "| Problem | Old score | New score | Status | Low cap | Fatal cap | Role scores |",
+        "| --- | ---: | ---: | --- | --- | --- | --- |",
     ]
     for result in payload["results"]:
         aggregation = result["aggregation"]
@@ -265,12 +265,13 @@ def render_report(payload: dict[str, Any]) -> str:
             for item in aggregation.get("verifier_score_summaries") or []
         )
         lines.append(
-            "| {problem_id} | {old} | {new} | {status} | {cap} | {roles} |".format(
+            "| {problem_id} | {old} | {new} | {status} | {low_cap} | {fatal_cap} | {roles} |".format(
                 problem_id=result["problem_id"],
                 old=result.get("old_internal_score"),
                 new=aggregation.get("final_score"),
                 status=aggregation.get("final_status"),
-                cap=aggregation.get("fatal_score_cap_applied", False),
+                low_cap=aggregation.get("validated_low_score_cap_applied", False),
+                fatal_cap=aggregation.get("fatal_score_cap_applied", False),
                 roles=role_scores,
             )
         )

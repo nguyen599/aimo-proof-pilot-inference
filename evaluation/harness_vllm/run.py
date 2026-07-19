@@ -1364,7 +1364,12 @@ VERIFIER_AUDIT_ROLES: tuple[tuple[str, str], ...] = (
         "quantifier_algebra",
         "Audit quantifiers, index ranges, equality cases, and the legality of each "
         "choice or game strategy. Independently recompute the key algebra, "
-        "divisibility, valuation, counting, and inequality steps.",
+        "divisibility, valuation, counting, and inequality steps. For an "
+        "adversarial process or game, test every proposed move against arbitrary "
+        "legal prior play, not only the proof's preferred trajectory. A single "
+        "cooperative infinite play does not prove that neither player has a "
+        "winning strategy, and a claimed worst case must be optimized over all "
+        "legal opponent responses.",
     ),
     (
         "coverage",
@@ -2537,12 +2542,15 @@ def aggregate_proof_label(
         for critique in validated_critiques
         if coerce_score(critique.get("score")) == 0.0
     ]
+    validated_low_score_cap_applied = bool(
+        validated_critiques and final_score is not None and final_score > 0.5
+    )
     fatal_score_cap_applied = bool(
         validated_fatal_critiques
         and final_score is not None
         and final_score > 0.5
     )
-    if fatal_score_cap_applied:
+    if validated_low_score_cap_applied:
         final_score = 0.5
     if final_score is None:
         final_status = "needs_review"
@@ -2565,6 +2573,7 @@ def aggregate_proof_label(
         "final_status": final_status,
         "validated_critiques": validated_critiques,
         "validated_fatal_critiques": validated_fatal_critiques,
+        "validated_low_score_cap_applied": validated_low_score_cap_applied,
         "fatal_score_cap_applied": fatal_score_cap_applied,
         "verifier_score_summaries": score_summaries,
         "low_scores_seen": low_scores_seen,

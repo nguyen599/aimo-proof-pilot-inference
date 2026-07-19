@@ -22,6 +22,30 @@ The primary bottleneck is **verifier calibration**, not final selection.
 Generation is therefore a secondary bottleneck, but selector tuning cannot fix
 the dominant error: the verifier confidently promotes invalid proofs.
 
+## Bottleneck priority
+
+1. **Verifier calibration and same-model self-confirmation.** The selected
+   internal scores had Pearson correlation `0.0217` with the external grades.
+   Problems 3, 5, and 6 retained explicit fatal claims while scoring above the
+   selector threshold; Problems 5 and 6 scored `1.0` internally.
+2. **Generation validity and token efficiency.** Candidate pipelines completed
+   in 169/216 cases. The trained OPD prompt completed in 166/180 cases, but the
+   DeepSeek-Math-V2 prompt completed in only 3/36. Thinking-budget restarts were
+   also associated with a lower mean internal score (`0.270` versus `0.449`).
+3. **Meta-verifier cost without independent evidence.** Meta review consumed
+   29.3 million completion tokens but could only assess the stated review, not
+   independently certify a proof that a verifier had accepted.
+4. **Final selection is ruled out as the first bottleneck.** Every selected
+   candidate had internal rank one, and no selected proof was clipped by the
+   selector prompt.
+
+The external grader evaluated only the selected proof for each problem. It is
+therefore not yet possible to conclude whether proof generation failed to
+produce any correct alternative in the other 210 candidates. Candidate-level
+external grading or a validated adversarial re-verification pass is required
+to separate "no correct proof was generated" from "a correct proof was
+generated but ranked below a false positive."
+
 ## Failure mechanism
 
 The four verifier calls used the same prompt and model. Refinement then optimized
@@ -57,6 +81,12 @@ The first six candidates per problem used the DeepSeek-Math-V2 prompt. Only
 3/36 produced valid candidates, versus 166/180 for the trained OPD prompt. None
 of the DeepSeek candidates crossed the selector threshold.
 
+Across all stages, initial proof generation used 48.5 million completion
+tokens, refinement used 30.2 million, proof verification used 35.1 million,
+and meta verification used 29.3 million. Improving verifier precision therefore
+affects both correctness and a larger token budget than changing the final
+selector.
+
 ## Pipeline changes
 
 The corrected verifier path now:
@@ -65,12 +95,45 @@ The corrected verifier path now:
    quantifier/algebra, and statement-coverage audit roles;
 2. carries meta-validated critiques into every later refinement and verifier
    round, requiring each issue to be marked resolved, unresolved, or invalid;
-3. caps the aggregate score at `0.5` when any verifier score `0` is validated by
-   meta review; and
+3. caps the aggregate score at `0.5` when meta review validates any verifier
+   score below `1`, while retaining a separate fatal-error marker for score
+   `0`; and
 4. defaults the DeepSeek-Math-V2 candidate count to zero.
 
-These changes target the observed causal failures. They still require a replay
-on the known false-positive proofs before a new IMO 2026 generation run.
+These changes target the observed causal failures. The replay below validates
+them on the known false-positive proofs before a new IMO 2026 generation run.
+
+## Adversarial replay validation
+
+The six selected proofs were replayed through the four-role verifier and one
+meta review per role. This replay reused the original proof text and did not
+generate or refine a new proof.
+
+| Problem | Old internal | Role scores | Old aggregation | Strict aggregation |
+| --- | ---: | --- | ---: | ---: |
+| 1 | 0.625 | 0, 1, 0.5, 0.5 | 0.375 | 0.375 |
+| 2 | 1.0 | 1, 1, 1, 1 | 0.875 | 0.875 |
+| 3 | 0.5625 | 0.5, 0.5, 0.5, 0.5 | 0.375 | 0.375 |
+| 4 | 1.0 | 1, 1, 1, 1 | 1.0 | 1.0 |
+| 5 | 1.0 | 0.5, 1, 1, 1 | 0.875 | 0.5 |
+| 6 | 1.0 | 0, 1, 1, 0 | 0.5 | 0.5 |
+
+The dependency audit found Problem 1's repeated-boundary-point gap. Every role
+downgraded Problem 3's divisibility proof. The correct Problem 4 proof remained
+a unanimous strict pass. Dependency and coverage audits rejected Problem 6's
+invalid row/column-permutation symmetry.
+
+Problem 5 isolated the remaining aggregation defect: dependency review found a
+gap and meta review validated it, but averaging with three score-1 reviews still
+produced `0.875`. Strict aggregation now caps any meta-validated non-perfect
+review at `0.5`, so that proof cannot enter the selector pool. The game-strategy
+role also now requires legality under arbitrary prior play and rejects using one
+cooperative infinite play as proof of a draw.
+
+This replay validates the known selected-proof failure set: all four externally
+false proofs are now at or below the selector threshold, while Problem 4 stays
+at `1.0`. It does not establish candidate-pool recall because the external
+grader did not score the other 210 generated candidates.
 
 ## Reproduce the audit
 
