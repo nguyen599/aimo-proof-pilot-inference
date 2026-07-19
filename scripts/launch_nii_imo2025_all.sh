@@ -125,7 +125,8 @@ PY
         fi
         sleep $((attempt * 3))
     done
-    git -C "$code_dir" fetch "$SOURCE_REPO" "$SOURCE_REF"
+    git -C "$code_dir" fetch \
+        "$SOURCE_REPO" "refs/remotes/origin/${SOURCE_REF}"
     git -C "$code_dir" checkout --detach --force FETCH_HEAD
 
     master_addr="$($VENV/bin/python - <<'PY'
