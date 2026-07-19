@@ -30,8 +30,9 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-# Map a local subfolder name -> (hf repo, path-in-repo). The step checkpoints all
-# live in the OPD-IMO repo under an identically named subfolder (handled below).
+# Map a local subfolder name -> (hf repo, path-in-repo). Every bf16 target
+# checkpoint (step-* and merged-*) lives in the OPD-IMO repo under an identically
+# named subfolder (handled below); a few specials are pinned in KNOWN.
 KNOWN = {
     "opd-32b-deploy": ("fieldsmodelorg/Olmo-3.1-32B-Think-OPD-ProofPilot", "opd-32b-deploy"),
     "dflash-32b-draft-v2test-phaseL": (
@@ -49,7 +50,7 @@ def resolve_source(subfolder: str):
     """Return (repo, path_in_repo) for a local subfolder, or None if unknown."""
     if subfolder in KNOWN:
         return KNOWN[subfolder]
-    if subfolder.startswith("opd-32b-bf16-step-"):
+    if subfolder.startswith("opd-32b-bf16-"):  # step-* and merged-* checkpoints
         return (IMO_REPO, subfolder)
     return None
 
