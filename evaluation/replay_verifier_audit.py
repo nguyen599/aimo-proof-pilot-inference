@@ -21,6 +21,7 @@ try:
         CFG,
         PROMPT_FAMILY_OPD,
         ChatScheduler,
+        PipelineProgress,
         SamplingConfig,
         detect_id_column,
         detect_question_column,
@@ -34,6 +35,7 @@ except ModuleNotFoundError as exc:
         CFG,
         PROMPT_FAMILY_OPD,
         ChatScheduler,
+        PipelineProgress,
         SamplingConfig,
         detect_id_column,
         detect_question_column,
@@ -176,23 +178,28 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
     semaphore = asyncio.Semaphore(max(1, int(args.max_concurrent_problems)))
 
     async def evaluate(case: dict[str, Any]) -> dict[str, Any]:
-        async with semaphore:
-            (
-                verifier_results,
-                verifier_outputs,
-                meta_results,
-                meta_outputs,
-                aggregation,
-            ) = await run_verification_round(
-                case["question"],
-                case["proof"],
-                "",
-                int(case["problem_id"]),
-                0,
-                scheduler,
-                cfg,
-                prompt_family=PROMPT_FAMILY_OPD,
-            )
+        progress = PipelineProgress(False, case["problem_id"], 1)
+        try:
+            async with semaphore:
+                (
+                    verifier_results,
+                    verifier_outputs,
+                    meta_results,
+                    meta_outputs,
+                    aggregation,
+                ) = await run_verification_round(
+                    case["question"],
+                    case["proof"],
+                    "",
+                    int(case["problem_id"]),
+                    0,
+                    scheduler,
+                    cfg,
+                    prompt_family=PROMPT_FAMILY_OPD,
+                    progress=progress,
+                )
+        finally:
+            progress.close()
         parsed_scores = [result.get("score") for result in verifier_results]
         if len(parsed_scores) != cfg.verify_n or any(
             score not in {0.0, 0.5, 1.0} for score in parsed_scores
