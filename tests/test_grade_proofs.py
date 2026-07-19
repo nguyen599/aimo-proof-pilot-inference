@@ -30,6 +30,16 @@ class GradeProofsTests(unittest.TestCase):
     def test_arithmetic_mean_does_not_apply_zero_veto(self):
         self.assertEqual(grade_proofs.arithmetic_mean_score([0, 7], 2), 3.5)
 
+    def test_retry_classification_stops_on_permanent_client_errors(self):
+        class StatusError(Exception):
+            def __init__(self, status_code):
+                self.status_code = status_code
+
+        self.assertFalse(grade_proofs.is_retryable_error(StatusError(400)))
+        self.assertTrue(grade_proofs.is_retryable_error(StatusError(429)))
+        self.assertTrue(grade_proofs.is_retryable_error(StatusError(503)))
+        self.assertTrue(grade_proofs.is_retryable_error(RuntimeError("parse")))
+
     def test_aggregate_includes_complete_score_distribution(self):
         records = [
             {"problem_id": "1", "attempt": 0, "score": 0, "error": None},

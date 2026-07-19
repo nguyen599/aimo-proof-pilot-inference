@@ -170,6 +170,14 @@ def arithmetic_mean_score(scores: list[int], attempts_per_proof: int) -> float:
     return mean(scores)
 
 
+def is_retryable_error(error: Exception) -> bool:
+    """Retry transient transport/server failures and structured-output failures."""
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        return True
+    return status_code in {408, 409, 429} or status_code >= 500
+
+
 def aggregate_grades(
     records: list[dict],
     problem_ids: list[str],
@@ -328,7 +336,10 @@ async def grade_final_proofs(
                     usage = response.usage.model_dump() if response.usage else None
                     break
                 except Exception as error:
-                    if request_attempt >= grader["request_retries"]:
+                    if (
+                        request_attempt >= grader["request_retries"]
+                        or not is_retryable_error(error)
+                    ):
                         raise
                     delay = min(
                         grader["retry_backoff_max_seconds"],
