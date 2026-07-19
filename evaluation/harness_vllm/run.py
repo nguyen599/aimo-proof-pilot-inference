@@ -406,7 +406,7 @@ ID_COLUMN_CANDIDATES = (
     "uuid",
     "question_uuid",
 )
-SUPPORTED_INPUT_SUFFIXES = {".csv", ".parquet", ".pq"}
+SUPPORTED_INPUT_SUFFIXES = {".csv", ".jsonl", ".parquet", ".pq"}
 EVALUATION_RUBRIC = """Here is the instruction to evaluate the quality of a solution to a problem. The problem may ask for a proof of statement, or ask for an answer. If finding an answer is required, the solution should present the answer, and it should also be a rigorous proof of that answer being valid.
 
 Please evaluate the solution and score it according to the following criteria:
@@ -5916,6 +5916,8 @@ def read_input_table(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix == ".csv":
         return pd.read_csv(path)
+    if suffix == ".jsonl":
+        return pd.read_json(path, lines=True, dtype=False)
     if suffix in {".parquet", ".pq"}:
         return pd.read_parquet(path)
     raise ValueError(

@@ -209,6 +209,25 @@ print(
 
 Then call `/ui_history` for the `poll-<run_id>` session to read the result.
 
+## Launch the IMO 2026 two-node run
+
+`scripts/launch_nii_imo2026_pair.sh` runs the same search configuration as the
+IMO 2025 production run: TP2/DP4 per node, 36 candidates per problem, four
+refinement rounds, and deadline-aware lossless handoff. It maps physical nodes
+2 and 3 to distributed ranks 0 and 1 and reads the checked-in
+`imo-2026.jsonl` file.
+
+Set one shared run ID, then start the script in the background on both nodes:
+
+```bash
+export AIMO_RUN_ID="imo2026-full-p36-r4-p2-sft750-$(date -u +%Y%m%dT%H%M%SZ)"
+nohup scripts/launch_nii_imo2026_pair.sh \
+  > "/tmp/${AIMO_RUN_ID}-node${GLOBAL_RANK}.submit.log" 2>&1 < /dev/null &
+```
+
+Use separate relay submissions for `node2` and `node3`. Run the shared Git
+update on only one node before launching either rank.
+
 ## Safety rules
 
 - Never include Hugging Face, GitHub, W&B, or other secrets in relay commands;
