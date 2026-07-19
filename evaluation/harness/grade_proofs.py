@@ -314,19 +314,21 @@ async def grade_final_proofs(
         try:
             for request_attempt in range(grader["request_retries"] + 1):
                 try:
+                    request_kwargs = {
+                        "model": grader["model"],
+                        "input": messages,
+                        "reasoning": {"effort": grader["reasoning"]},
+                        "max_output_tokens": grader["max_completion_tokens"],
+                        "prompt_cache_key": prompt_cache_key,
+                        "text_format": GraderOutput,
+                    }
+                    if grader["prompt_cache_options_enabled"]:
+                        request_kwargs["prompt_cache_options"] = {
+                            "mode": grader["prompt_cache_mode"],
+                            "ttl": grader["prompt_cache_ttl"],
+                        }
                     async with semaphore:
-                        response = await client.responses.parse(
-                            model=grader["model"],
-                            input=messages,
-                            reasoning={"effort": grader["reasoning"]},
-                            max_output_tokens=grader["max_completion_tokens"],
-                            prompt_cache_key=prompt_cache_key,
-                            prompt_cache_options={
-                                "mode": grader["prompt_cache_mode"],
-                                "ttl": grader["prompt_cache_ttl"],
-                            },
-                            text_format=GraderOutput,
-                        )
+                        response = await client.responses.parse(**request_kwargs)
                     if response.output_parsed is None:
                         raise RuntimeError(
                             "grader returned no parsed structured output"
@@ -446,6 +448,7 @@ async def grade_final_proofs(
             "prompt_cache": {
                 "mode": grader["prompt_cache_mode"],
                 "ttl": grader["prompt_cache_ttl"],
+                "options_sent": grader["prompt_cache_options_enabled"],
                 "warmup_attempts_per_problem": 1,
                 "input_tokens": cache_input_tokens,
                 "cache_write_tokens": sum(
@@ -533,6 +536,9 @@ def main() -> None:
                     "attempts_per_proof": grader["attempts_per_proof"],
                     "concurrency": grader["concurrency"],
                     "request_retries": grader["request_retries"],
+                    "prompt_cache_options_enabled": grader[
+                        "prompt_cache_options_enabled"
+                    ],
                     "aggregation": "arithmetic_mean",
                 },
                 indent=2,

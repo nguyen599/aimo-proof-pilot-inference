@@ -113,6 +113,7 @@ class GradeProofsTests(unittest.TestCase):
         self.assertEqual(grader["reasoning"], "high")
         self.assertEqual(grader["concurrency"], 4)
         self.assertEqual(grader["request_retries"], 6)
+        self.assertFalse(grader["prompt_cache_options_enabled"])
         self.assertFalse(grader["zero_veto"])
 
 

@@ -33,7 +33,8 @@ SEARCH_KEYS = {
 GRADER_KEYS = {
     "base_url", "model", "api_key_env", "reasoning", "attempts_per_proof",
     "concurrency", "max_completion_tokens", "zero_veto", "prompt_cache_mode",
-    "prompt_cache_ttl", "request_retries", "retry_backoff_seconds",
+    "prompt_cache_ttl", "prompt_cache_options_enabled", "request_retries",
+    "retry_backoff_seconds",
     "retry_backoff_max_seconds", "system_prompt_sha256", "user_prompt_sha256",
 }
 
@@ -205,6 +206,8 @@ def load_config(path: Path) -> dict[str, Any]:
             )
         if type(grader["zero_veto"]) is not bool:
             raise ValueError("grader.zero_veto must be a boolean")
+        if type(grader["prompt_cache_options_enabled"]) is not bool:
+            raise ValueError("grader.prompt_cache_options_enabled must be a boolean")
         for key in (
             "base_url", "model", "api_key_env", "reasoning",
             "prompt_cache_mode", "prompt_cache_ttl",
