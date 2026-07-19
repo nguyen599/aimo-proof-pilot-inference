@@ -191,16 +191,22 @@ def recent_window(text: str, window: int = 16_000) -> str:
 def loop_onset(text: str, verdict: "Verdict | None") -> int:
     """Where to truncate a looping text to keep the clean pre-loop prefix.
     Char-precise cut for a verbatim loop; for a semantic loop (no verbatim cut)
-    fall back to the zlib detector's onset estimate -- the abort position minus the
-    window and the sustained-soft run that preceded it. Ported from Yi-Chia's
-    stream_engine._loop_onset."""
-    cut = find_loop_cut(text)
+    fall back to the zlib detector's onset estimate: the loop occupies the recent
+    window + the sustained-soft run at the TAIL of this text, so cut that off.
+
+    NB: uses len(text), not the global verdict.position. The detector is fed
+    reasoning THEN content, so verdict.position counts BOTH streams; using it when
+    `text` is only the reasoning (or only the content) over-subtracts and can wrongly
+    clamp the onset to 0, discarding a good prefix. len(text)-relative is correct for
+    whichever single stream we pass. (Derived from Yi-Chia's stream_engine._loop_onset.)"""
+    t = text or ""
+    cut = find_loop_cut(t)
     if cut is not None:
         return cut
-    if verdict is not None and verdict.position:
-        onset = verdict.position - WINDOW_CHARS - verdict.soft_run * STEP_CHARS
-        return max(0, min(len(text or ""), onset))
-    return len(text or "")
+    if verdict is not None:
+        onset = len(t) - WINDOW_CHARS - (verdict.soft_run or 0) * STEP_CHARS
+        return max(0, min(len(t), onset))
+    return len(t)
 
 
 def is_degenerate(text: str) -> bool:

@@ -147,6 +147,7 @@ class CallStore:
         spec: CallSpec,
         lenient: bool = True,
         stream_detect: bool = False,
+        filter_degenerate: bool = True,
     ) -> dict:
         existing = self.records.get(spec.sample_id)
         if existing is not None:
@@ -238,10 +239,21 @@ class CallStore:
                 response["xml_valid"] = xml_valid
                 response["xml_error"] = xml_error
                 if is_verification:
-                    if response["finish_reason"] == "stop" and xml_valid:
+                    # A verifier whose output is a degenerate loop is dropped here (at
+                    # disposition time) so mean_score, the _verify_proof filter, AND the
+                    # final.json valid/invalid tally all read ONE source of truth (the
+                    # disposition) and stay consistent.
+                    degenerate = filter_degenerate and is_degenerate(
+                        (response["message"].get("reasoning_content") or "")
+                        + "\n"
+                        + (response["message"].get("content") or "")
+                    )
+                    if response["finish_reason"] == "stop" and xml_valid and not degenerate:
                         disposition = "accepted"
                     elif not xml_valid:
                         disposition = "skipped_invalid_xml"
+                    elif degenerate:
+                        disposition = "skipped_degenerate"
                     else:
                         disposition = "skipped_non_stop"
                     response["verification_disposition"] = disposition
@@ -331,6 +343,7 @@ class ProblemSearch:
             spec,
             lenient=self.config.get("lenient_parsing", True),
             stream_detect=self.config.get("stream_detect", False),
+            filter_degenerate=self.config.get("filter_degenerate", True),
         )
 
     def _rank_key(self, proof: Proof) -> tuple[float, int, float, int]:
@@ -578,16 +591,12 @@ class ProblemSearch:
         verifications: list[Verification] = []
         invalid_sample_ids: list[str] = []
         for spec, record in zip(specs, records, strict=True):
-            # Drop a verification that the server rejected, OR (when
-            # search.filter_degenerate is on) whose output is a degenerate loop --
-            # a looping verifier's parsed score is noise and must not pollute the
-            # proof's mean_score.
-            if record["verification_disposition"] != "accepted" or (
-                self.config.get("filter_degenerate", True)
-                and is_degenerate(
-                    (record.get("reasoning_content") or "") + "\n" + (record.get("content") or "")
-                )
-            ):
+            # Any disposition other than 'accepted' is dropped -- including
+            # 'skipped_degenerate' (set in perform when filter_degenerate is on), so
+            # mean_score AND the final.json valid/invalid tally read the same source
+            # and stay consistent. A dropped verification's score must not pollute
+            # mean_score.
+            if record["verification_disposition"] != "accepted":
                 invalid_sample_ids.append(spec.sample_id)
                 continue
             analysis, score = parse_verification(

@@ -10,8 +10,12 @@ HARNESS = REPO / "evaluation" / "harness"
 sys.path.insert(0, str(HARNESS))
 
 from loop_detect import (  # noqa: E402
+    Verdict,
+    find_loop_cut,
     is_degenerate,
+    loop_onset,
     loopguard_degenerate,
+    recent_window,
     zlib_ratio,
     zlib_runaway,
 )
@@ -63,6 +67,30 @@ class DetectorTest(unittest.TestCase):
     def test_short_text_is_never_degenerate(self) -> None:
         self.assertFalse(is_degenerate("a short proof."))
         self.assertFalse(is_degenerate(""))
+
+
+class SalvageHelperTests(unittest.TestCase):
+    def test_loop_onset_is_length_relative_and_clamps(self):
+        # short text + large soft_run: onset goes negative -> clamp to 0 (no crash, and
+        # NOT driven by a global position that over-subtracts). Regression for audit #1.
+        self.assertEqual(loop_onset("short clean prefix", Verdict(True, "soft", 0.07, 99999, 20)), 0)
+        # long high-entropy text (no verbatim loop): onset = len - WINDOW - soft_run*STEP
+        text = "".join(hashlib.md5(str(i).encode()).hexdigest() for i in range(2000))
+        v = Verdict(True, "soft", 0.07, len(text) + 500, 5)
+        self.assertEqual(loop_onset(text, v), max(0, len(text) - 12000 - 5 * 1000))
+        # verbatim loop -> returns the find_loop_cut onset regardless of the verdict
+        loopy = "clean start here. " + "the loop line.\n" * 500
+        self.assertEqual(loop_onset(loopy, v), find_loop_cut(loopy))
+        # no verdict -> keep everything
+        self.assertEqual(loop_onset("abc", None), 3)
+
+    def test_find_loop_cut_and_recent_window(self):
+        self.assertIsNone(find_loop_cut("a short clean sentence with no loop."))
+        cut = find_loop_cut("prefix here. " + "the loop line.\n" * 500)
+        self.assertIsNotNone(cut)
+        self.assertLess(cut, 80)  # cut sits near the clean-prefix boundary
+        self.assertEqual(len(recent_window("x" * 20000, window=16000)), 16000)
+        self.assertEqual(recent_window("short", window=16000), "short")
 
 
 if __name__ == "__main__":

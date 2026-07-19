@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 import unittest
@@ -88,24 +89,74 @@ class SalvageStreamTests(unittest.TestCase):
             "stream_aborted": True,
         }
 
-    def test_loop_in_content_truncates_to_clean_prefix(self):
+    def _mock_forceclose(self, client, recovered):
+        seen = {}
+
+        async def fake_continue(initial, messages, **kwargs):
+            seen["content"] = initial["message"]["content"]
+            seen["reasoning"] = initial["message"]["reasoning_content"]
+            return {
+                **initial,
+                "message": {"content": recovered, "reasoning_content": seen["reasoning"]},
+                "finish_reason": "length",
+                "physical_request_count": 2,
+            }
+
+        client._continue_xml_raw = fake_continue  # avoid tokenizer / /generate
+        return seen
+
+    def test_verbatim_content_loop_forcecloses_from_clean_prefix(self):
+        # A VERBATIM content loop: keep the clean <solution> prefix and FORCE-CLOSE it
+        # to completion (a bare truncation lacks <score> and would fail to parse).
         client = self._client()
-        clean = "<solution>Real proof step one holds. Real step two holds. "
-        content = clean + "loop loop loop loop loop " * 300
+        clean = "<solution>Real proof step one holds. Real step two holds.\n"
+        content = clean + "loop loop loop loop loop " * 400  # 25-char verbatim period
         verdict = loop_detect.RunawayDetector().feed(content)
+        recovered = "<solution>Real proof done.\n</solution>\n<self_evaluation>ok</self_evaluation>\n<score>1</score>"
+        seen = self._mock_forceclose(client, recovered)
         record = self._record(content, "clean reasoning")
         try:
             out = _run(client._salvage_stream_loop(
-                record, [], "clean reasoning", content, verdict,
-                role="solution", salvage_max_tokens=64,
-                temperature=1.0, top_p=1.0, seed=0, request_id="r01",
+                record, [{"role": "user", "content": "x"}], "clean reasoning", content, verdict,
+                role="solution", salvage_max_tokens=64, temperature=1.0, top_p=1.0, seed=0, request_id="r01",
             ))
         finally:
             _run(client.aclose())
+        # force-close seeded with the clean <solution> prefix, looping tail truncated
+        self.assertIn("<solution>", seen["content"].lower())
+        self.assertIn("Real proof step one", seen["content"])
+        self.assertLess(len(seen["content"]), len(content))
         self.assertTrue(out["salvaged"])
-        self.assertEqual(out["finish_reason"], "stop")
-        self.assertLess(len(out["message"]["content"]), len(content))
-        self.assertIn("Real proof step one", out["message"]["content"])
+        self.assertEqual(out["stop_reason"], "loop")
+
+    def test_semantic_content_loop_keeps_prefix_not_discarded(self):
+        # Audit #1: a NON-verbatim (zlib) content loop (find_loop_cut == None) must keep
+        # the clean <solution> prefix via loop_onset and force-close from IT -- not
+        # discard the good proof and force-close from empty reasoning.
+        client = self._client()
+        body = "".join(
+            f"Step {i} ({hashlib.md5(str(i).encode()).hexdigest()[:10]}): bound {i * i % 97}. "
+            for i in range(3000)
+        )
+        content = "<solution>" + body
+        self.assertIsNone(loop_detect.find_loop_cut(content))  # no verbatim cluster
+        # simulate a zlib SOFT abort mid-content (position counts reasoning+content)
+        verdict = loop_detect.Verdict(True, "soft", 0.07, len(content) + 84, 20)
+        recovered = "<solution>Recovered proof.\n</solution>\n<self_evaluation>ok</self_evaluation>\n<score>1</score>"
+        seen = self._mock_forceclose(client, recovered)
+        record = self._record(content, "short clean reasoning")
+        try:
+            out = _run(client._salvage_stream_loop(
+                record, [{"role": "user", "content": "x"}], "short clean reasoning", content, verdict,
+                role="solution", salvage_max_tokens=64, temperature=1.0, top_p=1.0, seed=0, request_id="r02",
+            ))
+        finally:
+            _run(client.aclose())
+        # KEY: the force-close was seeded from the CLEAN CONTENT PREFIX (not empty), keeping the proof
+        self.assertIn("<solution>", seen["content"].lower())
+        self.assertIn("Step 0", seen["content"])
+        self.assertGreater(len(seen["content"]), 1000)  # substantial prefix kept, not discarded
+        self.assertTrue(out["salvaged"])
 
     def test_loop_in_reasoning_forcecloses_from_clean_prefix(self):
         client = self._client()

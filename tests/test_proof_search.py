@@ -1488,20 +1488,31 @@ class DegenerateFilterTests(unittest.TestCase):
                 generation_sample_id="round-01/generate/r01-p0000",
             )
             search.proofs[proof.proof_id] = proof
-            return asyncio.run(search._verify_proof(proof)), proof
+            stats = asyncio.run(search._verify_proof(proof))
+            dispositions = [
+                r.get("verification_disposition")
+                for r in search.calls.records.values()
+                if "/verify/" in r.get("stage", "")
+            ]
+            return stats, proof, dispositions
 
     def test_degenerate_verifications_are_dropped(self):
-        # Every verifier score parses (disposition 'accepted') but every verifier
-        # reasoning is a loop -> all dropped as invalid, so the proof has no score.
-        stats, proof = self._verify_stats()
+        # Every verifier score parses and finish_reason=stop, but every verifier
+        # reasoning is a loop. The filter marks each 'skipped_degenerate' at perform
+        # time -> dropped from mean_score AND (finding #3) the disposition itself is
+        # skipped_degenerate, so the final.json valid/invalid tally stays consistent.
+        stats, proof, dispositions = self._verify_stats()
         self.assertEqual(stats["valid"], 0)
         self.assertEqual(stats["invalid"], small_config()["verifications_per_proof"])
         self.assertEqual(proof.verifications, [])
+        self.assertTrue(all(d == "skipped_degenerate" for d in dispositions))
+        self.assertNotIn("accepted", dispositions)
 
     def test_filter_off_keeps_degenerate_verifications(self):
-        stats, proof = self._verify_stats(filter_degenerate=False)
+        stats, proof, dispositions = self._verify_stats(filter_degenerate=False)
         self.assertEqual(stats["valid"], small_config()["verifications_per_proof"])
         self.assertEqual(stats["invalid"], 0)
+        self.assertTrue(all(d == "accepted" for d in dispositions))
 
 
 if __name__ == "__main__":

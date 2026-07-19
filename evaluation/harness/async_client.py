@@ -351,35 +351,48 @@ class AsyncChatClient:
         seed: int,
         request_id: str,
     ) -> dict:
-        """A loop aborted the stream. If the loop is in the CONTENT (a solution/eval
-        body was already being written), the proof is the clean content prefix ->
-        truncate. If the loop is in the REASONING, cut the reasoning at the loop
-        onset and force-close a short finalize (reusing _continue_xml_raw)."""
+        """A loop aborted the stream. Force-close a finalize from the CLEAN pre-loop
+        prefix. If the loop is in the CONTENT (a <solution> body was being written),
+        keep that clean prefix and CONTINUE it so its closing `</solution>...<score>`
+        gets written (a bare truncation has no <score> and would fail to parse); if
+        the loop is in the REASONING, drop the looping tail and force-close a fresh
+        solution. The cut is a verbatim loop-cut where possible, else the zlib onset
+        estimate -- we never DISCARD an already-written clean solution on a semantic
+        (non-verbatim) loop (audit finding #1)."""
         opening_tag = _ROLE_TAG[role]
+        # Loop in the content: keep the clean <solution> prefix and continue it.
         if content.strip():
-            window = loop_detect.recent_window(content)
-            cut = loop_detect.find_loop_cut(window)
-            if cut is not None:
-                base = max(0, len(content) - len(window))
-                record["message"]["content"] = content[: base + cut]
-                record["finish_reason"] = "stop"
-                record["salvaged"] = True
-                return record
+            cut = loop_detect.find_loop_cut(content)
+            if cut is None:
+                cut = loop_detect.loop_onset(content, verdict)
+            clean_content = content[:cut]
+            if opening_tag in clean_content.lower() and clean_content.strip():
+                initial = {
+                    **record,
+                    "message": {"content": clean_content, "reasoning_content": reasoning},
+                }
+                salvaged = await self._continue_xml_raw(
+                    initial, messages, max_new_tokens=salvage_max_tokens,
+                    temperature=temperature, top_p=top_p, seed=seed, request_id=request_id,
+                    role=role, opening_tag=opening_tag, force_steer=_ROLE_STEER[role],
+                    preserve_untagged_content=_ROLE_PRESERVE[role],
+                )
+                return self._finalize_salvage(salvaged, opening_tag)
+        # Loop in the reasoning (or no usable <solution> written yet): force-close fresh.
         clean_reasoning = reasoning[: loop_detect.loop_onset(reasoning, verdict)]
         initial = {**record, "message": {"content": "", "reasoning_content": clean_reasoning}}
         salvaged = await self._continue_xml_raw(
-            initial,
-            messages,
-            max_new_tokens=salvage_max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            seed=seed,
-            request_id=request_id,
-            role=role,
-            opening_tag=opening_tag,
-            force_steer=_ROLE_STEER[role],
+            initial, messages, max_new_tokens=salvage_max_tokens,
+            temperature=temperature, top_p=top_p, seed=seed, request_id=request_id,
+            role=role, opening_tag=opening_tag, force_steer=_ROLE_STEER[role],
             preserve_untagged_content=_ROLE_PRESERVE[role],
         )
+        return self._finalize_salvage(salvaged, opening_tag)
+
+    def _finalize_salvage(self, salvaged: dict, opening_tag: str) -> dict:
+        """Common post-processing for a force-closed salvage: flag it, cut a
+        force-close that itself looped, and mark finish_reason=stop once a real
+        solution body exists (judge on the recovered <solution>, not the cap)."""
         salvaged["stop_reason"] = "loop"
         salvaged["salvaged"] = True
         salvaged["stream_aborted"] = True
@@ -389,8 +402,6 @@ class AsyncChatClient:
             if second_cut is not None:
                 salvaged["message"]["content"] = recovered[:second_cut]
                 recovered = salvaged["message"]["content"]
-        # judge a recovered proof on its <solution>, not on the force-close hitting
-        # its own cap: mark stop once there is a real solution body.
         if opening_tag in recovered.lower() and len(recovered) > 500:
             salvaged["finish_reason"] = "stop"
         return salvaged
