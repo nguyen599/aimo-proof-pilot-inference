@@ -30,6 +30,12 @@ SEARCH_KEYS = {
     "min_valid_verifications",
     "concurrency", "request_timeout_seconds", "seed",
 }
+GRADER_KEYS = {
+    "base_url", "model", "api_key_env", "reasoning", "attempts_per_proof",
+    "concurrency", "max_completion_tokens", "zero_veto", "prompt_cache_mode",
+    "prompt_cache_ttl", "request_retries", "retry_backoff_seconds",
+    "retry_backoff_max_seconds", "system_prompt_sha256", "user_prompt_sha256",
+}
 
 @dataclass(frozen=True)
 class ActiveModel:
@@ -62,7 +68,14 @@ def load_config(path: Path) -> dict[str, Any]:
     config = yaml.safe_load(path.read_text())
     if not isinstance(config, dict):
         raise ValueError("evaluation config must be a YAML mapping")
-    _exact_keys(config, ROOT_KEYS, "root")
+    actual_root_keys = set(config)
+    allowed_root_keys = ROOT_KEYS | {"grader"}
+    if not ROOT_KEYS <= actual_root_keys or not actual_root_keys <= allowed_root_keys:
+        raise ValueError(
+            "root keys differ: "
+            f"missing={sorted(ROOT_KEYS - actual_root_keys)}, "
+            f"extra={sorted(actual_root_keys - allowed_root_keys)}"
+        )
     if config["schema_version"] != 12:
         raise ValueError("schema_version must be 12")
     for section, keys in (
@@ -170,6 +183,44 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("search.top_p must be a finite number in (0, 1]")
     if type(search["seed"]) is not int or search["seed"] < 0:
         raise ValueError("search.seed must be a non-negative integer")
+
+    if "grader" in config:
+        grader = config["grader"]
+        if not isinstance(grader, dict):
+            raise ValueError("grader must be a mapping")
+        _exact_keys(grader, GRADER_KEYS, "grader")
+        for key in (
+            "attempts_per_proof",
+            "concurrency",
+            "max_completion_tokens",
+            "request_retries",
+            "retry_backoff_seconds",
+            "retry_backoff_max_seconds",
+        ):
+            _positive_int(grader[key], f"grader.{key}")
+        if grader["retry_backoff_max_seconds"] < grader["retry_backoff_seconds"]:
+            raise ValueError(
+                "grader.retry_backoff_max_seconds must be greater than or equal to "
+                "grader.retry_backoff_seconds"
+            )
+        if type(grader["zero_veto"]) is not bool:
+            raise ValueError("grader.zero_veto must be a boolean")
+        for key in (
+            "base_url", "model", "api_key_env", "reasoning",
+            "prompt_cache_mode", "prompt_cache_ttl",
+        ):
+            if not isinstance(grader[key], str) or not grader[key]:
+                raise ValueError(f"grader.{key} must be a nonempty string")
+        for key in ("system_prompt_sha256", "user_prompt_sha256"):
+            digest = grader[key]
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError(f"grader.{key} must be a SHA-256 hex digest")
+            try:
+                int(digest, 16)
+            except ValueError as error:
+                raise ValueError(
+                    f"grader.{key} must be a SHA-256 hex digest"
+                ) from error
 
     return config
 
