@@ -37,6 +37,7 @@ GRADER_KEYS = {
     "retry_backoff_seconds",
     "retry_backoff_max_seconds", "system_prompt_sha256", "user_prompt_sha256",
 }
+GRADER_OPTIONAL_KEYS = {"api_key_envs"}
 
 @dataclass(frozen=True)
 class ActiveModel:
@@ -189,7 +190,17 @@ def load_config(path: Path) -> dict[str, Any]:
         grader = config["grader"]
         if not isinstance(grader, dict):
             raise ValueError("grader must be a mapping")
-        _exact_keys(grader, GRADER_KEYS, "grader")
+        actual_grader_keys = set(grader)
+        allowed_grader_keys = GRADER_KEYS | GRADER_OPTIONAL_KEYS
+        if (
+            not GRADER_KEYS <= actual_grader_keys
+            or not actual_grader_keys <= allowed_grader_keys
+        ):
+            raise ValueError(
+                "grader keys differ: "
+                f"missing={sorted(GRADER_KEYS - actual_grader_keys)}, "
+                f"extra={sorted(actual_grader_keys - allowed_grader_keys)}"
+            )
         for key in (
             "attempts_per_proof",
             "concurrency",
@@ -208,6 +219,18 @@ def load_config(path: Path) -> dict[str, Any]:
             raise ValueError("grader.zero_veto must be a boolean")
         if type(grader["prompt_cache_options_enabled"]) is not bool:
             raise ValueError("grader.prompt_cache_options_enabled must be a boolean")
+        if "api_key_envs" in grader:
+            api_key_envs = grader["api_key_envs"]
+            if (
+                not isinstance(api_key_envs, list)
+                or not api_key_envs
+                or any(not isinstance(value, str) or not value for value in api_key_envs)
+            ):
+                raise ValueError(
+                    "grader.api_key_envs must be a nonempty list of nonempty strings"
+                )
+            if len(set(api_key_envs)) != len(api_key_envs):
+                raise ValueError("grader.api_key_envs must not contain duplicates")
         for key in (
             "base_url", "model", "api_key_env", "reasoning",
             "prompt_cache_mode", "prompt_cache_ttl",

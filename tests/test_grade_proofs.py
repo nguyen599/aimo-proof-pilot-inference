@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -39,6 +40,20 @@ class GradeProofsTests(unittest.TestCase):
         self.assertTrue(grade_proofs.is_retryable_error(StatusError(429)))
         self.assertTrue(grade_proofs.is_retryable_error(StatusError(503)))
         self.assertTrue(grade_proofs.is_retryable_error(RuntimeError("parse")))
+
+    def test_api_key_pool_loads_configured_environment_variables(self):
+        grader = {"api_key_env": "FALLBACK", "api_key_envs": ["KEY_1", "KEY_2"]}
+        with patch.dict(
+            grade_proofs.os.environ,
+            {"KEY_1": "secret-1", "KEY_2": "secret-2"},
+            clear=True,
+        ):
+            resolved = grade_proofs.load_api_keys(grader)
+
+        self.assertEqual(
+            resolved,
+            [("KEY_1", "secret-1"), ("KEY_2", "secret-2")],
+        )
 
     def test_aggregate_includes_complete_score_distribution(self):
         records = [
@@ -101,7 +116,7 @@ class GradeProofsTests(unittest.TestCase):
                 search_dir,
             )
 
-        self.assertEqual(config["grader"]["attempts_per_proof"], 64)
+        self.assertEqual(config["grader"]["attempts_per_proof"], 32)
         self.assertEqual([row["Problem ID"] for row in loaded_rows], list("123456"))
         self.assertEqual(list(selected), list("123456"))
 
@@ -110,8 +125,17 @@ class GradeProofsTests(unittest.TestCase):
         self.assertEqual(grader["base_url"], "https://api.pinference.ai/api/v1")
         self.assertEqual(grader["model"], "openai/gpt-5.6-sol")
         self.assertEqual(grader["api_key_env"], "PRIME_API_KEY")
+        self.assertEqual(
+            grader["api_key_envs"],
+            [
+                "PRIME_API_KEY_1",
+                "PRIME_API_KEY_2",
+                "PRIME_API_KEY_3",
+                "PRIME_API_KEY_4",
+            ],
+        )
         self.assertEqual(grader["reasoning"], "high")
-        self.assertEqual(grader["concurrency"], 4)
+        self.assertEqual(grader["concurrency"], 8)
         self.assertEqual(grader["request_retries"], 6)
         self.assertFalse(grader["prompt_cache_options_enabled"])
         self.assertFalse(grader["zero_veto"])

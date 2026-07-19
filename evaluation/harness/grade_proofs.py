@@ -178,6 +178,15 @@ def is_retryable_error(error: Exception) -> bool:
     return status_code in {408, 409, 429} or status_code >= 500
 
 
+def load_api_keys(grader: dict) -> list[tuple[str, str]]:
+    """Resolve configured API key environment variables without logging values."""
+    env_names = grader.get("api_key_envs") or [grader["api_key_env"]]
+    missing = [name for name in env_names if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(f"empty grader API key environment variables: {missing}")
+    return [(name, os.environ[name]) for name in env_names]
+
+
 def aggregate_grades(
     records: list[dict],
     problem_ids: list[str],
@@ -231,9 +240,7 @@ async def grade_final_proofs(
         search_dir,
     )
     grader = config["grader"]
-    api_key = os.environ.get(grader["api_key_env"])
-    if not api_key:
-        raise RuntimeError(f"empty {grader['api_key_env']}")
+    api_keys = load_api_keys(grader)
 
     problem_ids = [row["Problem ID"] for row in rows]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -268,13 +275,21 @@ async def grade_final_proofs(
                     (row, attempt, messages, messages_hash, prompt_cache_key)
                 )
 
-    client = AsyncOpenAI(
-        base_url=grader["base_url"],
-        api_key=api_key,
-        max_retries=0,
-        timeout=3600.0,
-    )
-    semaphore = asyncio.Semaphore(grader["concurrency"])
+    clients = [
+        AsyncOpenAI(
+            base_url=grader["base_url"],
+            api_key=api_key,
+            max_retries=0,
+            timeout=3600.0,
+        )
+        for _, api_key in api_keys
+    ]
+    client_slots: asyncio.Queue[int] = asyncio.Queue()
+    client_slot_counts = Counter()
+    for slot in range(grader["concurrency"]):
+        client_index = slot % len(clients)
+        client_slots.put_nowait(client_index)
+        client_slot_counts[client_index] += 1
     write_lock = asyncio.Lock()
     progress = tqdm(
         total=len(rows) * grader["attempts_per_proof"],
@@ -318,6 +333,7 @@ async def grade_final_proofs(
         parsed = None
         usage = None
         request_attempt = 0
+        client_index = None
         try:
             for request_attempt in range(grader["request_retries"] + 1):
                 response = None
@@ -335,8 +351,13 @@ async def grade_final_proofs(
                             "mode": grader["prompt_cache_mode"],
                             "ttl": grader["prompt_cache_ttl"],
                         }
-                    async with semaphore:
-                        response = await client.responses.parse(**request_kwargs)
+                    client_index = await client_slots.get()
+                    try:
+                        response = await clients[client_index].responses.parse(
+                            **request_kwargs
+                        )
+                    finally:
+                        client_slots.put_nowait(client_index)
                     if response.output_parsed is None:
                         raise RuntimeError(
                             "grader returned no parsed structured output"
@@ -352,6 +373,7 @@ async def grade_final_proofs(
                                 "problem_id": problem_id,
                                 "attempt": attempt,
                                 "request_attempt": request_attempt,
+                                "api_key_slot": client_index,
                                 "messages_sha256": messages_hash,
                                 "response_status": response.status,
                                 "output_text": response.output_text,
@@ -395,6 +417,7 @@ async def grade_final_proofs(
                 "usage": usage,
                 "latency_s": round(time.monotonic() - started, 3),
                 "request_attempts": request_attempt + 1,
+                "api_key_slot": client_index,
                 "score": parsed["grade"],
                 "findings": parsed["findings"],
                 "reasoning": parsed["reasoning"],
@@ -412,6 +435,7 @@ async def grade_final_proofs(
                 "grader_reasoning": grader["reasoning"],
                 "latency_s": round(time.monotonic() - started, 3),
                 "request_attempts": request_attempt + 1,
+                "api_key_slot": client_index,
                 "error": repr(error),
             }
             await append_failure(record)
@@ -452,7 +476,7 @@ async def grade_final_proofs(
             ) from failures[0]
     finally:
         progress.close()
-        await client.close()
+        await asyncio.gather(*(client.close() for client in clients))
 
     records = list(existing.values())
     cache_details = [
@@ -525,6 +549,15 @@ async def grade_final_proofs(
                     for record in records
                 ),
             },
+            "api_routing": {
+                "key_count": len(api_keys),
+                "key_envs": [name for name, _ in api_keys],
+                "global_concurrency": grader["concurrency"],
+                "max_concurrency_per_key": {
+                    str(index): client_slot_counts[index]
+                    for index in range(len(clients))
+                },
+            },
         }
     )
     (output_dir / "summary.json").write_text(
@@ -590,6 +623,8 @@ def main() -> None:
                     "attempts_per_proof": grader["attempts_per_proof"],
                     "concurrency": grader["concurrency"],
                     "request_retries": grader["request_retries"],
+                    "api_key_envs": grader.get("api_key_envs")
+                    or [grader["api_key_env"]],
                     "prompt_cache_options_enabled": grader[
                         "prompt_cache_options_enabled"
                     ],
