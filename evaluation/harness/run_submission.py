@@ -31,6 +31,44 @@ class InputRow:
     problem: str
 
 
+def select_problems(
+    rows: list["InputRow"], problems: str = "all", limit: int = 0
+) -> list["InputRow"]:
+    """Pick which problems to run (benchmark/dev convenience).
+
+    ``problems`` selects a subset by the test.csv ``id`` column:
+      - "all" (default): every row, in CSV order.
+      - a comma-separated id list, e.g. "1,4,5": those problems, in the order
+        requested. Nothing is hardcoded -- any subset the input defines is valid.
+    ``limit`` > 0 then keeps only the first ``limit`` of the selected rows (the
+    "number of problems" knob). The two compose, e.g. problems="1,4,5", limit=2
+    -> ids 1,4.
+
+    Unknown ids fail fast. The result is never empty.
+    """
+    spec = (problems or "all").strip()
+    if spec in ("", "all"):
+        selected = list(rows)
+    else:
+        wanted = [token.strip() for token in spec.split(",") if token.strip()]
+        # de-duplicate while preserving requested order
+        seen: set[str] = set()
+        wanted = [w for w in wanted if not (w in seen or seen.add(w))]
+        by_id = {row.id: row for row in rows}
+        missing = [w for w in wanted if w not in by_id]
+        if missing:
+            raise ValueError(
+                f"--problems requested id(s) {missing} not in input; "
+                f"available ids: {[row.id for row in rows]}"
+            )
+        selected = [by_id[w] for w in wanted]
+    if limit > 0:
+        selected = selected[:limit]
+    if not selected:
+        raise ValueError("problem selection is empty (check --problems/--limit)")
+    return selected
+
+
 def load_test_csv(path: Path) -> list[InputRow]:
     with path.open(newline="", encoding="utf-8-sig") as source:
         reader = csv.DictReader(source)
@@ -130,12 +168,21 @@ async def run_submission(
     input_path: Path,
     output_path: Path,
     artifacts_dir: Path,
+    problems: str = "all",
+    limit: int = 0,
 ) -> None:
     config_path = config_path.resolve()
     input_path = input_path.resolve()
     output_path = output_path.resolve()
     artifacts_dir = artifacts_dir.resolve()
     rows = load_test_csv(input_path)
+    rows = select_problems(rows, problems=problems, limit=limit)
+    if problems != "all" or limit > 0:
+        print(
+            "[submission] problem selection: problems={} limit={} -> {} problem(s) "
+            "ids={}".format(problems, limit, len(rows), [row.id for row in rows]),
+            flush=True,
+        )
     config = load_config(config_path)
     model = active_model(config)
 
@@ -256,13 +303,34 @@ def main() -> None:
     parser.add_argument(
         "--artifacts-dir", default=Path("submission_artifacts"), type=Path
     )
+    parser.add_argument(
+        "--problems",
+        default="all",
+        help=(
+            "Which problems to run, selected by test.csv id: 'all' (default) or "
+            "a comma-separated id list like '1,4,5' (run in the order given)."
+        ),
+    )
+    parser.add_argument(
+        "--limit",
+        default=0,
+        type=int,
+        help=(
+            "Cap the run to the first N selected problems (0 = no cap). "
+            "Composes with --problems; this is the 'number of problems' knob."
+        ),
+    )
     args = parser.parse_args()
+    if args.limit < 0:
+        parser.error("--limit must be >= 0")
     asyncio.run(
         run_submission(
             args.config,
             args.input,
             args.output,
             args.artifacts_dir,
+            problems=args.problems,
+            limit=args.limit,
         )
     )
 
