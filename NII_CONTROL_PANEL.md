@@ -217,6 +217,15 @@ refinement rounds, and deadline-aware lossless handoff. It maps physical nodes
 2 and 3 to distributed ranks 0 and 1 and reads the checked-in
 `imo-2026.jsonl` file.
 
+The default controller runs six problems concurrently and admits 32 HTTP
+requests per selected GPU (256 per eight-GPU node). vLLM's
+`--max-num-seqs` limit is per DP replica, so the TP2/DP4 default of
+`AIMO_MAX_NUM_SEQS_PER_DP=32` provides 128 scheduled sequences per node. Do
+not multiply this option by DP again: setting it to 128 would permit 512
+scheduled sequences per node. Override `AIMO_REQUESTS_PER_GPU`,
+`AIMO_MAX_NUM_SEQS_PER_DP`, or `AIMO_MAX_CONCURRENT_PROBLEMS` only after
+accounting for that distinction.
+
 Set one shared run ID, then start the script in the background on both nodes:
 
 ```bash
