@@ -348,7 +348,7 @@ class CFG:
         os.environ.get("AIMO_PIPELINES_PER_PROBLEM", "14")
     )
     deepseek_math_v2_candidate_count = int(
-        os.environ.get("AIMO_DEEPSEEK_MATH_V2_CANDIDATE_COUNT", "6")
+        os.environ.get("AIMO_DEEPSEEK_MATH_V2_CANDIDATE_COUNT", "0")
     )
     # Last N candidates use a shorter proof-only prompt. This keeps some
     # candidates verifyable when full proof+self-evaluation generations hit
@@ -496,6 +496,8 @@ MAX_SUBMISSION_ANSWER_CHARS = 20_000
 DEFAULT_FALLBACK_ANSWER = "0"
 MAX_FORWARDED_EVALUATION_CHARS = 32_000
 MAX_FORWARDED_META_ANALYSIS_CHARS = 24_000
+MAX_PRIOR_VERIFIER_CRITIQUES = 8
+MAX_PRIOR_VERIFIER_CRITIQUE_CHARS = 4_000
 REPETITION_GUARD_RECENT_TOKENS = 500
 REPETITION_GUARD_DUPLICATE_LINE_THRESHOLD = 20
 REASONING_REPETITION_WINDOW_WORDS = 32
@@ -1344,21 +1346,120 @@ def build_opd_proof_only_generation_prompt(
     return build_opd_proof_generation_prompt(question, use_tool=use_tool)
 
 
+VERIFIER_AUDIT_ROLES: tuple[tuple[str, str], ...] = (
+    (
+        "dependency",
+        "Reconstruct the proof's dependency chain. Check every lemma at the point "
+        "where it is used, reject circular reasoning, and reject any named or "
+        "implicit result that is merely asserted instead of proved.",
+    ),
+    (
+        "counterexample",
+        "Actively try to falsify the proof with concrete examples and boundary "
+        "cases. Audit every WLOG, symmetry, relabeling, normalization, and "
+        "invariance claim; verify that it preserves all relevant order, "
+        "adjacency, incidence, and metric structure.",
+    ),
+    (
+        "quantifier_algebra",
+        "Audit quantifiers, index ranges, equality cases, and the legality of each "
+        "choice or game strategy. Independently recompute the key algebra, "
+        "divisibility, valuation, counting, and inequality steps.",
+    ),
+    (
+        "coverage",
+        "Map the proof to every clause of the problem. Check both construction and "
+        "impossibility directions, all requested cases, and whether intermediate "
+        "claims contradict examples or base cases established elsewhere in the "
+        "same proof.",
+    ),
+)
+
+
+def verifier_audit_role(verifier_index: int) -> tuple[str, str]:
+    return VERIFIER_AUDIT_ROLES[verifier_index % len(VERIFIER_AUDIT_ROLES)]
+
+
+def format_prior_verifier_critiques(
+    prior_critiques: Optional[list[dict[str, Any]]],
+) -> str:
+    if not prior_critiques:
+        return ""
+    lines = [
+        "Earlier verifier findings must be re-audited against the current proof. "
+        "They are not automatically true, but a rewritten assertion is not a "
+        "repair unless its missing justification has actually been supplied. "
+        "For each finding, explicitly decide whether it is resolved, unresolved, "
+        "or an invalid earlier critique."
+    ]
+    for ordinal, critique in enumerate(
+        prior_critiques[-MAX_PRIOR_VERIFIER_CRITIQUES:], start=1
+    ):
+        review, _ = clip_middle_text(
+            str(critique.get("evaluation") or critique.get("review") or "").strip(),
+            MAX_PRIOR_VERIFIER_CRITIQUE_CHARS,
+        )
+        if not review:
+            continue
+        origin_round = critique.get("origin_round")
+        verifier_index = critique.get("verifier_index")
+        score = coerce_score(critique.get("score"))
+        lines.append(
+            f"{ordinal}. prior_round={origin_round} verifier={verifier_index} "
+            f"score={score if score is not None else '?'}\n{review}"
+        )
+    return "\n\n".join(lines) if len(lines) > 1 else ""
+
+
+def verifier_audit_instructions(
+    verifier_index: int,
+    prior_critiques: Optional[list[dict[str, Any]]] = None,
+) -> tuple[str, str]:
+    role_name, role_instructions = verifier_audit_role(verifier_index)
+    sections = [
+        f"Mandatory independent audit role: {role_name}.\n{role_instructions}",
+        "Do not infer correctness from polished prose, the candidate's self-score, "
+        "or agreement with another verifier. Before assigning score 1, identify "
+        "the proof's weakest essential claim and report the concrete checks used "
+        "to validate it.",
+    ]
+    prior_text = format_prior_verifier_critiques(prior_critiques)
+    if prior_text:
+        sections.append(prior_text)
+    return role_name, "\n\n".join(sections)
+
+
 def build_opd_proof_verification_prompt(
     question: str,
     proof: str,
     self_evaluation: str,
+    *,
+    verifier_index: Optional[int] = None,
+    prior_critiques: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, str]]:
-    return _opd_messages(
+    messages = _opd_messages(
         "verifier.txt",
         problem=question,
         candidate_solution=proof,
         candidate_self_eval=self_evaluation,
     )
+    if verifier_index is not None:
+        _, instructions = verifier_audit_instructions(
+            verifier_index,
+            prior_critiques,
+        )
+        messages[-1]["content"] += f"\n\n{instructions}"
+    return messages
 
 
-def build_deepseek_proof_verification_prompt(question: str, proof: str) -> str:
-    return f"""## Instruction
+def build_deepseek_proof_verification_prompt(
+    question: str,
+    proof: str,
+    *,
+    verifier_index: Optional[int] = None,
+    prior_critiques: Optional[list[dict[str, Any]]] = None,
+) -> str:
+    prompt = f"""## Instruction
 
 Your task is to evaluate the quality of a solution to a problem. The problem may ask for a proof of statement, or ask for an answer. If finding an answer is required, the solution should present the answer, and it should also be a rigorous proof of that answer being valid.
 
@@ -1385,6 +1486,13 @@ Here is your task input:
 
 ## Solution
 {proof}"""
+    if verifier_index is not None:
+        _, instructions = verifier_audit_instructions(
+            verifier_index,
+            prior_critiques,
+        )
+        prompt += f"\n\n## Mandatory independent audit\n{instructions}"
+    return prompt
 
 
 def build_deepseek_meta_verification_prompt(
@@ -2360,6 +2468,7 @@ def build_verifier_score_summaries(
         summaries.append(
             {
                 "verifier_index": verifier_index,
+                "verifier_role": verifier.get("verifier_role"),
                 "verifier_score": verifier_score,
                 "meta_scores": meta_scores,
                 "meta_factor": meta_factor,
@@ -2398,6 +2507,7 @@ def aggregate_proof_label(
         )
         critique = {
             "verifier_index": verifier_index,
+            "verifier_role": verifier.get("verifier_role"),
             "score": score,
             "evaluation": verifier.get("evaluation", ""),
             "review": verifier.get("review", verifier.get("evaluation", "")),
@@ -2422,6 +2532,18 @@ def aggregate_proof_label(
     final_score = (
         sum(weighted_scores) / len(weighted_scores) if weighted_scores else None
     )
+    validated_fatal_critiques = [
+        critique
+        for critique in validated_critiques
+        if coerce_score(critique.get("score")) == 0.0
+    ]
+    fatal_score_cap_applied = bool(
+        validated_fatal_critiques
+        and final_score is not None
+        and final_score > 0.5
+    )
+    if fatal_score_cap_applied:
+        final_score = 0.5
     if final_score is None:
         final_status = "needs_review"
     elif len(validated_critiques) >= min_valid_low and final_score <= 0.5:
@@ -2442,6 +2564,8 @@ def aggregate_proof_label(
         "final_score": final_score,
         "final_status": final_status,
         "validated_critiques": validated_critiques,
+        "validated_fatal_critiques": validated_fatal_critiques,
+        "fatal_score_cap_applied": fatal_score_cap_applied,
         "verifier_score_summaries": score_summaries,
         "low_scores_seen": low_scores_seen,
         **strict_pass,
@@ -4644,6 +4768,7 @@ async def run_verification_round(
     scheduler: ChatScheduler,
     cfg: PipelineConfig,
     prompt_family: str = PROMPT_FAMILY_OPD,
+    prior_critiques: Optional[list[dict[str, Any]]] = None,
     progress: Optional[PipelineProgress] = None,
     throttle: Optional[VerificationThrottle] = None,
 ) -> tuple[
@@ -4705,12 +4830,14 @@ async def run_verification_round(
 
     def finalize_verifier(
         verifier_index: int,
+        verifier_role: str,
         response: dict[str, Any],
         parsed: dict[str, Any],
         output: dict[str, Any],
     ) -> None:
         verifier_result = {
             "verifier_index": verifier_index,
+            "verifier_role": verifier_role,
             "success": response.get("success", False),
             "error": response.get("error"),
             **parsed,
@@ -4763,22 +4890,34 @@ async def run_verification_round(
             )
 
     if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2:
-        verifier_prompt = build_deepseek_proof_verification_prompt(question, proof)
         verifier_parser = parse_deepseek_verifier_response
         verifier_force_text = cfg.deepseek_verifier_thinking_budget_force_text
     elif prompt_family == PROMPT_FAMILY_OPD:
-        verifier_prompt = build_opd_proof_verification_prompt(
-            question,
-            proof,
-            self_evaluation,
-        )
         verifier_parser = parse_verifier_response
         verifier_force_text = cfg.verifier_thinking_budget_force_text
     else:
         raise ValueError(f"unsupported prompt family: {prompt_family!r}")
 
-    verifier_prompts = [verifier_prompt for _ in range(cfg.verify_n)]
-    for verifier_idx, prompt in enumerate(verifier_prompts):
+    for verifier_idx in range(cfg.verify_n):
+        verifier_role, _ = verifier_audit_instructions(
+            verifier_idx,
+            prior_critiques,
+        )
+        if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2:
+            prompt = build_deepseek_proof_verification_prompt(
+                question,
+                proof,
+                verifier_index=verifier_idx,
+                prior_critiques=prior_critiques,
+            )
+        else:
+            prompt = build_opd_proof_verification_prompt(
+                question,
+                proof,
+                self_evaluation,
+                verifier_index=verifier_idx,
+                prior_critiques=prior_critiques,
+            )
         add_task(
             verification_call(
                 "proof_verify",
@@ -4786,7 +4925,8 @@ async def run_verification_round(
                 progress=progress,
                 detail=(
                     f"candidate={attempt_idx} round={round_idx} "
-                    f"verifier={verifier_idx} prompt_family={prompt_family}"
+                    f"verifier={verifier_idx} role={verifier_role} "
+                    f"prompt_family={prompt_family}"
                 ),
                 thinking_budget_tokens=(
                     cfg.verifier_thinking_budget_tokens
@@ -4795,7 +4935,11 @@ async def run_verification_round(
                 ),
                 thinking_budget_force_text=verifier_force_text,
             ),
-            {"kind": "verifier", "verifier_index": verifier_idx},
+            {
+                "kind": "verifier",
+                "verifier_index": verifier_idx,
+                "verifier_role": verifier_role,
+            },
         )
 
     try:
@@ -4828,6 +4972,7 @@ async def run_verification_round(
 
                 if kind == "verifier":
                     verifier_index = int(info["verifier_index"])
+                    verifier_role = str(info["verifier_role"])
                     log_verifier_tail_output(
                         "proof_verify",
                         response.get("text", ""),
@@ -4842,9 +4987,16 @@ async def run_verification_round(
                         parsed,
                         round_idx=round_idx,
                         verifier_index=verifier_index,
+                        verifier_role=verifier_role,
                         prompt_family=prompt_family,
                     )
-                    finalize_verifier(verifier_index, response, parsed, output)
+                    finalize_verifier(
+                        verifier_index,
+                        verifier_role,
+                        response,
+                        parsed,
+                        output,
+                    )
 
                 elif kind == "meta":
                     verifier_index = int(info["verifier_index"])
@@ -5200,6 +5352,8 @@ async def run_single_attempt(
     best_aggregation = dict(final_aggregation)
     best_round_idx = -1
     latest_verified_round_idx = -1
+    critique_history: list[dict[str, Any]] = []
+    critique_history_keys: set[str] = set()
 
     def aggregation_score_value(aggregation: dict[str, Any]) -> float:
         score = aggregation.get("final_score")
@@ -5240,6 +5394,7 @@ async def run_single_attempt(
                 scheduler,
                 cfg,
                 prompt_family=prompt_family,
+                prior_critiques=critique_history,
                 progress=progress,
                 throttle=throttle,
             )
@@ -5298,7 +5453,23 @@ async def run_single_attempt(
                 int(critique.get("verifier_index") or 0),
             ),
         )
-        selected_critiques = ranked_critiques[: max(1, cfg.refine_review_n)]
+        current_critiques = ranked_critiques[: max(1, cfg.refine_review_n)]
+        for critique in current_critiques:
+            history_entry = {**critique, "origin_round": round_idx}
+            history_key = re.sub(
+                r"\s+",
+                " ",
+                str(
+                    history_entry.get("evaluation")
+                    or history_entry.get("review")
+                    or ""
+                ).strip().lower(),
+            )
+            if not history_key or history_key in critique_history_keys:
+                continue
+            critique_history_keys.add(history_key)
+            critique_history.append(history_entry)
+        selected_critiques = critique_history[-MAX_PRIOR_VERIFIER_CRITIQUES:]
         critiques = [
             format_refinement_critique(critique) for critique in selected_critiques
         ]
@@ -5438,6 +5609,13 @@ async def run_single_attempt(
         "self_evaluation": latest_generation_parsed.get("self_evaluation"),
         "self_score": latest_generation_parsed.get("self_score"),
         "validated_critiques": final_aggregation.get("validated_critiques", []),
+        "validated_fatal_critiques": final_aggregation.get(
+            "validated_fatal_critiques", []
+        ),
+        "fatal_score_cap_applied": final_aggregation.get(
+            "fatal_score_cap_applied", False
+        ),
+        "critique_history": critique_history,
         "verifier_score_summaries": final_aggregation.get(
             "verifier_score_summaries", []
         ),

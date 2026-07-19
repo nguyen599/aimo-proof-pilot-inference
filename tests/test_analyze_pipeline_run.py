@@ -93,7 +93,7 @@ def test_analyze_run_tracks_selection_rounds_and_external_miscalibration(tmp_pat
     assert analysis["problems"][0]["selected_internal_rank"] == 1
     assert analysis["problems"][0]["selected_selector_truncated"] is True
     assert analysis["diagnosis"]["high_confidence_external_failures"] == ["1"]
-    assert "verifier/selector calibration" in analysis["diagnosis"]["summary"]
+    assert "verifier calibration" in analysis["diagnosis"]["summary"]
 
 
 def test_parse_call_file_extracts_usage_detail_and_last_score(tmp_path):

@@ -706,10 +706,10 @@ def analyze_run(
     ]
     if high_conf_external_failures:
         summary = (
-            "Primary bottleneck: verifier/selector calibration. The pipeline assigned passing internal "
-            "scores to selected proofs that an independent rubric grader found fatally incomplete. "
-            "Generation quality is a secondary bottleneck because many candidates also failed or never "
-            "crossed the selector threshold."
+            "Primary bottleneck: verifier calibration. The final selector followed the internal ranking, "
+            "but the verifier assigned passing scores to proofs that an independent rubric grader found "
+            "fatally incomplete. Generation quality is a secondary bottleneck because many candidates "
+            "also failed or never crossed the selector threshold."
         )
     elif low_ceiling:
         summary = (

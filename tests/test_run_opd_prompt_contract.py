@@ -309,7 +309,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             REPO / "test.csv",
         )
         self.assertEqual(run.CFG.pipelines_per_problem, 14)
-        self.assertEqual(run.CFG.deepseek_math_v2_candidate_count, 6)
+        self.assertEqual(run.CFG.deepseek_math_v2_candidate_count, 0)
         self.assertEqual(run.CFG.proof_only_candidate_count, 0)
         self.assertFalse(run.CFG.skip_self_score_zero)
         self.assertFalse(run.CFG.stop_on_strict_pass)
@@ -321,6 +321,72 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(run.CFG.refine_review_n, 2)
         self.assertLess(run.CFG.refine_review_n, run.CFG.verify_n)
         self.assertGreaterEqual(run.CFG.problem_timeout_seconds, 86_400)
+
+    def test_verifiers_receive_distinct_adversarial_roles(self):
+        prompts = [
+            run.build_opd_proof_verification_prompt(
+                "Problem.",
+                "Candidate proof.",
+                "Candidate self-review.",
+                verifier_index=index,
+            )
+            for index in range(4)
+        ]
+
+        user_prompts = [messages[-1]["content"] for messages in prompts]
+        self.assertEqual(len(set(user_prompts)), 4)
+        for role_name, _ in run.VERIFIER_AUDIT_ROLES:
+            self.assertTrue(
+                any(f"audit role: {role_name}" in prompt for prompt in user_prompts)
+            )
+
+    def test_verifier_reaudits_prior_validated_critiques(self):
+        messages = run.build_opd_proof_verification_prompt(
+            "Problem.",
+            "Rewritten proof.",
+            "Now complete.",
+            verifier_index=1,
+            prior_critiques=[
+                {
+                    "origin_round": 0,
+                    "verifier_index": 2,
+                    "score": 0,
+                    "evaluation": "The claimed symmetry does not preserve adjacency.",
+                }
+            ],
+        )
+
+        prompt = messages[-1]["content"]
+        self.assertIn("resolved, unresolved, or an invalid earlier critique", prompt)
+        self.assertIn("does not preserve adjacency", prompt)
+
+    def test_validated_fatal_review_caps_aggregate_score(self):
+        verifier_results = [
+            {
+                "verifier_index": index,
+                "verifier_role": role[0],
+                "score": score,
+                "evaluation": "fatal issue" if score == 0 else "passes",
+            }
+            for index, (role, score) in enumerate(
+                zip(run.VERIFIER_AUDIT_ROLES, [1.0, 1.0, 1.0, 0.0])
+            )
+        ]
+        meta_results = {
+            index: [{"score": 1.0}] for index in range(len(verifier_results))
+        }
+
+        result = run.aggregate_proof_label(
+            verifier_results,
+            meta_results,
+            min_valid_low=1,
+            strict_pass_meta=True,
+            meta_n=1,
+        )
+
+        self.assertEqual(result["final_score"], 0.5)
+        self.assertTrue(result["fatal_score_cap_applied"])
+        self.assertEqual(result["final_status"], "validated_low_score")
 
     def test_prover_uses_trained_system_user_prompt(self):
         messages = run.build_opd_proof_generation_prompt("Prove the claim.")
@@ -597,6 +663,104 @@ class RunOpdPromptContractTests(unittest.TestCase):
 
 
 class MixedPromptRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refinement_preserves_prior_critique_audits(self):
+        class FakeScheduler:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+                self.responses = iter(
+                    [
+                        (
+                            "<evaluation>Missing lemma alpha.</evaluation>"
+                            "<suggestions>Prove alpha.</suggestions><score>0</score>"
+                        ),
+                        (
+                            "<solution>Proof after alpha repair.</solution>"
+                            "<self_evaluation>Alpha is addressed.</self_evaluation>"
+                            "<score>0.5</score>"
+                        ),
+                        (
+                            "<evaluation>Missing lemma beta.</evaluation>"
+                            "<suggestions>Prove beta.</suggestions><score>0</score>"
+                        ),
+                        (
+                            "<solution>Proof after both repairs.</solution>"
+                            "<self_evaluation>Both are addressed.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        (
+                            "<evaluation>Both lemmas are now proved.</evaluation>"
+                            "<suggestions>None.</suggestions><score>1</score>"
+                        ),
+                    ]
+                )
+
+            async def call(self, stage: str, prompt: object, **kwargs: object):
+                del kwargs
+                self.calls.append((stage, prompt))
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": next(self.responses),
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        initial_text = (
+            "<solution>Initial proof.</solution>"
+            "<self_evaluation>Needs checking.</self_evaluation><score>0.5</score>"
+        )
+        initial_parsed = run.parse_generation_response(initial_text)
+        initial_generation = {
+            "attempt_idx": 0,
+            "prompt_family": run.PROMPT_FAMILY_OPD,
+            "generation_mode": "opd_xml",
+            "generation_output": run.make_output(
+                "proof_generation",
+                {"success": True, "text": initial_text},
+                initial_parsed,
+            ),
+            "generation_parsed": initial_parsed,
+            "proof": initial_parsed["proof"],
+        }
+        cfg = SimpleNamespace(
+            verify_n=1,
+            meta_n=0,
+            meta_policy="all-reviews",
+            strict_pass_meta=False,
+            refine_rounds=2,
+            refine_review_n=1,
+            min_valid_low=1,
+            verification_early_stop=False,
+            thinking_budget_enabled=False,
+            verifier_thinking_budget_tokens=0,
+            verifier_thinking_budget_force_text="<evaluation>\n",
+            deepseek_verifier_thinking_budget_force_text="",
+            meta_thinking_budget_tokens=0,
+            meta_thinking_budget_force_text="",
+        )
+        scheduler = FakeScheduler()
+
+        result = await run.run_single_attempt(
+            "Problem.",
+            0,
+            1,
+            scheduler,
+            cfg,
+            initial_generation=initial_generation,
+        )
+
+        verifier_prompts = [
+            prompt for stage, prompt in scheduler.calls if stage == "proof_verify"
+        ]
+        self.assertEqual(len(verifier_prompts), 3)
+        self.assertNotIn("Missing lemma alpha", verifier_prompts[0][-1]["content"])
+        self.assertIn("Missing lemma alpha", verifier_prompts[1][-1]["content"])
+        self.assertIn("Missing lemma alpha", verifier_prompts[2][-1]["content"])
+        self.assertIn("Missing lemma beta", verifier_prompts[2][-1]["content"])
+        self.assertEqual(len(result["critique_history"]), 2)
+
     async def test_generation_dispatches_prompt_parser_and_force_text_by_family(self):
         class FakeScheduler:
             def __init__(self) -> None:
