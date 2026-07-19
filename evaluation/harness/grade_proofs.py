@@ -239,6 +239,7 @@ async def grade_final_proofs(
     output_dir.mkdir(parents=True, exist_ok=True)
     records_path = output_dir / "records.jsonl"
     failures_path = output_dir / "failures.jsonl"
+    invalid_responses_path = output_dir / "invalid_responses.jsonl"
 
     existing: dict[tuple[str, int], dict] = {}
     if records_path.exists():
@@ -297,6 +298,12 @@ async def grade_final_proofs(
                 output.write(json.dumps(record, ensure_ascii=False) + "\n")
                 output.flush()
 
+    async def append_invalid_response(record: dict) -> None:
+        async with write_lock:
+            with invalid_responses_path.open("a") as output:
+                output.write(json.dumps(record, ensure_ascii=False) + "\n")
+                output.flush()
+
     async def work(
         row: dict,
         attempt: int,
@@ -313,6 +320,7 @@ async def grade_final_proofs(
         request_attempt = 0
         try:
             for request_attempt in range(grader["request_retries"] + 1):
+                response = None
                 try:
                     request_kwargs = {
                         "model": grader["model"],
@@ -338,6 +346,21 @@ async def grade_final_proofs(
                     usage = response.usage.model_dump() if response.usage else None
                     break
                 except Exception as error:
+                    if response is not None:
+                        await append_invalid_response(
+                            {
+                                "problem_id": problem_id,
+                                "attempt": attempt,
+                                "request_attempt": request_attempt,
+                                "messages_sha256": messages_hash,
+                                "response_status": response.status,
+                                "output_text": response.output_text,
+                                "response": response.model_dump(
+                                    mode="json", warnings=False
+                                ),
+                                "error": repr(error),
+                            }
+                        )
                     if (
                         request_attempt >= grader["request_retries"]
                         or not is_retryable_error(error)
@@ -349,7 +372,7 @@ async def grade_final_proofs(
                     )
                     tqdm.write(
                         f"Retrying problem {problem_id} attempt {attempt} after "
-                        f"{type(error).__name__} in {delay}s "
+                        f"{type(error).__name__}: {str(error)[:300]} in {delay}s "
                         f"({request_attempt + 1}/{grader['request_retries']})"
                     )
                     await asyncio.sleep(delay)
@@ -368,7 +391,7 @@ async def grade_final_proofs(
                 "grader_reasoning": grader["reasoning"],
                 "grader_content": content,
                 "response_status": response.status,
-                "response": response.model_dump(mode="json"),
+                "response": response.model_dump(mode="json", warnings=False),
                 "usage": usage,
                 "latency_s": round(time.monotonic() - started, 3),
                 "request_attempts": request_attempt + 1,
@@ -398,7 +421,7 @@ async def grade_final_proofs(
     try:
         warm_jobs = []
         remaining_jobs = []
-        warmed_problem_ids = set()
+        warmed_problem_ids = {problem_id for problem_id, _ in existing}
         for job in jobs:
             problem_id = job[0]["Problem ID"]
             if problem_id not in warmed_problem_ids:
@@ -406,8 +429,17 @@ async def grade_final_proofs(
                 warmed_problem_ids.add(problem_id)
             else:
                 remaining_jobs.append(job)
-        for job in warm_jobs:
-            await work(*job)
+        warm_results = await asyncio.gather(
+            *[work(*job) for job in warm_jobs],
+            return_exceptions=True,
+        )
+        warm_failures = [
+            result for result in warm_results if isinstance(result, Exception)
+        ]
+        if warm_failures:
+            raise RuntimeError(
+                f"{len(warm_failures)} prompt-cache warm-up attempt(s) failed"
+            ) from warm_failures[0]
         results = await asyncio.gather(
             *[work(*job) for job in remaining_jobs],
             return_exceptions=True,
@@ -452,13 +484,35 @@ async def grade_final_proofs(
                 "warmup_attempts_per_problem": 1,
                 "input_tokens": cache_input_tokens,
                 "cache_write_tokens": sum(
-                    detail.get("cache_write_tokens", 0) for detail in cache_details
+                    detail.get("cache_write_tokens") or 0
+                    for detail in cache_details
                 ),
                 "cached_tokens": sum(
-                    detail.get("cached_tokens", 0) for detail in cache_details
+                    detail.get("cached_tokens") or 0 for detail in cache_details
                 ),
                 "cache_hit_attempts": sum(
-                    1 for detail in cache_details if detail.get("cached_tokens", 0) > 0
+                    1 for detail in cache_details if (detail.get("cached_tokens") or 0) > 0
+                ),
+            },
+            "usage": {
+                "input_tokens": sum(
+                    (record.get("usage") or {}).get("input_tokens") or 0
+                    for record in records
+                ),
+                "output_tokens": sum(
+                    (record.get("usage") or {}).get("output_tokens") or 0
+                    for record in records
+                ),
+                "reasoning_tokens": sum(
+                    ((record.get("usage") or {}).get("output_tokens_details") or {}).get(
+                        "reasoning_tokens"
+                    )
+                    or 0
+                    for record in records
+                ),
+                "cost": sum(
+                    (record.get("usage") or {}).get("cost") or 0
+                    for record in records
                 ),
             },
             "request_retries": {
