@@ -139,6 +139,7 @@ def test_replay_passes_progress_for_raw_call_logging(tmp_path, monkeypatch):
         temperature=1.0,
         top_p=0.95,
         request_timeout_seconds=60.0,
+        max_attempts=3,
     )
 
     payload = asyncio.run(replay.replay(args))
@@ -147,3 +148,73 @@ def test_replay_passes_progress_for_raw_call_logging(tmp_path, monkeypatch):
     assert captured["progress"].problem_id == "1"
     assert captured["scheduler_kwargs"]["llm_call_logdir"] == output_dir / "llm_calls"
     assert captured["closed"] is True
+
+
+def test_replay_retries_incomplete_verifier_scores(tmp_path, monkeypatch):
+    input_path = tmp_path / "problems.parquet"
+    proofs_path = tmp_path / "records.jsonl"
+    pd.DataFrame(
+        {"problem_idx": ["1"], "problem": ["Test problem."]}
+    ).to_parquet(input_path)
+    proofs_path.write_text(
+        json.dumps({"problem_id": "1", "final_proof": "Test proof."}) + "\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    class DummyScheduler:
+        def __init__(self, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    async def fake_verification_round(*args, **kwargs):
+        calls.append(args[3])
+        score = None if len(calls) == 1 else 0.0
+        return (
+            [{"score": score}],
+            [],
+            {},
+            [],
+            {"final_score": score, "verifier_score_summaries": []},
+        )
+
+    monkeypatch.setattr(replay, "ChatScheduler", DummyScheduler)
+    monkeypatch.setattr(
+        replay.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(replay, "run_verification_round", fake_verification_round)
+    args = SimpleNamespace(
+        input_path=input_path,
+        proofs_path=proofs_path,
+        model_path=tmp_path / "model",
+        base_url=["http://127.0.0.1:8000/v1"],
+        output_dir=tmp_path / "audit",
+        problem_id=["1"],
+        served_model_name="proof-model",
+        api_key="test",
+        verify_n=1,
+        meta_n=0,
+        meta_policy="all-reviews",
+        max_concurrent_problems=1,
+        max_concurrent_requests=1,
+        verifier_max_tokens=128,
+        meta_max_tokens=128,
+        temperature=1.0,
+        top_p=0.95,
+        request_timeout_seconds=60.0,
+        max_attempts=2,
+    )
+
+    payload = asyncio.run(replay.replay(args))
+
+    result = payload["results"][0]
+    assert calls == [100, 101]
+    assert result["replay_attempt"] == 2
+    assert result["failed_attempts"] == [
+        {"attempt": 1, "verifier_scores": [None]}
+    ]
+    assert result["verifier_results"] == [{"score": 0.0}]

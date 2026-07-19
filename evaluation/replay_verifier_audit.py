@@ -66,6 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--request-timeout-seconds", type=float, default=7200.0)
+    parser.add_argument("--max-attempts", type=int, default=3)
     return parser.parse_args()
 
 
@@ -180,36 +181,49 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
     async def evaluate(case: dict[str, Any]) -> dict[str, Any]:
         progress = PipelineProgress(False, case["problem_id"], 1)
         try:
-            async with semaphore:
-                (
-                    verifier_results,
-                    verifier_outputs,
-                    meta_results,
-                    meta_outputs,
-                    aggregation,
-                ) = await run_verification_round(
-                    case["question"],
-                    case["proof"],
-                    "",
-                    int(case["problem_id"]),
-                    0,
-                    scheduler,
-                    cfg,
-                    prompt_family=PROMPT_FAMILY_OPD,
-                    progress=progress,
+            failed_attempts = []
+            for attempt_number in range(max(1, int(args.max_attempts))):
+                async with semaphore:
+                    (
+                        verifier_results,
+                        verifier_outputs,
+                        meta_results,
+                        meta_outputs,
+                        aggregation,
+                    ) = await run_verification_round(
+                        case["question"],
+                        case["proof"],
+                        "",
+                        int(case["problem_id"]) * 100 + attempt_number,
+                        0,
+                        scheduler,
+                        cfg,
+                        prompt_family=PROMPT_FAMILY_OPD,
+                        progress=progress,
+                    )
+                parsed_scores = [result.get("score") for result in verifier_results]
+                if len(parsed_scores) == cfg.verify_n and all(
+                    score in {0.0, 0.5, 1.0} for score in parsed_scores
+                ):
+                    break
+                failed_attempts.append(
+                    {
+                        "attempt": attempt_number + 1,
+                        "verifier_scores": parsed_scores,
+                    }
+                )
+            else:
+                raise RuntimeError(
+                    f"problem {case['problem_id']} has incomplete verifier scores "
+                    f"after {max(1, int(args.max_attempts))} attempts: "
+                    f"{failed_attempts}"
                 )
         finally:
             progress.close()
-        parsed_scores = [result.get("score") for result in verifier_results]
-        if len(parsed_scores) != cfg.verify_n or any(
-            score not in {0.0, 0.5, 1.0} for score in parsed_scores
-        ):
-            raise RuntimeError(
-                f"problem {case['problem_id']} has incomplete verifier scores: "
-                f"{parsed_scores}"
-            )
         return {
             **case,
+            "replay_attempt": len(failed_attempts) + 1,
+            "failed_attempts": failed_attempts,
             "verifier_results": verifier_results,
             "verifier_outputs": verifier_outputs,
             "meta_results_by_verifier": meta_results,
@@ -231,6 +245,7 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
             "meta_max_tokens": args.meta_max_tokens,
             "temperature": args.temperature,
             "top_p": args.top_p,
+            "max_attempts": max(1, int(args.max_attempts)),
         },
         "results": results,
     }
