@@ -102,6 +102,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--request-timeout-seconds", type=float, default=7200.0)
     parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument(
+        "--allow-case-errors",
+        action="store_true",
+        help=(
+            "Write successful cases and structured failures, then exit zero. "
+            "Without this flag, artifacts are still written before a nonzero exit."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -118,6 +126,16 @@ def atomic_write_json(path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def case_checkpoint_path(output_dir: Path, case: dict[str, Any]) -> Path:
+    parts = [f"problem-{case['problem_id']}"]
+    if case.get("source_candidate_id") is not None:
+        parts.append(f"candidate-{case['source_candidate_id']}")
+    if case.get("source_round_index") is not None:
+        parts.append(f"round-{case['source_round_index']}")
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", "_".join(parts)).strip("-")
+    return output_dir / "cases" / f"{safe_name}.json"
 
 
 def load_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -298,7 +316,9 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
     cfg = replay_config(args)
     semaphore = asyncio.Semaphore(max(1, int(args.max_concurrent_problems)))
 
-    async def evaluate(case: dict[str, Any]) -> dict[str, Any]:
+    async def evaluate(
+        case: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         trace_problem_id = case["problem_id"]
         if case.get("source_candidate_id") is not None:
             trace_problem_id = (
@@ -306,8 +326,8 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
                 f"-r{case['source_round_index']}"
             )
         progress = PipelineProgress(False, trace_problem_id, 1)
+        failed_attempts = []
         try:
-            failed_attempts = []
             for attempt_number in range(max(1, int(args.max_attempts))):
                 replay_candidate_id = int(case["problem_id"]) * 100 + attempt_number
                 if case.get("source_candidate_id") is not None:
@@ -346,14 +366,35 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
                     }
                 )
             else:
-                raise RuntimeError(
-                    f"problem {case['problem_id']} has incomplete verifier scores "
-                    f"after {max(1, int(args.max_attempts))} attempts: "
-                    f"{failed_attempts}"
+                error = {
+                    **case,
+                    "error_type": "incomplete_verifier_scores",
+                    "error": (
+                        f"problem {case['problem_id']} has incomplete verifier "
+                        f"scores after {max(1, int(args.max_attempts))} attempts"
+                    ),
+                    "failed_attempts": failed_attempts,
+                }
+                atomic_write_json(
+                    case_checkpoint_path(args.output_dir, case),
+                    {"schema_version": 1, "status": "error", "error": error},
                 )
+                return None, error
+        except Exception as exc:
+            error = {
+                **case,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "failed_attempts": failed_attempts,
+            }
+            atomic_write_json(
+                case_checkpoint_path(args.output_dir, case),
+                {"schema_version": 1, "status": "error", "error": error},
+            )
+            return None, error
         finally:
             progress.close()
-        return {
+        result = {
             **case,
             "replay_attempt": len(failed_attempts) + 1,
             "failed_attempts": failed_attempts,
@@ -363,13 +404,20 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
             "meta_outputs": meta_outputs,
             "aggregation": aggregation,
         }
+        atomic_write_json(
+            case_checkpoint_path(args.output_dir, case),
+            {"schema_version": 1, "status": "ok", "result": result},
+        )
+        return result, None
 
     try:
-        results = await asyncio.gather(*(evaluate(case) for case in cases))
+        outcomes = await asyncio.gather(*(evaluate(case) for case in cases))
     finally:
         scheduler.close()
+    results = [result for result, _ in outcomes if result is not None]
+    errors = [error for _, error in outcomes if error is not None]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "settings": {
             "verify_n": cfg.verify_n,
             "meta_n": cfg.meta_n,
@@ -381,6 +429,7 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
             "max_attempts": max(1, int(args.max_attempts)),
         },
         "results": results,
+        "errors": errors,
     }
 
 
@@ -411,6 +460,27 @@ def render_report(payload: dict[str, Any]) -> str:
                 roles=role_scores,
             )
         )
+    errors = payload.get("errors") or []
+    if errors:
+        lines.extend(
+            [
+                "",
+                "## Incomplete cases",
+                "",
+                "| Problem | Candidate | Round | Error | Attempts |",
+                "| --- | ---: | ---: | --- | ---: |",
+            ]
+        )
+        for error in errors:
+            lines.append(
+                "| {problem_id} | {candidate} | {round_index} | {error_type} | {attempts} |".format(
+                    problem_id=error["problem_id"],
+                    candidate=error.get("source_candidate_id", "-"),
+                    round_index=error.get("source_round_index", "-"),
+                    error_type=error.get("error_type", "unknown"),
+                    attempts=len(error.get("failed_attempts") or []),
+                )
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -421,6 +491,11 @@ def main() -> None:
     (args.output_dir / "REPORT.md").write_text(
         render_report(payload), encoding="utf-8"
     )
+    if payload.get("errors") and not args.allow_case_errors:
+        raise SystemExit(
+            f"{len(payload['errors'])} verifier replay case(s) were incomplete; "
+            "partial artifacts were written"
+        )
 
 
 if __name__ == "__main__":

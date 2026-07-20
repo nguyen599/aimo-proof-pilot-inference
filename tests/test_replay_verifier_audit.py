@@ -288,3 +288,95 @@ def test_replay_retries_incomplete_verifier_scores(tmp_path, monkeypatch):
         {"attempt": 1, "verifier_scores": [None]}
     ]
     assert result["verifier_results"] == [{"score": 0.0}]
+
+
+def test_replay_preserves_successes_when_another_case_never_parses(
+    tmp_path, monkeypatch
+):
+    input_path = tmp_path / "problems.parquet"
+    proofs_path = tmp_path / "records.jsonl"
+    output_dir = tmp_path / "audit"
+    pd.DataFrame(
+        {
+            "problem_idx": ["1", "2"],
+            "problem": ["First problem.", "Second problem."],
+        }
+    ).to_parquet(input_path)
+    proofs_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"problem_id": "1", "final_proof": "Proof one."}),
+                json.dumps({"problem_id": "2", "final_proof": "Proof two."}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class DummyScheduler:
+        def __init__(self, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    async def fake_verification_round(*args, **kwargs):
+        score = 1.0 if args[3] < 200 else None
+        return (
+            [{"score": score}],
+            [],
+            {},
+            [],
+            {
+                "final_score": score,
+                "final_status": "strict_pass" if score == 1.0 else "invalid",
+                "verifier_score_summaries": [],
+            },
+        )
+
+    monkeypatch.setattr(replay, "ChatScheduler", DummyScheduler)
+    monkeypatch.setattr(
+        replay.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(replay, "run_verification_round", fake_verification_round)
+    args = SimpleNamespace(
+        input_path=input_path,
+        proofs_path=proofs_path,
+        model_path=tmp_path / "model",
+        base_url=["http://127.0.0.1:8000/v1"],
+        output_dir=output_dir,
+        problem_id=[],
+        served_model_name="proof-model",
+        api_key="test",
+        verify_n=1,
+        meta_n=0,
+        meta_policy="all-reviews",
+        max_concurrent_problems=2,
+        max_concurrent_requests=2,
+        verifier_max_tokens=128,
+        meta_max_tokens=128,
+        temperature=1.0,
+        top_p=0.95,
+        request_timeout_seconds=60.0,
+        max_attempts=2,
+    )
+
+    payload = asyncio.run(replay.replay(args))
+
+    assert payload["schema_version"] == 2
+    assert [item["problem_id"] for item in payload["results"]] == ["1"]
+    assert payload["errors"][0]["problem_id"] == "2"
+    assert payload["errors"][0]["error_type"] == "incomplete_verifier_scores"
+    assert len(payload["errors"][0]["failed_attempts"]) == 2
+    assert json.loads(
+        (output_dir / "cases" / "problem-1.json").read_text(encoding="utf-8")
+    )["status"] == "ok"
+    assert json.loads(
+        (output_dir / "cases" / "problem-2.json").read_text(encoding="utf-8")
+    )["status"] == "error"
+
+    report = replay.render_report(payload)
+    assert "## Incomplete cases" in report
+    assert "| 2 | - | - | incomplete_verifier_scores | 2 |" in report

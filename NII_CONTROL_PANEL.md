@@ -233,9 +233,11 @@ upper bounds. Set `AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING` or
 deployment needs to reserve capacity for initial proof generation; `0` keeps
 the corresponding throttle disabled.
 
-Each candidate runs eight verifier calls by default: two independent samples
-for each of the four audit roles. Refinement receives up to four validated
-critiques. Override these counts with `AIMO_VERIFY_N` and
+Each candidate runs eight verifier calls by default, one for each independent
+dependency-chain, lemma-assumption, counterexample/boundary,
+invariance/relabeling, quantifier/strategy, algebra/computation,
+statement-coverage, and construction/optimality role. Refinement receives up
+to four validated critiques. Override these counts with `AIMO_VERIFY_N` and
 `AIMO_REFINE_REVIEW_N`.
 
 Set one shared run ID, then start the script in the background on both nodes:
