@@ -90,7 +90,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--served-model-name", default="proof-model")
     parser.add_argument("--api-key", default="vllm-local")
     parser.add_argument("--verify-n", type=int, default=CFG.verify_n)
+    parser.add_argument(
+        "--verifier-generalist-n",
+        type=int,
+        default=CFG.verifier_generalist_n,
+    )
     parser.add_argument("--meta-n", type=int, default=1)
+    parser.add_argument("--min-valid-low", type=int, default=CFG.min_valid_low)
     parser.add_argument(
         "--meta-policy", choices=("all-reviews", "low-only"), default="all-reviews"
     )
@@ -257,14 +263,25 @@ def load_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def replay_config(args: argparse.Namespace) -> SimpleNamespace:
+    verify_n = max(1, int(args.verify_n))
+    verifier_generalist_n = int(
+        getattr(
+            args,
+            "verifier_generalist_n",
+            min(int(CFG.verifier_generalist_n), verify_n),
+        )
+    )
+    if not 0 <= verifier_generalist_n <= verify_n:
+        raise ValueError("verifier_generalist_n must be between 0 and verify_n")
     return SimpleNamespace(
-        verify_n=max(1, int(args.verify_n)),
+        verify_n=verify_n,
+        verifier_generalist_n=verifier_generalist_n,
         meta_n=max(0, int(args.meta_n)),
         meta_policy=str(args.meta_policy),
         strict_pass_meta=bool(args.meta_n > 0),
         refine_rounds=0,
         refine_review_n=int(CFG.refine_review_n),
-        min_valid_low=1,
+        min_valid_low=max(1, int(getattr(args, "min_valid_low", CFG.min_valid_low))),
         verification_early_stop=False,
         thinking_budget_enabled=True,
         verifier_thinking_budget_tokens=min(
@@ -420,8 +437,10 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 2,
         "settings": {
             "verify_n": cfg.verify_n,
+            "verifier_generalist_n": cfg.verifier_generalist_n,
             "meta_n": cfg.meta_n,
             "meta_policy": cfg.meta_policy,
+            "min_valid_low": cfg.min_valid_low,
             "verifier_max_tokens": args.verifier_max_tokens,
             "meta_max_tokens": args.meta_max_tokens,
             "temperature": args.temperature,

@@ -366,12 +366,15 @@ class CFG:
         os.environ.get("AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING", "0")
     )
     verify_n = int(os.environ.get("AIMO_VERIFY_N", "8"))
+    verifier_generalist_n = int(
+        os.environ.get("AIMO_VERIFIER_GENERALIST_N", str(verify_n // 2))
+    )
     meta_n = 1
     meta_policy = "all-reviews"  # low-only, all-reviews
     strict_pass_meta = True
     refine_rounds = int(os.environ.get("AIMO_REFINE_ROUNDS", "1"))
     refine_review_n = int(os.environ.get("AIMO_REFINE_REVIEW_N", "4"))
-    min_valid_low = 1
+    min_valid_low = int(os.environ.get("AIMO_MIN_VALID_LOW", "2"))
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
     selection_reserve_seconds = DEFAULT_SELECTION_RESERVE_SECONDS
     selection_temperature = 1.0
@@ -576,6 +579,7 @@ class PipelineConfig:
     verify_candidate_limit_while_generating: int
     verify_request_limit_while_generating: int
     verify_n: int
+    verifier_generalist_n: int
     meta_n: int
     meta_policy: str
     strict_pass_meta: bool
@@ -1412,8 +1416,54 @@ VERIFIER_AUDIT_ROLES: tuple[tuple[str, str], ...] = (
 )
 
 
+HYBRID_VERIFIER_AUDIT_ROLES: tuple[tuple[str, str], ...] = (
+    (
+        "dependency_lemma",
+        "Reconstruct the proof's dependency chain and audit every named or "
+        "implicit lemma, auxiliary construction, existence claim, and uniqueness "
+        "claim at the point where it is used. Check all hypotheses, domains, and "
+        "nondegeneracy conditions; reject circular reasoning or an unsupported "
+        "familiar-looking result.",
+    ),
+    (
+        "counterexample_invariance",
+        "Actively try to falsify the proof with concrete examples, boundary cases, "
+        "and degenerate configurations. Audit every WLOG, symmetry, relabeling, "
+        "permutation, normalization, and invariance claim, including whether it "
+        "preserves order, adjacency, incidence, orientation, and metric structure.",
+    ),
+    (
+        "quantifier_algebra",
+        "Audit every quantifier, index range, choice, strategy, and case split, then "
+        "independently recompute the decisive algebra, inequalities, divisibility, "
+        "parity, counting, and extremal estimates. Check arbitrary legal play in "
+        "adversarial arguments and reject unchecked numerical evidence.",
+    ),
+    (
+        "coverage_construction",
+        "Map the proof to every clause and both directions of the problem. Audit "
+        "each construction for existence, distinctness, integrality, range, "
+        "incidence, and edge cases, and separately verify that the impossibility "
+        "or optimality argument excludes every remaining case.",
+    ),
+)
+
+
 def verifier_audit_role(verifier_index: int) -> tuple[str, str]:
     return VERIFIER_AUDIT_ROLES[verifier_index % len(VERIFIER_AUDIT_ROLES)]
+
+
+def hybrid_verifier_assignment(
+    verifier_index: int,
+    generalist_n: int,
+) -> tuple[str, str, Optional[tuple[str, str]]]:
+    if verifier_index < generalist_n:
+        return "generalist", "generalist", None
+    specialist_index = verifier_index - generalist_n
+    audit_role = HYBRID_VERIFIER_AUDIT_ROLES[
+        specialist_index % len(HYBRID_VERIFIER_AUDIT_ROLES)
+    ]
+    return audit_role[0], "specialist", audit_role
 
 
 def format_prior_verifier_critiques(
@@ -1448,17 +1498,27 @@ def format_prior_verifier_critiques(
 
 
 def verifier_audit_instructions(
-    verifier_index: int,
+    verifier_index: Optional[int] = None,
     prior_critiques: Optional[list[dict[str, Any]]] = None,
+    audit_role: Optional[tuple[str, str]] = None,
 ) -> tuple[str, str]:
-    role_name, role_instructions = verifier_audit_role(verifier_index)
-    sections = [
-        f"Mandatory independent audit role: {role_name}.\n{role_instructions}",
-        "Do not infer correctness from polished prose, the candidate's self-score, "
-        "or agreement with another verifier. Before assigning score 1, identify "
-        "the proof's weakest essential claim and report the concrete checks used "
-        "to validate it.",
-    ]
+    if audit_role is not None:
+        role_name, role_instructions = audit_role
+    elif verifier_index is not None:
+        role_name, role_instructions = verifier_audit_role(verifier_index)
+    else:
+        role_name, role_instructions = "generalist", ""
+    sections = []
+    if role_instructions:
+        sections.extend(
+            [
+                f"Mandatory independent audit role: {role_name}.\n{role_instructions}",
+                "Do not infer correctness from polished prose, the candidate's "
+                "self-score, or agreement with another verifier. Before assigning "
+                "score 1, identify the proof's weakest essential claim and report "
+                "the concrete checks used to validate it.",
+            ]
+        )
     prior_text = format_prior_verifier_critiques(prior_critiques)
     if prior_text:
         sections.append(prior_text)
@@ -1472,6 +1532,7 @@ def build_opd_proof_verification_prompt(
     *,
     verifier_index: Optional[int] = None,
     prior_critiques: Optional[list[dict[str, Any]]] = None,
+    audit_role: Optional[tuple[str, str]] = None,
 ) -> list[dict[str, str]]:
     messages = _opd_messages(
         "verifier.txt",
@@ -1479,12 +1540,14 @@ def build_opd_proof_verification_prompt(
         candidate_solution=proof,
         candidate_self_eval=self_evaluation,
     )
-    if verifier_index is not None:
+    if verifier_index is not None or audit_role is not None or prior_critiques:
         _, instructions = verifier_audit_instructions(
             verifier_index,
             prior_critiques,
+            audit_role,
         )
-        messages[-1]["content"] += f"\n\n{instructions}"
+        if instructions:
+            messages[-1]["content"] += f"\n\n{instructions}"
     return messages
 
 
@@ -1494,6 +1557,7 @@ def build_deepseek_proof_verification_prompt(
     *,
     verifier_index: Optional[int] = None,
     prior_critiques: Optional[list[dict[str, Any]]] = None,
+    audit_role: Optional[tuple[str, str]] = None,
 ) -> str:
     prompt = f"""## Instruction
 
@@ -1522,12 +1586,14 @@ Here is your task input:
 
 ## Solution
 {proof}"""
-    if verifier_index is not None:
+    if verifier_index is not None or audit_role is not None or prior_critiques:
         _, instructions = verifier_audit_instructions(
             verifier_index,
             prior_critiques,
+            audit_role,
         )
-        prompt += f"\n\n## Mandatory independent audit\n{instructions}"
+        if instructions:
+            prompt += f"\n\n## Additional verifier instructions\n{instructions}"
     return prompt
 
 
@@ -2505,6 +2571,7 @@ def build_verifier_score_summaries(
             {
                 "verifier_index": verifier_index,
                 "verifier_role": verifier.get("verifier_role"),
+                "verifier_group": verifier.get("verifier_group"),
                 "verifier_score": verifier_score,
                 "meta_scores": meta_scores,
                 "meta_factor": meta_factor,
@@ -2544,6 +2611,7 @@ def aggregate_proof_label(
         critique = {
             "verifier_index": verifier_index,
             "verifier_role": verifier.get("verifier_role"),
+            "verifier_group": verifier.get("verifier_group"),
             "score": score,
             "evaluation": verifier.get("evaluation", ""),
             "review": verifier.get("review", verifier.get("evaluation", "")),
@@ -2565,19 +2633,40 @@ def aggregate_proof_label(
         require_meta=strict_pass_meta,
     )
     weighted_scores = [summary["weighted_score"] for summary in score_summaries]
-    final_score = (
-        sum(weighted_scores) / len(weighted_scores) if weighted_scores else None
-    )
+    verifier_group_scores: dict[str, float] = {}
+    for verifier_group in ("generalist", "specialist"):
+        group_scores = [
+            summary["weighted_score"]
+            for summary in score_summaries
+            if summary.get("verifier_group") == verifier_group
+        ]
+        if group_scores:
+            verifier_group_scores[verifier_group] = sum(group_scores) / len(
+                group_scores
+            )
+    if set(verifier_group_scores) == {"generalist", "specialist"}:
+        final_score = sum(verifier_group_scores.values()) / 2
+        aggregation_mode = "balanced_verifier_groups"
+    else:
+        final_score = (
+            sum(weighted_scores) / len(weighted_scores) if weighted_scores else None
+        )
+        aggregation_mode = "flat_verifier_mean"
     validated_fatal_critiques = [
         critique
         for critique in validated_critiques
         if coerce_score(critique.get("score")) == 0.0
     ]
+    required_validated_critiques = max(1, int(min_valid_low))
+    validated_critique_quorum = (
+        len(validated_critiques) >= required_validated_critiques
+    )
     validated_low_score_cap_applied = bool(
-        validated_critiques and final_score is not None and final_score > 0.5
+        validated_critique_quorum and final_score is not None and final_score > 0.5
     )
     fatal_score_cap_applied = bool(
-        validated_fatal_critiques
+        validated_critique_quorum
+        and validated_fatal_critiques
         and final_score is not None
         and final_score > 0.5
     )
@@ -2585,7 +2674,7 @@ def aggregate_proof_label(
         final_score = 0.5
     if final_score is None:
         final_status = "needs_review"
-    elif len(validated_critiques) >= min_valid_low and final_score <= 0.5:
+    elif validated_critique_quorum and final_score <= 0.5:
         final_status = "validated_low_score"
     elif final_score > 0.5:
         if strict_pass["strict_pass"]:
@@ -2606,6 +2695,10 @@ def aggregate_proof_label(
         "validated_fatal_critiques": validated_fatal_critiques,
         "validated_low_score_cap_applied": validated_low_score_cap_applied,
         "fatal_score_cap_applied": fatal_score_cap_applied,
+        "validated_critique_quorum": validated_critique_quorum,
+        "required_validated_critiques": required_validated_critiques,
+        "aggregation_mode": aggregation_mode,
+        "verifier_group_scores": verifier_group_scores,
         "verifier_score_summaries": score_summaries,
         "low_scores_seen": low_scores_seen,
         **strict_pass,
@@ -4871,6 +4964,7 @@ async def run_verification_round(
     def finalize_verifier(
         verifier_index: int,
         verifier_role: str,
+        verifier_group: str,
         response: dict[str, Any],
         parsed: dict[str, Any],
         output: dict[str, Any],
@@ -4878,6 +4972,7 @@ async def run_verification_round(
         verifier_result = {
             "verifier_index": verifier_index,
             "verifier_role": verifier_role,
+            "verifier_group": verifier_group,
             "success": response.get("success", False),
             "error": response.get("error"),
             **parsed,
@@ -4938,25 +5033,36 @@ async def run_verification_round(
     else:
         raise ValueError(f"unsupported prompt family: {prompt_family!r}")
 
+    verifier_generalist_n = getattr(cfg, "verifier_generalist_n", None)
     for verifier_idx in range(cfg.verify_n):
-        verifier_role, _ = verifier_audit_instructions(
-            verifier_idx,
-            prior_critiques,
-        )
+        if verifier_generalist_n is None:
+            audit_role = verifier_audit_role(verifier_idx)
+            verifier_role, verifier_group = audit_role[0], "specialist"
+        else:
+            verifier_role, verifier_group, audit_role = hybrid_verifier_assignment(
+                verifier_idx,
+                int(verifier_generalist_n),
+            )
         if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2:
             prompt = build_deepseek_proof_verification_prompt(
                 question,
                 proof,
-                verifier_index=verifier_idx,
+                verifier_index=(
+                    None if verifier_group == "generalist" else verifier_idx
+                ),
                 prior_critiques=prior_critiques,
+                audit_role=audit_role,
             )
         else:
             prompt = build_opd_proof_verification_prompt(
                 question,
                 proof,
                 self_evaluation,
-                verifier_index=verifier_idx,
+                verifier_index=(
+                    None if verifier_group == "generalist" else verifier_idx
+                ),
                 prior_critiques=prior_critiques,
+                audit_role=audit_role,
             )
         add_task(
             verification_call(
@@ -4965,7 +5071,8 @@ async def run_verification_round(
                 progress=progress,
                 detail=(
                     f"candidate={attempt_idx} round={round_idx} "
-                    f"verifier={verifier_idx} role={verifier_role} "
+                    f"verifier={verifier_idx} group={verifier_group} "
+                    f"role={verifier_role} "
                     f"prompt_family={prompt_family}"
                 ),
                 thinking_budget_tokens=(
@@ -4979,6 +5086,7 @@ async def run_verification_round(
                 "kind": "verifier",
                 "verifier_index": verifier_idx,
                 "verifier_role": verifier_role,
+                "verifier_group": verifier_group,
             },
         )
 
@@ -5013,6 +5121,7 @@ async def run_verification_round(
                 if kind == "verifier":
                     verifier_index = int(info["verifier_index"])
                     verifier_role = str(info["verifier_role"])
+                    verifier_group = str(info["verifier_group"])
                     log_verifier_tail_output(
                         "proof_verify",
                         response.get("text", ""),
@@ -5028,11 +5137,13 @@ async def run_verification_round(
                         round_idx=round_idx,
                         verifier_index=verifier_index,
                         verifier_role=verifier_role,
+                        verifier_group=verifier_group,
                         prompt_family=prompt_family,
                     )
                     finalize_verifier(
                         verifier_index,
                         verifier_role,
+                        verifier_group,
                         response,
                         parsed,
                         output,
@@ -6502,6 +6613,7 @@ class ProofRuntime:
         verify_candidate_limit_while_generating: int,
         verify_request_limit_while_generating: int,
         verify_n: int,
+        verifier_generalist_n: int,
         meta_n: int,
         meta_policy: str,
         strict_pass_meta: bool,
@@ -6661,6 +6773,13 @@ class ProofRuntime:
                 "thinking_budget_restart_strategy must be one of "
                 + ", ".join(RESTART_STRATEGIES)
             )
+        normalized_verify_n = max(0, int(verify_n))
+        normalized_verifier_generalist_n = int(verifier_generalist_n)
+        if not 0 <= normalized_verifier_generalist_n <= normalized_verify_n:
+            raise ValueError(
+                "verifier_generalist_n must be between 0 and verify_n "
+                f"({normalized_verify_n}), got {normalized_verifier_generalist_n}"
+            )
         self.pipeline_config = PipelineConfig(
             proof_max_new_tokens=proof_max_new_tokens,
             default_temperature=float(temperature),
@@ -6752,7 +6871,8 @@ class ProofRuntime:
                 0,
                 int(verify_request_limit_while_generating),
             ),
-            verify_n=max(0, verify_n),
+            verify_n=normalized_verify_n,
+            verifier_generalist_n=normalized_verifier_generalist_n,
             meta_n=max(0, meta_n),
             meta_policy=normalized_meta_policy,
             strict_pass_meta=strict_pass_meta,
@@ -6820,10 +6940,16 @@ class ProofRuntime:
             len(assigned_attempts),
         )
         progress.log(
-            "status=start candidates=%d verify_n=%d meta_n=%d refine_rounds=%d "
+            "status=start candidates=%d verify_n=%d generalists=%d specialists=%d "
+            "meta_n=%d refine_rounds=%d "
             "stop_on_strict_pass=%s question_chars=%d rank=%d/%d assigned=%s",
             self.pipelines_per_problem,
             self.pipeline_config.verify_n,
+            self.pipeline_config.verifier_generalist_n,
+            (
+                self.pipeline_config.verify_n
+                - self.pipeline_config.verifier_generalist_n
+            ),
             self.pipeline_config.meta_n,
             self.pipeline_config.refine_rounds,
             self.pipeline_config.stop_on_strict_pass,
@@ -7315,9 +7441,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=int,
     )
     pipeline.add_argument("--verify-n", type=int)
+    pipeline.add_argument("--verifier-generalist-n", type=int)
     pipeline.add_argument("--meta-n", type=int)
     pipeline.add_argument("--refine-rounds", type=int)
     pipeline.add_argument("--refine-review-n", type=int)
+    pipeline.add_argument("--min-valid-low", type=int)
     pipeline.add_argument(
         "--thinking-budget-handoff-enabled",
         action=argparse.BooleanOptionalAction,
@@ -7429,9 +7557,11 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
             "verify_request_limit_while_generating"
         ),
         "verify_n": "verify_n",
+        "verifier_generalist_n": "verifier_generalist_n",
         "meta_n": "meta_n",
         "refine_rounds": "refine_rounds",
         "refine_review_n": "refine_review_n",
+        "min_valid_low": "min_valid_low",
         "thinking_budget_handoff_enabled": "thinking_budget_handoff_enabled",
         "thinking_budget_handoff_preserve_refine_rounds": (
             "thinking_budget_handoff_preserve_refine_rounds"
@@ -7551,6 +7681,12 @@ def run(cfg: type[CFG] = CFG) -> None:
         raise ValueError("AIMO_PIPELINES_PER_PROBLEM must be at least 1")
     if int(cfg.refine_rounds) < 0:
         raise ValueError("AIMO_REFINE_ROUNDS cannot be negative")
+    if not 0 <= int(cfg.verifier_generalist_n) <= int(cfg.verify_n):
+        raise ValueError(
+            "AIMO_VERIFIER_GENERALIST_N must be between 0 and AIMO_VERIFY_N"
+        )
+    if int(cfg.min_valid_low) < 1:
+        raise ValueError("AIMO_MIN_VALID_LOW must be at least 1")
     if int(cfg.thinking_budget_handoff_max_tokens) < 1:
         raise ValueError(
             "AIMO_THINKING_BUDGET_HANDOFF_MAX_TOKENS must be positive"
@@ -7662,11 +7798,13 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.verify_request_limit_while_generating
             ),
             "verify_n": int(cfg.verify_n),
+            "verifier_generalist_n": int(cfg.verifier_generalist_n),
             "meta_n": int(cfg.meta_n),
             "meta_policy": str(cfg.meta_policy),
             "strict_pass_meta": bool(cfg.strict_pass_meta),
             "refine_rounds": int(cfg.refine_rounds),
             "refine_review_n": int(cfg.refine_review_n),
+            "min_valid_low": int(cfg.min_valid_low),
             "selector_mode": str(cfg.selector_mode),
             "temperature": float(cfg.temperature),
             "top_p": float(cfg.top_p),
@@ -7816,6 +7954,7 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.verify_request_limit_while_generating
             ),
             verify_n=cfg.verify_n,
+            verifier_generalist_n=cfg.verifier_generalist_n,
             meta_n=cfg.meta_n,
             meta_policy=cfg.meta_policy,
             strict_pass_meta=cfg.strict_pass_meta,

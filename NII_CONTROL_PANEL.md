@@ -233,12 +233,15 @@ upper bounds. Set `AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING` or
 deployment needs to reserve capacity for initial proof generation; `0` keeps
 the corresponding throttle disabled.
 
-Each candidate runs eight verifier calls by default, one for each independent
-dependency-chain, lemma-assumption, counterexample/boundary,
-invariance/relabeling, quantifier/strategy, algebra/computation,
-statement-coverage, and construction/optimality role. Refinement receives up
-to four validated critiques. Override these counts with `AIMO_VERIFY_N` and
-`AIMO_REFINE_REVIEW_N`.
+Each candidate runs eight verifier calls by default. Four use the original
+general verifier prompt, while four use composite specialist audits covering
+dependency/lemmas, counterexamples/invariance, quantifiers/algebra, and
+coverage/construction. The final score gives the generalist and specialist
+group means equal weight. Refinement receives up to four validated critiques,
+and at least two meta-validated low critiques are required before the hard 0.5
+score cap is applied. Override these settings with `AIMO_VERIFY_N`,
+`AIMO_VERIFIER_GENERALIST_N`, `AIMO_REFINE_REVIEW_N`, and
+`AIMO_MIN_VALID_LOW`.
 
 Set one shared run ID, then start the script in the background on both nodes:
 

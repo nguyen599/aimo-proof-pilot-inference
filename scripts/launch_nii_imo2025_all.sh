@@ -23,7 +23,9 @@ REQUESTS_PER_GPU="${AIMO_REQUESTS_PER_GPU:-32}"
 VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_REQUEST_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_N="${AIMO_VERIFY_N:-8}"
+VERIFIER_GENERALIST_N="${AIMO_VERIFIER_GENERALIST_N:-4}"
 REFINE_REVIEW_N="${AIMO_REFINE_REVIEW_N:-4}"
+MIN_VALID_LOW="${AIMO_MIN_VALID_LOW:-2}"
 
 for value_name in \
     TP_SIZE \
@@ -31,7 +33,8 @@ for value_name in \
     MAX_NUM_SEQS_PER_DP \
     REQUESTS_PER_GPU \
     VERIFY_N \
-    REFINE_REVIEW_N
+    REFINE_REVIEW_N \
+    MIN_VALID_LOW
 do
     value="${!value_name}"
     if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
@@ -41,7 +44,8 @@ do
 done
 for value_name in \
     VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING \
-    VERIFY_REQUEST_LIMIT_WHILE_GENERATING
+    VERIFY_REQUEST_LIMIT_WHILE_GENERATING \
+    VERIFIER_GENERALIST_N
 do
     value="${!value_name}"
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -55,6 +59,10 @@ if [ $((TP_SIZE * DP_SIZE)) -ne 8 ]; then
 fi
 if [ "$REFINE_REVIEW_N" -gt "$VERIFY_N" ]; then
     echo "REFINE_REVIEW_N cannot exceed VERIFY_N" >&2
+    exit 2
+fi
+if [ "$VERIFIER_GENERALIST_N" -gt "$VERIFY_N" ]; then
+    echo "VERIFIER_GENERALIST_N cannot exceed VERIFY_N" >&2
     exit 2
 fi
 
@@ -264,7 +272,9 @@ args=(
     --verify-candidate-limit-while-generating "$VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING"
     --verify-request-limit-while-generating "$VERIFY_REQUEST_LIMIT_WHILE_GENERATING"
     --verify-n "$VERIFY_N"
+    --verifier-generalist-n "$VERIFIER_GENERALIST_N"
     --refine-review-n "$REFINE_REVIEW_N"
+    --min-valid-low "$MIN_VALID_LOW"
     --refine-rounds 4
     --thinking-budget-handoff-enabled
     --thinking-budget-handoff-mode lossless_partial
@@ -283,7 +293,7 @@ echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
 echo "vllm_capacity=tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((8 * REQUESTS_PER_GPU))"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
-echo "verification_per_candidate=verify_n:${VERIFY_N} refine_review_n:${REFINE_REVIEW_N}"
+echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"
 echo "command_file=$rank_command"
 cd "$AIMO_CODE_DIR"
 "${args[@]}"

@@ -261,6 +261,7 @@ class DistributedRuntimeTests(unittest.TestCase):
                 run.CFG.pipelines_per_problem = 4
                 run.CFG.deepseek_math_v2_candidate_count = 0
                 run.CFG.verify_n = 1
+                run.CFG.verifier_generalist_n = 0
                 run.CFG.meta_n = 0
                 run.CFG.refine_rounds = 0
                 run.CFG.selector_mode = 'score'
@@ -357,6 +358,7 @@ class DistributedRuntimeTests(unittest.TestCase):
                 run.CFG.pipelines_per_problem = 4
                 run.CFG.deepseek_math_v2_candidate_count = 0
                 run.CFG.verify_n = 1
+                run.CFG.verifier_generalist_n = 0
                 run.CFG.meta_n = 0
                 run.CFG.refine_rounds = 0
                 run.CFG.selector_mode = 'score'

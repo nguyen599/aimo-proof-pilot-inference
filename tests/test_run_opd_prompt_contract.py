@@ -325,13 +325,15 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(run.CFG.verify_candidate_limit_while_generating, 0)
         self.assertEqual(run.CFG.verify_request_limit_while_generating, 0)
         self.assertEqual(run.CFG.verify_n, 8)
+        self.assertEqual(run.CFG.verifier_generalist_n, 4)
         self.assertEqual(run.CFG.meta_n, 1)
         self.assertEqual(run.CFG.meta_policy, "all-reviews")
         self.assertEqual(run.CFG.refine_rounds, 1)
         self.assertEqual(run.CFG.refine_review_n, 4)
+        self.assertEqual(run.CFG.min_valid_low, 2)
         self.assertEqual(
-            run.CFG.verify_n,
-            len(run.VERIFIER_AUDIT_ROLES),
+            run.CFG.verify_n - run.CFG.verifier_generalist_n,
+            len(run.HYBRID_VERIFIER_AUDIT_ROLES),
         )
         self.assertLess(run.CFG.refine_review_n, run.CFG.verify_n)
         self.assertGreaterEqual(run.CFG.problem_timeout_seconds, 86_400)
@@ -352,6 +354,40 @@ class RunOpdPromptContractTests(unittest.TestCase):
         for role_name, _ in run.VERIFIER_AUDIT_ROLES:
             self.assertTrue(
                 any(f"audit role: {role_name}" in prompt for prompt in user_prompts)
+            )
+
+    def test_hybrid_verifiers_keep_original_prompt_and_add_four_specialists(self):
+        original_prompt = run.build_opd_proof_verification_prompt(
+            "Problem.",
+            "Candidate proof.",
+            "Candidate self-review.",
+        )[-1]["content"]
+        assignments = [
+            run.hybrid_verifier_assignment(
+                index,
+                run.CFG.verifier_generalist_n,
+            )
+            for index in range(run.CFG.verify_n)
+        ]
+        prompts = []
+        for index, (_, group, audit_role) in enumerate(assignments):
+            prompts.append(
+                run.build_opd_proof_verification_prompt(
+                    "Problem.",
+                    "Candidate proof.",
+                    "Candidate self-review.",
+                    verifier_index=None if group == "generalist" else index,
+                    audit_role=audit_role,
+                )[-1]["content"]
+            )
+
+        self.assertEqual([group for _, group, _ in assignments].count("generalist"), 4)
+        self.assertEqual([group for _, group, _ in assignments].count("specialist"), 4)
+        self.assertTrue(all(prompt == original_prompt for prompt in prompts[:4]))
+        self.assertEqual(len(set(prompts[4:])), 4)
+        for role_name, _ in run.HYBRID_VERIFIER_AUDIT_ROLES:
+            self.assertTrue(
+                any(f"audit role: {role_name}" in prompt for prompt in prompts[4:])
             )
 
     def test_verifier_reaudits_prior_validated_critiques(self):
@@ -431,6 +467,81 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertTrue(result["validated_low_score_cap_applied"])
         self.assertFalse(result["fatal_score_cap_applied"])
         self.assertEqual(result["final_status"], "validated_low_score")
+
+    def test_hybrid_aggregate_balances_generalist_and_specialist_groups(self):
+        verifier_results = [
+            {
+                "verifier_index": index,
+                "verifier_role": "generalist",
+                "verifier_group": "generalist",
+                "score": 1.0,
+                "evaluation": "passes",
+            }
+            for index in range(3)
+        ]
+        verifier_results.append(
+            {
+                "verifier_index": 3,
+                "verifier_role": "dependency_lemma",
+                "verifier_group": "specialist",
+                "score": 0.5,
+                "evaluation": "minor gap",
+            }
+        )
+
+        result = run.aggregate_proof_label(
+            verifier_results,
+            {},
+            min_valid_low=2,
+            meta_n=0,
+        )
+
+        self.assertEqual(result["aggregation_mode"], "balanced_verifier_groups")
+        self.assertEqual(
+            result["verifier_group_scores"],
+            {"generalist": 1.0, "specialist": 0.5},
+        )
+        self.assertEqual(result["final_score"], 0.75)
+        self.assertFalse(result["validated_low_score_cap_applied"])
+
+    def test_hard_score_cap_requires_two_validated_critiques(self):
+        def aggregate(specialist_scores):
+            scores = [1.0] * 4 + specialist_scores
+            verifier_results = [
+                {
+                    "verifier_index": index,
+                    "verifier_role": (
+                        "generalist" if index < 4 else f"specialist_{index}"
+                    ),
+                    "verifier_group": (
+                        "generalist" if index < 4 else "specialist"
+                    ),
+                    "score": score,
+                    "evaluation": "gap" if score < 1.0 else "passes",
+                }
+                for index, score in enumerate(scores)
+            ]
+            meta_results = {
+                index: [{"score": 1.0}]
+                for index, _ in enumerate(scores)
+            }
+            return run.aggregate_proof_label(
+                verifier_results,
+                meta_results,
+                min_valid_low=2,
+                strict_pass_meta=True,
+                meta_n=1,
+            )
+
+        one_critique = aggregate([1.0, 1.0, 1.0, 0.0])
+        two_critiques = aggregate([1.0, 1.0, 0.0, 0.0])
+
+        self.assertGreater(one_critique["final_score"], 0.5)
+        self.assertFalse(one_critique["validated_critique_quorum"])
+        self.assertFalse(one_critique["validated_low_score_cap_applied"])
+        self.assertEqual(two_critiques["final_score"], 0.5)
+        self.assertTrue(two_critiques["validated_critique_quorum"])
+        self.assertTrue(two_critiques["validated_low_score_cap_applied"])
 
     def test_prover_uses_trained_system_user_prompt(self):
         messages = run.build_opd_proof_generation_prompt("Prove the claim.")
