@@ -145,9 +145,7 @@ def test_report_includes_role_scores_and_fatal_cap():
 
     report = replay.render_report(payload)
 
-    assert (
-        "| 6 | 1.0 | 0.5 | validated_low_score | True | True |" in report
-    )
+    assert "| 6 | - | - | - | 1.0 | 0.5 | validated_low_score | True | True |" in report
     assert "counterexample=0.0" in report
 
 
