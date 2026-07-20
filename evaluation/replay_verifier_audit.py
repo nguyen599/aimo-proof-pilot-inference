@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,44 +18,78 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    from evaluation.analyze_pipeline_run import parse_headers, split_output
     from evaluation.harness_vllm.run import (
         CFG,
+        PROMPT_FAMILY_DEEPSEEK_MATH_V2,
         PROMPT_FAMILY_OPD,
         ChatScheduler,
         PipelineProgress,
         SamplingConfig,
         detect_id_column,
         detect_question_column,
+        parse_deepseek_generation_response,
+        parse_generation_response,
         read_input_table,
         run_verification_round,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "evaluation":
         raise
+    from analyze_pipeline_run import (  # type: ignore[no-redef]
+        parse_headers,
+        split_output,
+    )
     from harness_vllm.run import (  # type: ignore[no-redef]
         CFG,
+        PROMPT_FAMILY_DEEPSEEK_MATH_V2,
         PROMPT_FAMILY_OPD,
         ChatScheduler,
         PipelineProgress,
         SamplingConfig,
         detect_id_column,
         detect_question_column,
+        parse_deepseek_generation_response,
+        parse_generation_response,
         read_input_table,
         run_verification_round,
     )
 
 
+DETAIL_INDEX_PATTERN = re.compile(r"\b(candidate|round)=(\d+)")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-path", type=Path, required=True)
-    parser.add_argument("--proofs-path", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--proofs-path", type=Path)
+    source.add_argument(
+        "--llm-calls-dir",
+        type=Path,
+        help="Recursively replay completed proof_generation call logs.",
+    )
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--base-url", action="append", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--problem-id", action="append", default=[])
+    parser.add_argument("--candidate-id", action="append", type=int, default=[])
+    parser.add_argument("--round-index", action="append", type=int, default=[])
+    parser.add_argument(
+        "--proof-prompt-family",
+        choices=("all", PROMPT_FAMILY_OPD, PROMPT_FAMILY_DEEPSEEK_MATH_V2),
+        default=PROMPT_FAMILY_OPD,
+        help="Filter raw proof calls; OPD is the current generation default.",
+    )
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=0,
+        help="Stop after this many parsed cases; zero keeps every matching call.",
+    )
     parser.add_argument("--served-model-name", default="proof-model")
     parser.add_argument("--api-key", default="vllm-local")
-    parser.add_argument("--verify-n", type=int, default=4)
+    parser.add_argument("--verify-n", type=int, default=CFG.verify_n)
     parser.add_argument("--meta-n", type=int, default=1)
     parser.add_argument(
         "--meta-policy", choices=("all-reviews", "low-only"), default="all-reviews"
@@ -94,25 +129,110 @@ def load_cases(args: argparse.Namespace) -> list[dict[str, Any]]:
         for index, row in frame.iterrows()
     }
     requested = {str(value) for value in args.problem_id}
+    proofs_path = getattr(args, "proofs_path", None)
+    llm_calls_dir = getattr(args, "llm_calls_dir", None)
+    if bool(proofs_path) == bool(llm_calls_dir):
+        raise ValueError("set exactly one of proofs_path or llm_calls_dir")
+
     cases = []
-    for record in read_jsonl(args.proofs_path):
-        problem_id = str(record.get("problem_id"))
-        if requested and problem_id not in requested:
-            continue
-        if problem_id not in questions:
-            raise KeyError(f"no problem text for proof id {problem_id!r}")
-        proof = str(record.get("final_proof") or "").strip()
-        if not proof:
-            raise ValueError(f"empty selected proof for problem {problem_id}")
-        cases.append(
-            {
-                "problem_id": problem_id,
-                "question": questions[problem_id],
-                "proof": proof,
-                "old_internal_score": record.get("final_score"),
-                "old_internal_status": record.get("final_status"),
-            }
+    if llm_calls_dir is not None:
+        candidate_ids = set(getattr(args, "candidate_id", []) or [])
+        round_indices = set(getattr(args, "round_index", []) or [])
+        prompt_family_filter = str(
+            getattr(args, "proof_prompt_family", PROMPT_FAMILY_OPD)
         )
+        for path in sorted(Path(llm_calls_dir).rglob("*proof_gen*.txt")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            headers = parse_headers(text)
+            if headers.get("stage") != "proof_generation":
+                continue
+            detail = headers.get("detail", "")
+            indices = {
+                key: int(value) for key, value in DETAIL_INDEX_PATTERN.findall(detail)
+            }
+            candidate_id = indices.get("candidate")
+            round_index = indices.get("round")
+            if candidate_id is None or round_index is None:
+                continue
+            if candidate_ids and candidate_id not in candidate_ids:
+                continue
+            if round_indices and round_index not in round_indices:
+                continue
+            prompt_family_match = re.search(r"\bprompt_family=([^ ]+)", detail)
+            prompt_family = (
+                prompt_family_match.group(1)
+                if prompt_family_match is not None
+                else PROMPT_FAMILY_OPD
+            )
+            if (
+                prompt_family_filter != "all"
+                and prompt_family != prompt_family_filter
+            ):
+                continue
+            problem_id = str(path.parent.name)
+            if requested and problem_id not in requested:
+                continue
+            if problem_id not in questions:
+                raise KeyError(f"no problem text for proof id {problem_id!r}")
+            metadata, output = split_output(text)
+            if not metadata.get("success") or not output:
+                continue
+            parser = (
+                parse_deepseek_generation_response
+                if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2
+                else parse_generation_response
+            )
+            parsed = parser(output, require_self_evaluation=True)
+            if not parsed.get("is_valid_candidate_response"):
+                continue
+            cases.append(
+                {
+                    "problem_id": problem_id,
+                    "question": questions[problem_id],
+                    "proof": parsed["proof"],
+                    "self_evaluation": parsed.get("self_evaluation", ""),
+                    "prompt_family": prompt_family,
+                    "source_candidate_id": candidate_id,
+                    "source_round_index": round_index,
+                    "source_path": str(path),
+                    "source_finish_reason": metadata.get("finish_reason"),
+                    "old_internal_score": parsed.get("self_score"),
+                    "old_internal_status": "raw_proof_generation",
+                }
+            )
+        cases.sort(
+            key=lambda case: (
+                int(case["problem_id"]),
+                int(case["source_candidate_id"]),
+                int(case["source_round_index"]),
+            )
+        )
+        max_cases = int(getattr(args, "max_cases", 0) or 0)
+        if max_cases > 0:
+            cases = cases[:max_cases]
+        if not cases:
+            raise ValueError(
+                f"no parseable proof-generation calls under {llm_calls_dir}"
+            )
+    else:
+        for record in read_jsonl(Path(proofs_path)):
+            problem_id = str(record.get("problem_id"))
+            if requested and problem_id not in requested:
+                continue
+            if problem_id not in questions:
+                raise KeyError(f"no problem text for proof id {problem_id!r}")
+            proof = str(record.get("final_proof") or "").strip()
+            if not proof:
+                raise ValueError(f"empty selected proof for problem {problem_id}")
+            cases.append(
+                {
+                    "problem_id": problem_id,
+                    "question": questions[problem_id],
+                    "proof": proof,
+                    "old_internal_score": record.get("final_score"),
+                    "old_internal_status": record.get("final_status"),
+                }
+            )
     if requested - {case["problem_id"] for case in cases}:
         raise ValueError(f"missing requested proof ids: {sorted(requested)}")
     return sorted(cases, key=lambda case: case["problem_id"])
@@ -125,7 +245,7 @@ def replay_config(args: argparse.Namespace) -> SimpleNamespace:
         meta_policy=str(args.meta_policy),
         strict_pass_meta=bool(args.meta_n > 0),
         refine_rounds=0,
-        refine_review_n=2,
+        refine_review_n=int(CFG.refine_review_n),
         min_valid_low=1,
         verification_early_stop=False,
         thinking_budget_enabled=True,
@@ -179,10 +299,23 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
     semaphore = asyncio.Semaphore(max(1, int(args.max_concurrent_problems)))
 
     async def evaluate(case: dict[str, Any]) -> dict[str, Any]:
-        progress = PipelineProgress(False, case["problem_id"], 1)
+        trace_problem_id = case["problem_id"]
+        if case.get("source_candidate_id") is not None:
+            trace_problem_id = (
+                f"{case['problem_id']}-cand{case['source_candidate_id']}"
+                f"-r{case['source_round_index']}"
+            )
+        progress = PipelineProgress(False, trace_problem_id, 1)
         try:
             failed_attempts = []
             for attempt_number in range(max(1, int(args.max_attempts))):
+                replay_candidate_id = int(case["problem_id"]) * 100 + attempt_number
+                if case.get("source_candidate_id") is not None:
+                    replay_candidate_id = (
+                        int(case["problem_id"]) * 1000
+                        + int(case["source_candidate_id"]) * 10
+                        + attempt_number
+                    )
                 async with semaphore:
                     (
                         verifier_results,
@@ -193,12 +326,12 @@ async def replay(args: argparse.Namespace) -> dict[str, Any]:
                     ) = await run_verification_round(
                         case["question"],
                         case["proof"],
-                        "",
-                        int(case["problem_id"]) * 100 + attempt_number,
+                        str(case.get("self_evaluation") or ""),
+                        replay_candidate_id,
                         0,
                         scheduler,
                         cfg,
-                        prompt_family=PROMPT_FAMILY_OPD,
+                        prompt_family=case.get("prompt_family", PROMPT_FAMILY_OPD),
                         progress=progress,
                     )
                 parsed_scores = [result.get("score") for result in verifier_results]

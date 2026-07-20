@@ -52,6 +52,75 @@ def test_load_cases_aligns_problem_ids_and_selected_proofs(tmp_path):
     ]
 
 
+def test_load_cases_parses_completed_opd_proof_generation_calls(tmp_path):
+    input_path = tmp_path / "problems.parquet"
+    calls_dir = tmp_path / "llm_calls"
+    call_path = calls_dir / "2" / "cand_7_proof_gen_r1.txt"
+    pd.DataFrame(
+        {
+            "problem_idx": ["2"],
+            "problem": ["Prove the test statement."],
+        }
+    ).to_parquet(input_path)
+    call_path.parent.mkdir(parents=True)
+    call_path.write_text(
+        "\n".join(
+            [
+                "stage: proof_generation",
+                "detail: candidate=7 round=1 mode=opd_xml prompt_family=opd",
+                "prompt_tokens: 100",
+                "max_tokens: 1000",
+                "",
+                "===== INPUT PROMPT =====",
+                "Rendered prompt.",
+                "",
+                "===== OUTPUT =====",
+                "success: True",
+                "error: None",
+                "finish_reason: stop",
+                'usage: {"completion_tokens": 50}',
+                "server_url: http://127.0.0.1:8000/v1",
+                "latency_s: 1.5",
+                "",
+                "<think>discard this draft</think>",
+                "<solution>A rigorous final proof.</solution>",
+                "<self_evaluation>The proof is complete.</self_evaluation>",
+                "<score>1</score>",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        input_path=input_path,
+        proofs_path=None,
+        llm_calls_dir=calls_dir,
+        problem_id=["2"],
+        candidate_id=[],
+        round_index=[],
+        proof_prompt_family="opd",
+        max_cases=0,
+    )
+
+    cases = replay.load_cases(args)
+
+    assert cases == [
+        {
+            "problem_id": "2",
+            "question": "Prove the test statement.",
+            "proof": "A rigorous final proof.",
+            "self_evaluation": "The proof is complete.",
+            "prompt_family": "opd",
+            "source_candidate_id": 7,
+            "source_round_index": 1,
+            "source_path": str(call_path),
+            "source_finish_reason": "stop",
+            "old_internal_score": 1.0,
+            "old_internal_status": "raw_proof_generation",
+        }
+    ]
+
+
 def test_report_includes_role_scores_and_fatal_cap():
     payload = {
         "results": [

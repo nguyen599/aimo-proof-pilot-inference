@@ -309,7 +309,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         with patch.dict(os.environ, {"AIMO_DFLASH_MODEL_PATH": "/draft"}):
             self.assertIsNone(run.default_min_p())
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(run.default_min_p(), 0.01)
+            self.assertEqual(run.default_min_p(), 0.0)
 
     def test_imo2025_defaults_run_the_complete_candidate_pipeline(self):
         self.assertEqual(
@@ -331,7 +331,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(run.CFG.refine_review_n, 4)
         self.assertEqual(
             run.CFG.verify_n,
-            2 * len(run.VERIFIER_AUDIT_ROLES),
+            len(run.VERIFIER_AUDIT_ROLES),
         )
         self.assertLess(run.CFG.refine_review_n, run.CFG.verify_n)
         self.assertGreaterEqual(run.CFG.problem_timeout_seconds, 86_400)
@@ -344,11 +344,11 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "Candidate self-review.",
                 verifier_index=index,
             )
-            for index in range(4)
+            for index in range(run.CFG.verify_n)
         ]
 
         user_prompts = [messages[-1]["content"] for messages in prompts]
-        self.assertEqual(len(set(user_prompts)), 4)
+        self.assertEqual(len(set(user_prompts)), 8)
         for role_name, _ in run.VERIFIER_AUDIT_ROLES:
             self.assertTrue(
                 any(f"audit role: {role_name}" in prompt for prompt in user_prompts)

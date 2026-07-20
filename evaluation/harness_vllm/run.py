@@ -1352,35 +1352,62 @@ def build_opd_proof_only_generation_prompt(
 
 VERIFIER_AUDIT_ROLES: tuple[tuple[str, str], ...] = (
     (
-        "dependency",
+        "dependency_chain",
         "Reconstruct the proof's dependency chain. Check every lemma at the point "
-        "where it is used, reject circular reasoning, and reject any named or "
-        "implicit result that is merely asserted instead of proved.",
+        "where it is used, identify the weakest essential inference, and reject "
+        "circular reasoning or a conclusion that does not follow from the stated "
+        "premises.",
     ),
     (
-        "counterexample",
+        "lemma_assumptions",
+        "Audit every named or implicit theorem, auxiliary construction, and "
+        "existence claim. Check all hypotheses, domains, nondegeneracy conditions, "
+        "and uniqueness claims; a cited or familiar-looking result is not proved "
+        "unless the required argument is present.",
+    ),
+    (
+        "counterexample_boundary",
         "Actively try to falsify the proof with concrete examples and boundary "
-        "cases. Audit every WLOG, symmetry, relabeling, normalization, and "
-        "invariance claim; verify that it preserves all relevant order, "
-        "adjacency, incidence, and metric structure.",
+        "cases, including the smallest legal parameters, equality cases, "
+        "degenerate configurations, and transitions between cases. Reject a "
+        "universal claim when one legal instance breaks it.",
     ),
     (
-        "quantifier_algebra",
-        "Audit quantifiers, index ranges, equality cases, and the legality of each "
-        "choice or game strategy. Independently recompute the key algebra, "
-        "divisibility, valuation, counting, and inequality steps. For an "
+        "invariance_relabeling",
+        "Audit every WLOG, symmetry, relabeling, permutation, normalization, and "
+        "invariance claim. Verify that the transformation preserves all relevant "
+        "order, adjacency, incidence, orientation, metric, and consecutiveness "
+        "structure required later in the proof.",
+    ),
+    (
+        "quantifier_strategy",
+        "Audit the order and scope of every quantifier, every index range, and the "
+        "legality of each choice or strategy. For an "
         "adversarial process or game, test every proposed move against arbitrary "
         "legal prior play, not only the proof's preferred trajectory. A single "
         "cooperative infinite play does not prove that neither player has a "
-        "winning strategy, and a claimed worst case must be optimized over all "
-        "legal opponent responses.",
+        "winning strategy.",
     ),
     (
-        "coverage",
+        "algebra_computation",
+        "Independently recompute the decisive algebra, identities, inequalities, "
+        "divisibility, valuations, parity, counting, and extremal estimates. Check "
+        "signs and equality conditions, and reject numerical evidence or an "
+        "unchecked simplification used as a proof.",
+    ),
+    (
+        "statement_coverage",
         "Map the proof to every clause of the problem. Check both construction and "
-        "impossibility directions, all requested cases, and whether intermediate "
-        "claims contradict examples or base cases established elsewhere in the "
-        "same proof.",
+        "impossibility directions, all requested cases, the exact claimed answer, "
+        "and whether intermediate claims contradict examples or base cases "
+        "established elsewhere in the same proof.",
+    ),
+    (
+        "construction_optimality",
+        "Audit every proposed construction against every constraint: existence, "
+        "distinctness, integrality, range, incidence, and edge cases. Separately "
+        "check that the impossibility or lower-bound argument excludes every "
+        "remaining case, rather than only proving that the construction works.",
     ),
 )
 
