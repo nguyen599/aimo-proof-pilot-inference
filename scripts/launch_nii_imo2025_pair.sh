@@ -13,6 +13,32 @@ DFLASH_MODEL_PATH="${AIMO_DFLASH_MODEL_PATH:-/tmp/models/dflash-32b-draft-v2test
 DIST_ROOT="${AIMO_DISTRIBUTED_ROOT:-/tmp/aimo-proof-pilot-inference-distributed}"
 LAUNCH_ROOT="${AIMO_LAUNCH_ROOT:-/tmp/aimo-proof-pilot-inference-launch}/${RUN_ID}"
 MASTER_PORT="${MASTER_PORT:-29617}"
+VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING:-0}"
+VERIFY_REQUEST_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING:-0}"
+VERIFY_N="${AIMO_VERIFY_N:-8}"
+REFINE_REVIEW_N="${AIMO_REFINE_REVIEW_N:-4}"
+
+for value_name in \
+    VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING \
+    VERIFY_REQUEST_LIMIT_WHILE_GENERATING
+do
+    value="${!value_name}"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "$value_name must be a nonnegative integer, got $value" >&2
+        exit 2
+    fi
+done
+for value_name in VERIFY_N REFINE_REVIEW_N; do
+    value="${!value_name}"
+    if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "$value_name must be a positive integer, got $value" >&2
+        exit 2
+    fi
+done
+if [ "$REFINE_REVIEW_N" -gt "$VERIFY_N" ]; then
+    echo "REFINE_REVIEW_N cannot exceed VERIFY_N" >&2
+    exit 2
+fi
 
 physical_rank="${AIMO_NII_NODE_RANK:-${GLOBAL_RANK:-${NODE_RANK:-}}}"
 case "$physical_rank" in
@@ -168,6 +194,10 @@ args=(
     --no-serve
     --pipelines-per-problem 36
     --max-concurrent-problems 6
+    --verify-candidate-limit-while-generating "$VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING"
+    --verify-request-limit-while-generating "$VERIFY_REQUEST_LIMIT_WHILE_GENERATING"
+    --verify-n "$VERIFY_N"
+    --refine-review-n "$REFINE_REVIEW_N"
     --refine-rounds 4
     --thinking-budget-handoff-enabled
     --thinking-budget-handoff-mode lossless_partial

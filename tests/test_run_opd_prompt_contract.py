@@ -25,6 +25,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
             input_csv=Path("/old-input.csv"),
             pipelines_per_problem=14,
             max_concurrent_problems=1,
+            verify_candidate_limit_while_generating=2,
+            verify_request_limit_while_generating=8,
             refine_rounds=1,
         )
         args = run.build_cli_parser().parse_args(
@@ -41,6 +43,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "16",
                 "--max-concurrent-problems",
                 "2",
+                "--verify-candidate-limit-while-generating",
+                "4",
+                "--verify-request-limit-while-generating",
+                "16",
                 "--refine-rounds",
                 "1",
                 "--thinking-budget-refine-final-temperature",
@@ -75,6 +81,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.input_csv, Path("/data/imo.parquet"))
         self.assertEqual(cfg.pipelines_per_problem, 16)
         self.assertEqual(cfg.max_concurrent_problems, 2)
+        self.assertEqual(cfg.verify_candidate_limit_while_generating, 4)
+        self.assertEqual(cfg.verify_request_limit_while_generating, 16)
         self.assertEqual(cfg.refine_rounds, 1)
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
         self.assertEqual(
@@ -314,11 +322,17 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertFalse(run.CFG.skip_self_score_zero)
         self.assertFalse(run.CFG.stop_on_strict_pass)
         self.assertFalse(run.CFG.verification_early_stop)
-        self.assertEqual(run.CFG.verify_n, 4)
+        self.assertEqual(run.CFG.verify_candidate_limit_while_generating, 0)
+        self.assertEqual(run.CFG.verify_request_limit_while_generating, 0)
+        self.assertEqual(run.CFG.verify_n, 8)
         self.assertEqual(run.CFG.meta_n, 1)
         self.assertEqual(run.CFG.meta_policy, "all-reviews")
         self.assertEqual(run.CFG.refine_rounds, 1)
-        self.assertEqual(run.CFG.refine_review_n, 2)
+        self.assertEqual(run.CFG.refine_review_n, 4)
+        self.assertEqual(
+            run.CFG.verify_n,
+            2 * len(run.VERIFIER_AUDIT_ROLES),
+        )
         self.assertLess(run.CFG.refine_review_n, run.CFG.verify_n)
         self.assertGreaterEqual(run.CFG.problem_timeout_seconds, 86_400)
 

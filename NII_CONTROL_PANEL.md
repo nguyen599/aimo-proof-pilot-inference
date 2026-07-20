@@ -226,6 +226,18 @@ scheduled sequences per node. Override `AIMO_REQUESTS_PER_GPU`,
 `AIMO_MAX_NUM_SEQS_PER_DP`, or `AIMO_MAX_CONCURRENT_PROBLEMS` only after
 accounting for that distinction.
 
+Verifier/meta work is not separately throttled while initial proofs are still
+generating. The shared request scheduler and vLLM sequence capacity remain the
+upper bounds. Set `AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING` or
+`AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING` to a positive value when a smaller
+deployment needs to reserve capacity for initial proof generation; `0` keeps
+the corresponding throttle disabled.
+
+Each candidate runs eight verifier calls by default: two independent samples
+for each of the four audit roles. Refinement receives up to four validated
+critiques. Override these counts with `AIMO_VERIFY_N` and
+`AIMO_REFINE_REVIEW_N`.
+
 Set one shared run ID, then start the script in the background on both nodes:
 
 ```bash

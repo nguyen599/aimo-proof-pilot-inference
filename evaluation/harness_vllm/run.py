@@ -174,7 +174,7 @@ def default_vllm_extra_args() -> str:
 def default_min_p() -> Optional[float]:
     if os.environ.get("AIMO_DFLASH_MODEL_PATH", "").strip():
         return None
-    return 0.01
+    return 0.00
 
 
 class CFG:
@@ -359,14 +359,18 @@ class CFG:
     stop_on_strict_pass = False
     verification_early_stop = False
     wait_for_all_generations_before_verify = False
-    verify_candidate_limit_while_generating = 2
-    verify_request_limit_while_generating = 8
-    verify_n = 4
+    verify_candidate_limit_while_generating = int(
+        os.environ.get("AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING", "0")
+    )
+    verify_request_limit_while_generating = int(
+        os.environ.get("AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING", "0")
+    )
+    verify_n = int(os.environ.get("AIMO_VERIFY_N", "8"))
     meta_n = 1
     meta_policy = "all-reviews"  # low-only, all-reviews
     strict_pass_meta = True
     refine_rounds = int(os.environ.get("AIMO_REFINE_ROUNDS", "1"))
-    refine_review_n = 2
+    refine_review_n = int(os.environ.get("AIMO_REFINE_REVIEW_N", "4"))
     min_valid_low = 1
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
     selection_reserve_seconds = DEFAULT_SELECTION_RESERVE_SECONDS
@@ -7275,6 +7279,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--pipelines-per-problem", type=int)
     pipeline.add_argument("--max-concurrent-problems", type=int)
     pipeline.add_argument("--deepseek-math-v2-candidate-count", type=int)
+    pipeline.add_argument(
+        "--verify-candidate-limit-while-generating",
+        type=int,
+    )
+    pipeline.add_argument(
+        "--verify-request-limit-while-generating",
+        type=int,
+    )
     pipeline.add_argument("--verify-n", type=int)
     pipeline.add_argument("--meta-n", type=int)
     pipeline.add_argument("--refine-rounds", type=int)
@@ -7383,6 +7395,12 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "pipelines_per_problem": "pipelines_per_problem",
         "max_concurrent_problems": "max_concurrent_problems",
         "deepseek_math_v2_candidate_count": "deepseek_math_v2_candidate_count",
+        "verify_candidate_limit_while_generating": (
+            "verify_candidate_limit_while_generating"
+        ),
+        "verify_request_limit_while_generating": (
+            "verify_request_limit_while_generating"
+        ),
         "verify_n": "verify_n",
         "meta_n": "meta_n",
         "refine_rounds": "refine_rounds",
@@ -7610,6 +7628,12 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.deepseek_math_v2_candidate_count
             ),
             "proof_only_candidate_count": int(cfg.proof_only_candidate_count),
+            "verify_candidate_limit_while_generating": int(
+                cfg.verify_candidate_limit_while_generating
+            ),
+            "verify_request_limit_while_generating": int(
+                cfg.verify_request_limit_while_generating
+            ),
             "verify_n": int(cfg.verify_n),
             "meta_n": int(cfg.meta_n),
             "meta_policy": str(cfg.meta_policy),
@@ -7691,6 +7715,8 @@ def run(cfg: type[CFG] = CFG) -> None:
         "meta_policy=%s strict_pass_meta=%s max_concurrent_problems=%s "
         "candidates=%s deepseek_math_v2_candidates=%s gpus=%s tp=%s dp=%s "
         "max_concurrent_requests=%s requests_per_gpu=%s "
+        "verify_candidates_while_generating=%s "
+        "verify_requests_while_generating=%s "
         "thinking_handoff=%s preserve_refine_rounds=%s "
         "handoff_variant=%s handoff_mode=%s "
         "restart_strategy=%s final_round_budget=%s handoff_tokens=%s "
@@ -7712,6 +7738,8 @@ def run(cfg: type[CFG] = CFG) -> None:
         resolved_dp,
         resolved_max_concurrent_requests,
         cfg.requests_per_gpu,
+        cfg.verify_candidate_limit_while_generating,
+        cfg.verify_request_limit_while_generating,
         cfg.thinking_budget_handoff_enabled,
         cfg.thinking_budget_handoff_preserve_refine_rounds,
         cfg.thinking_budget_handoff_prompt_variant,
