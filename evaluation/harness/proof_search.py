@@ -385,7 +385,7 @@ class ProblemSearch:
     async def _select_final(self, ranked: list[Proof]) -> dict | None:
         """ycchen-style LLM final selector with shuffled-ballot majority voting.
 
-        Each of ``selection_votes`` voters sees the top ``top_proofs`` candidates in an
+        Each of ``selection_votes`` voters sees the top ``selection_candidates`` proofs in an
         INDEPENDENTLY shuffled order under fresh display IDs (P1, P2, ...), picks one via
         ``<selected_id>`` at low temperature, and we majority-vote the CANONICAL proof_ids
         (so position/label bias is averaged out). Returns the vote breakdown, or None when
@@ -394,7 +394,11 @@ class ProblemSearch:
         to a null ballot; they never abort the run.
         """
         votes_n = int(self.config.get("selection_votes", 16))
-        candidates = ranked[: self.config["top_proofs"]]
+        # The selector model was only trained to re-rank a SMALL set (ycchen's regime
+        # is ~4); feeding it top_proofs (the refinement pool, e.g. 16) is out of
+        # distribution. Cap at selection_candidates, decoupled from top_proofs.
+        n_cand = int(self.config.get("selection_candidates", 4))
+        candidates = ranked[:n_cand]
         if votes_n < 1 or len(candidates) < 2:
             return None
         rank_order = [p.proof_id for p in candidates]

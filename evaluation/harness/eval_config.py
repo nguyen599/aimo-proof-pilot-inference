@@ -47,7 +47,10 @@ SEARCH_KEYS = {
 # SEARCH_KEYS so existing configs stay valid without them, validated when supplied).
 # llm_selector: run ycchen's final LLM select-by-id stage (majority vote over shuffled
 # top candidates) instead of picking the top-ranked proof. selection_votes: # voters.
-OPTIONAL_SEARCH_KEYS = {"llm_selector", "selection_votes"}
+# selection_candidates: how many top-ranked proofs the selector re-ranks (the model was
+# only trained to choose among a small set; keep this at ycchen's trained regime, ~4 —
+# it is INTENTIONALLY decoupled from top_proofs, which sizes the refinement parent pool).
+OPTIONAL_SEARCH_KEYS = {"llm_selector", "selection_votes", "selection_candidates"}
 
 @dataclass(frozen=True)
 class ActiveModel:
@@ -260,6 +263,8 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("search.llm_selector must be a boolean")
     if "selection_votes" in search:
         _positive_int(search["selection_votes"], "search.selection_votes")
+    if "selection_candidates" in search:
+        _positive_int(search["selection_candidates"], "search.selection_candidates")
     if search["refine_review_strategy"] not in {"worst", "random_nonideal"}:
         raise ValueError(
             "search.refine_review_strategy must be 'worst' or 'random_nonideal'"
