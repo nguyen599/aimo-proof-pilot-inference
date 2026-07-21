@@ -99,6 +99,44 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_FAMILY_OPD = "opd"
 PROMPT_FAMILY_DEEPSEEK_MATH_V2 = "deepseek_math_v2"
 REFINEMENT_STRATEGIES = ("repair", "reconstruct", "mixed")
+PROOF_GENERATION_STRATEGY_PORTFOLIOS = ("baseline", "diverse")
+PROOF_GENERATION_STRATEGY_CYCLE = (
+    "baseline",
+    "baseline",
+    "baseline",
+    "baseline",
+    "adversarial_quantifiers",
+    "exhaustive_transitions",
+    "counterexample_audit",
+    "independent_reformulation",
+)
+PROOF_GENERATION_PLANNING_EMPHASES = {
+    "adversarial_quantifiers": (
+        "If the problem involves a game, strategy, optimization, or another "
+        "adversarial choice, preserve the quantifier order. Define each strategy "
+        "from the full legal history and prove it succeeds against every legal "
+        "reply. Do not replace an opponent by a maximal, greedy, or extremal move "
+        "unless you first prove that reduction is valid."
+    ),
+    "exhaustive_transitions": (
+        "Build the proof around an exhaustive state or case classification. Prove "
+        "the transition lemma for every legal case, including prime powers, "
+        "boundary values, and equality cases, and prove the class is preserved "
+        "before iterating the lemma."
+    ),
+    "counterexample_audit": (
+        "Before finalizing, actively try to falsify every universal lemma and "
+        "worst-case assertion using the smallest legal examples, degenerate "
+        "configurations, and boundary cases. Replace any shortcut that does not "
+        "survive this audit with a proved statement."
+    ),
+    "independent_reformulation": (
+        "Seek an independent formulation of the problem before committing to the "
+        "first apparent route, such as a state invariant, extremal principle, "
+        "algebraic encoding, or auxiliary construction. Choose the route whose "
+        "weakest essential lemma can be proved completely."
+    ),
+}
 
 
 class InferenceServerUnavailable(RuntimeError):
@@ -369,6 +407,10 @@ class CFG:
     verification_early_stop = False
     wait_for_all_generations_before_verify = False
     proof_generation_only = False
+    proof_generation_strategy_portfolio = os.environ.get(
+        "AIMO_PROOF_GENERATION_STRATEGY_PORTFOLIO",
+        "baseline",
+    )
     verify_candidate_limit_while_generating = int(
         os.environ.get("AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING", "0")
     )
@@ -608,6 +650,7 @@ class PipelineConfig:
     selection_temperature: float
     selector_mode: str
     selector_min_final_score: float
+    proof_generation_strategy_portfolio: str = "baseline"
 
 
 @dataclass
@@ -1357,10 +1400,33 @@ Here is your task input:
 def build_opd_proof_generation_prompt(
     question: str,
     use_tool: bool = False,
+    *,
+    planning_strategy: str = "baseline",
 ) -> list[dict[str, str]]:
     if use_tool:
         raise ValueError("the trained OPD prover prompt does not define a tool variant")
-    return _opd_messages("prover.txt", problem=question)
+    messages = _opd_messages("prover.txt", problem=question)
+    if planning_strategy == "baseline":
+        return messages
+    emphasis = PROOF_GENERATION_PLANNING_EMPHASES.get(planning_strategy)
+    if emphasis is None:
+        raise ValueError(f"unknown proof-generation strategy: {planning_strategy!r}")
+    marker = "\n\nRespond in EXACTLY this format:"
+    user_content = messages[-1]["content"]
+    if marker not in user_content:
+        raise ValueError("OPD prover prompt lacks the response-format marker")
+    planning_block = (
+        "\n\n<internal_planning_emphasis>\n"
+        + emphasis
+        + "\nUse this only to guide private reasoning; do not mention this block "
+        "in the final answer.\n</internal_planning_emphasis>"
+    )
+    messages[-1]["content"] = user_content.replace(
+        marker,
+        planning_block + marker,
+        1,
+    )
+    return messages
 
 
 def build_opd_proof_only_generation_prompt(
@@ -1370,6 +1436,25 @@ def build_opd_proof_only_generation_prompt(
     # Kept as a compatibility entry point for old configs. OPD-V2 has no
     # proof-only role, so it deliberately uses the full trained prover prompt.
     return build_opd_proof_generation_prompt(question, use_tool=use_tool)
+
+
+def resolve_proof_generation_strategy(
+    attempt_idx: int,
+    cfg: PipelineConfig,
+) -> str:
+    portfolio = str(
+        getattr(cfg, "proof_generation_strategy_portfolio", "baseline")
+    ).strip().lower()
+    if portfolio not in PROOF_GENERATION_STRATEGY_PORTFOLIOS:
+        raise ValueError(
+            "proof_generation_strategy_portfolio must be one of "
+            + ", ".join(PROOF_GENERATION_STRATEGY_PORTFOLIOS)
+        )
+    if portfolio == "baseline":
+        return "baseline"
+    return PROOF_GENERATION_STRATEGY_CYCLE[
+        int(attempt_idx) % len(PROOF_GENERATION_STRATEGY_CYCLE)
+    ]
 
 
 VERIFIER_AUDIT_ROLES: tuple[tuple[str, str], ...] = (
@@ -4910,13 +4995,18 @@ async def generate_single_attempt(
         cfg,
     )
     if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2:
+        planning_strategy = "baseline"
         generation_mode = "deepseek_markdown"
         generation_prompt = build_deepseek_proof_generation_prompt(question)
         generation_parser = parse_deepseek_generation_response
         thinking_budget_force_text = cfg.deepseek_thinking_budget_force_text
     else:
+        planning_strategy = resolve_proof_generation_strategy(attempt_idx, cfg)
         generation_mode = "opd_xml"
-        generation_prompt = build_opd_proof_generation_prompt(question)
+        generation_prompt = build_opd_proof_generation_prompt(
+            question,
+            planning_strategy=planning_strategy,
+        )
         generation_parser = parse_generation_response
         thinking_budget_force_text = cfg.thinking_budget_force_text
     generation_outputs: list[dict[str, Any]] = []
@@ -4947,12 +5037,13 @@ async def generate_single_attempt(
         if progress is not None:
             progress.log(
                 "candidate=%d round=%d stage=generation status=start mode=%s "
-                "prompt_family=%s budget_action=%s handoff_mode=%s "
+                "prompt_family=%s planning_strategy=%s budget_action=%s handoff_mode=%s "
                 "restart_strategy=%s",
                 attempt_idx,
                 solve_round_idx,
                 generation_mode,
                 prompt_family,
+                planning_strategy,
                 "stop" if can_restart else "finalize",
                 getattr(
                     cfg,
@@ -4971,7 +5062,8 @@ async def generate_single_attempt(
             progress=progress,
             detail=(
                 f"candidate={attempt_idx} round={solve_round_idx} "
-                f"mode={generation_mode} prompt_family={prompt_family}"
+                f"mode={generation_mode} prompt_family={prompt_family} "
+                f"planning_strategy={planning_strategy}"
             ),
             temperature=resolve_proof_generation_temperature(attempt_idx, cfg),
             thinking_budget_tokens=resolve_thinking_budget_tokens(
@@ -5013,6 +5105,7 @@ async def generate_single_attempt(
                         {},
                         round_idx=solve_round_idx,
                         prompt_family=prompt_family,
+                        planning_strategy=planning_strategy,
                         budget_stopped=True,
                         consumed_by_handoff=True,
                     )
@@ -5069,12 +5162,14 @@ async def generate_single_attempt(
         )
         generation_parsed["generation_mode"] = generation_mode
         generation_parsed["prompt_family"] = prompt_family
+        generation_parsed["planning_strategy"] = planning_strategy
         generation_output = make_output(
             "proof_generation",
             generation_response,
             generation_parsed,
             round_idx=solve_round_idx,
             prompt_family=prompt_family,
+            planning_strategy=planning_strategy,
         )
         generation_outputs.append(generation_output)
         if not require_valid_candidate_response(
@@ -5114,6 +5209,7 @@ async def generate_single_attempt(
         return {
             "attempt_idx": attempt_idx,
             "prompt_family": prompt_family,
+            "planning_strategy": planning_strategy,
             "generation_output": generation_output,
             "generation_outputs": generation_outputs,
             "handoff_outputs": handoff_outputs,
@@ -6043,6 +6139,10 @@ async def run_single_attempt(
     return {
         "attempt_idx": attempt_idx,
         "prompt_family": prompt_family,
+        "planning_strategy": initial_generation.get(
+            "planning_strategy",
+            "baseline",
+        ),
         "generation_mode": initial_generation.get("generation_mode"),
         "proof_generation_output": generation_output,
         "proof_generation_outputs": initial_generation.get(
@@ -6930,6 +7030,7 @@ class ProofRuntime:
         verification_early_stop: bool,
         wait_for_all_generations_before_verify: bool,
         proof_generation_only: bool,
+        proof_generation_strategy_portfolio: str,
         verify_candidate_limit_while_generating: int,
         verify_request_limit_while_generating: int,
         verify_n: int,
@@ -7080,6 +7181,17 @@ class ProofRuntime:
                 "refinement_strategy must be one of "
                 + ", ".join(REFINEMENT_STRATEGIES)
             )
+        normalized_proof_generation_strategy_portfolio = (
+            proof_generation_strategy_portfolio.strip().lower()
+        )
+        if (
+            normalized_proof_generation_strategy_portfolio
+            not in PROOF_GENERATION_STRATEGY_PORTFOLIOS
+        ):
+            raise ValueError(
+                "proof_generation_strategy_portfolio must be one of "
+                + ", ".join(PROOF_GENERATION_STRATEGY_PORTFOLIOS)
+            )
         normalized_handoff_variant = (
             thinking_budget_handoff_prompt_variant.strip().lower()
         )
@@ -7221,6 +7333,9 @@ class ProofRuntime:
             selection_temperature=selection_temperature,
             selector_mode=normalized_selector_mode,
             selector_min_final_score=float(selector_min_final_score),
+            proof_generation_strategy_portfolio=(
+                normalized_proof_generation_strategy_portfolio
+            ),
         )
         self.server_timeout = server_timeout
         atexit.register(self.close)
@@ -7780,6 +7895,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
     )
     pipeline.add_argument(
+        "--proof-generation-strategy-portfolio",
+        choices=PROOF_GENERATION_STRATEGY_PORTFOLIOS,
+        help=(
+            "Choose the initial OPD proof prompt portfolio. 'baseline' keeps "
+            "the trained prompt unchanged; 'diverse' deterministically assigns "
+            "half the candidates to baseline and half to targeted planning "
+            "emphases."
+        ),
+    )
+    pipeline.add_argument(
         "--verify-candidate-limit-while-generating",
         type=int,
     )
@@ -7913,6 +8038,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "max_concurrent_problems": "max_concurrent_problems",
         "deepseek_math_v2_candidate_count": "deepseek_math_v2_candidate_count",
         "proof_generation_only": "proof_generation_only",
+        "proof_generation_strategy_portfolio": (
+            "proof_generation_strategy_portfolio"
+        ),
         "verify_candidate_limit_while_generating": (
             "verify_candidate_limit_while_generating"
         ),
@@ -8055,6 +8183,14 @@ def run(cfg: type[CFG] = CFG) -> None:
         )
     if int(cfg.min_valid_low) < 1:
         raise ValueError("AIMO_MIN_VALID_LOW must be at least 1")
+    if (
+        str(cfg.proof_generation_strategy_portfolio).strip().lower()
+        not in PROOF_GENERATION_STRATEGY_PORTFOLIOS
+    ):
+        raise ValueError(
+            "AIMO_PROOF_GENERATION_STRATEGY_PORTFOLIO must be one of "
+            + ", ".join(PROOF_GENERATION_STRATEGY_PORTFOLIOS)
+        )
     if int(cfg.thinking_budget_handoff_max_tokens) < 1:
         raise ValueError(
             "AIMO_THINKING_BUDGET_HANDOFF_MAX_TOKENS must be positive"
@@ -8160,6 +8296,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             ),
             "proof_only_candidate_count": int(cfg.proof_only_candidate_count),
             "proof_generation_only": bool(cfg.proof_generation_only),
+            "proof_generation_strategy_portfolio": str(
+                cfg.proof_generation_strategy_portfolio
+            ),
             "verify_candidate_limit_while_generating": int(
                 cfg.verify_candidate_limit_while_generating
             ),
@@ -8255,7 +8394,8 @@ def run(cfg: type[CFG] = CFG) -> None:
     logging.info(
         "Inference runtime: stream_vllm=%s stream_vllm_server_log=%s verbose=%s "
         "meta_policy=%s strict_pass_meta=%s proof_generation_only=%s "
-        "refinement_strategy=%s strict_pass_challenge_rounds=%s "
+        "proof_generation_strategy_portfolio=%s refinement_strategy=%s "
+        "strict_pass_challenge_rounds=%s "
         "max_concurrent_problems=%s "
         "candidates=%s deepseek_math_v2_candidates=%s gpus=%s tp=%s dp=%s "
         "max_concurrent_requests=%s requests_per_gpu=%s "
@@ -8276,6 +8416,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.meta_policy,
         cfg.strict_pass_meta,
         cfg.proof_generation_only,
+        cfg.proof_generation_strategy_portfolio,
         cfg.refinement_strategy,
         cfg.strict_pass_challenge_rounds,
         cfg.max_concurrent_problems,
@@ -8332,6 +8473,9 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.wait_for_all_generations_before_verify
             ),
             proof_generation_only=cfg.proof_generation_only,
+            proof_generation_strategy_portfolio=(
+                cfg.proof_generation_strategy_portfolio
+            ),
             verify_candidate_limit_while_generating=(
                 cfg.verify_candidate_limit_while_generating
             ),

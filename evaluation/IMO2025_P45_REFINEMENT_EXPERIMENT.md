@@ -42,6 +42,34 @@ AIMO_STRICT_PASS_CHALLENGE_ROUNDS=1
 Legacy callers remain backward compatible because `run.py` defaults to
 `repair` and zero strict-pass challenges unless the launcher or CLI opts in.
 
+## Initial-proof portfolio
+
+The external grader shows that refinement cannot recover when every initial
+candidate shares the same false lemma. `run.py` therefore has an opt-in
+`--proof-generation-strategy-portfolio diverse` mode for OPD-format initial
+proofs. Candidate indexes are assigned deterministically in groups of eight:
+
+| Candidate slots | Planning emphasis |
+| --- | --- |
+| 0-3 | Exact trained baseline prompt |
+| 4 | Preserve adversarial quantifiers and prove a strategy against every reply |
+| 5 | Prove an exhaustive transition classification, including boundary cases |
+| 6 | Try to falsify universal lemmas and worst-case reductions before using them |
+| 7 | Reframe the problem independently and prove the weakest essential lemma |
+
+The four baseline slots preserve the current success distribution. The four
+specialized slots target the observed failures: P5's unjustified replacement
+of an adversary by a maximal move and P4's incomplete divisor-transition case
+analysis. The emphasis is inserted as private planning guidance before the
+unchanged XML response contract. DeepSeek-format candidates remain baseline
+because they use a different trained prompt contract.
+
+The default remains `baseline`. Before promoting `diverse`, run a controlled
+proof-generation-only comparison on the same P4/P5 inputs, model, temperatures,
+thinking budgets, and candidate count. Grade every structurally complete proof,
+then compare complete-proof rate, mean score, best score, and the probability
+that at least one candidate reaches each score threshold.
+
 ## Evaluation
 
 Use the same P4/P5 candidate count, verifier mix, and token budgets for the
@@ -57,4 +85,3 @@ baseline and treatment. Compare:
 P5 grading uses three API keys with 24 global workers. The grader assigns
 slots round-robin, so each key has exactly eight concurrent requests. Keep two
 independent grading calls per proof and rerun only missing or failed records.
-

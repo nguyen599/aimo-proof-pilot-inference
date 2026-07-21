@@ -28,6 +28,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             verify_candidate_limit_while_generating=2,
             verify_request_limit_while_generating=8,
             refine_rounds=1,
+            proof_generation_strategy_portfolio="baseline",
         )
         args = run.build_cli_parser().parse_args(
             [
@@ -49,6 +50,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "16",
                 "--refine-rounds",
                 "1",
+                "--proof-generation-strategy-portfolio",
+                "diverse",
                 "--thinking-budget-refine-final-temperature",
                 "0.6",
                 "--thinking-budget-refine-visible-output-target-tokens",
@@ -84,6 +87,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.verify_candidate_limit_while_generating, 4)
         self.assertEqual(cfg.verify_request_limit_while_generating, 16)
         self.assertEqual(cfg.refine_rounds, 1)
+        self.assertEqual(cfg.proof_generation_strategy_portfolio, "diverse")
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
         self.assertEqual(
             cfg.thinking_budget_refine_visible_output_target_tokens,
@@ -615,6 +619,55 @@ class RunOpdPromptContractTests(unittest.TestCase):
         )
         self.assertIn("Problem:\nProve the claim.", messages[1]["content"])
         self.assertIn("<self_evaluation>", messages[1]["content"])
+
+    def test_baseline_proof_strategy_preserves_trained_prompt_exactly(self):
+        implicit = run.build_opd_proof_generation_prompt("Prove the claim.")
+        explicit = run.build_opd_proof_generation_prompt(
+            "Prove the claim.",
+            planning_strategy="baseline",
+        )
+
+        self.assertEqual(implicit, explicit)
+        self.assertNotIn(
+            "<internal_planning_emphasis>",
+            implicit[-1]["content"],
+        )
+
+    def test_diverse_proof_strategy_cycle_keeps_half_baseline(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="diverse")
+
+        strategies = [
+            run.resolve_proof_generation_strategy(index, cfg)
+            for index in range(8)
+        ]
+
+        self.assertEqual(
+            strategies,
+            list(run.PROOF_GENERATION_STRATEGY_CYCLE),
+        )
+        self.assertEqual(strategies.count("baseline"), 4)
+
+    def test_adversarial_strategy_adds_private_quantifier_discipline(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Prove the game claim.",
+            planning_strategy="adversarial_quantifiers",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("<internal_planning_emphasis>", user_prompt)
+        self.assertIn("full legal history", user_prompt)
+        self.assertIn("every legal reply", user_prompt)
+        self.assertIn("Respond in EXACTLY this format:", user_prompt)
+        self.assertLess(
+            user_prompt.index("<internal_planning_emphasis>"),
+            user_prompt.index("Respond in EXACTLY this format:"),
+        )
+
+    def test_invalid_proof_strategy_portfolio_is_rejected(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="unknown")
+
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            run.resolve_proof_generation_strategy(0, cfg)
 
     def test_generation_parser_reads_opd_xml(self):
         parsed = run.parse_generation_response(
