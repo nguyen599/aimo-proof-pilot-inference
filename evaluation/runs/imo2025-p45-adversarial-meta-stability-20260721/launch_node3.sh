@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="${ROOT:-/tmp/p45-adversarial-meta-stability-20260721}"
 VENV="${VENV:-/tmp/aimo-proof-pilot-inference-runtime/venv-vllm-0.25.1}"
 SOURCE_REPO="${SOURCE_REPO:-/tmp/aimo-proof-pilot-inference-runtime/repo}"
+FETCH_SOURCE_REPO="${FETCH_SOURCE_REPO:-1}"
 CODE="$ROOT/repo"
 MODEL="${MODEL:-/tmp/models/olmo3-opd-sft-750-vllm}"
 DFLASH="${DFLASH:-/tmp/models/dflash-32b-draft-v2test-phaseL}"
@@ -13,6 +14,9 @@ P4_LOGS="$RUN_ROOT/logs/rank_0000/llm_calls"
 P5_LOGS="$RUN_ROOT/logs/rank_0001/llm_calls"
 P4_SOURCE=4/cand_24_proof_gen_r0.txt
 P5_SOURCE=5/cand_15_proof_gen_r0.txt
+AUDIT_P5_TRIALS="${AUDIT_P5_TRIALS:-1 2 3}"
+FULL_P5_TRIALS="${FULL_P5_TRIALS:-$AUDIT_P5_TRIALS}"
+RUN_P4_SAFEGUARD="${RUN_P4_SAFEGUARD:-1}"
 
 mkdir -p "$ROOT"/audits "$ROOT"/full "$ROOT"/cache
 printf '%s\n' starting > "$ROOT/status"
@@ -58,7 +62,9 @@ on_exit() {
 }
 trap on_exit EXIT
 
-git -C "$SOURCE_REPO" fetch origin main
+if [ "$FETCH_SOURCE_REPO" = "1" ]; then
+    git -C "$SOURCE_REPO" fetch origin main
+fi
 if [ ! -d "$CODE/.git" ]; then
     rm -rf "$CODE.tmp"
     git clone --shared --no-checkout "$SOURCE_REPO" "$CODE.tmp"
@@ -238,7 +244,7 @@ run_replay() {
 
 printf '%s\n' auditing > "$ROOT/status"
 audit_pids=()
-for trial in 1 2 3; do
+for trial in $AUDIT_P5_TRIALS; do
     run_replay \
         "$P5_LOGS" \
         "$ROOT/p5_restart.jsonl" \
@@ -247,13 +253,19 @@ for trial in 1 2 3; do
         "$ROOT/audits/p5_trial_$trial.log" &
     audit_pids+=("$!")
 done
-run_replay \
-    "$P4_LOGS" \
-    "$ROOT/p4_restart.jsonl" \
-    "$ROOT/audits/p4_safeguard" \
-    0 \
-    "$ROOT/audits/p4_safeguard.log" &
-audit_pids+=("$!")
+if [ "$RUN_P4_SAFEGUARD" = "1" ]; then
+    run_replay \
+        "$P4_LOGS" \
+        "$ROOT/p4_restart.jsonl" \
+        "$ROOT/audits/p4_safeguard" \
+        0 \
+        "$ROOT/audits/p4_safeguard.log" &
+    audit_pids+=("$!")
+fi
+[ "${#audit_pids[@]}" -gt 0 ] || {
+    echo "No audit workload configured"
+    exit 6
+}
 for pid in "${audit_pids[@]}"; do
     wait "$pid"
 done
@@ -270,7 +282,7 @@ fi
 
 printf '%s\n' full_replays > "$ROOT/status"
 full_pids=()
-for trial in 1 2 3; do
+for trial in $FULL_P5_TRIALS; do
     run_replay \
         "$P5_LOGS" \
         "$ROOT/p5_restart.jsonl" \
@@ -279,6 +291,10 @@ for trial in 1 2 3; do
         "$ROOT/full/p5_trial_$trial.log" &
     full_pids+=("$!")
 done
+[ "${#full_pids[@]}" -gt 0 ] || {
+    echo "No full replay workload configured"
+    exit 7
+}
 for pid in "${full_pids[@]}"; do
     wait "$pid"
 done
