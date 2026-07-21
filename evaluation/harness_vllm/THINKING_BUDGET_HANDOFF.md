@@ -133,6 +133,28 @@ report without promoting unproved claims. A future checkpoint experiment should
 first demonstrate at least one fresh-audited reusable lemma before paying for a
 long restart evaluation.
 
+#### Expanded checkpoint sweep
+
+The follow-up NII run expanded the matrix to eight balanced source contexts and
+temperatures `1.0`, `0.7`, and `0.6` (24 jobs). It kept the 32,768-token
+checkpoint limit, one repair, and the independent 8,192-token audit. Full
+artifacts are under
+`evaluation/runs/thinking-handoff-proof-checkpoint-sweep8-t3-20260721/`.
+
+| Temperature | Valid XML | Valid checkpoint | Structural lemmas | Audit pass | Audited reusable lemmas |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0.6 | 5/8 | 4/8 | 2 | 0/8 | 1 |
+| 0.7 | 5/8 | 3/8 | 1 | 0/8 | 0 |
+| 1.0 | 6/8 | 5/8 | 0 | 0/8 | 0 |
+
+The one audited reusable lemma was the elementary lattice-point count
+`n(n+1)/2`; it appeared beside a `REPROVE` lemma in an otherwise invalid
+checkpoint. No complete checkpoint passed audit. Several failures consumed
+both generation and repair budgets, reaching 66K to 74K aggregate completion
+tokens. This larger replay confirms the earlier decision: `proof_checkpoint`
+is not ready for a production restart, and XML validity must not be treated as
+proof reuse.
+
 ## Replay verifier refinement
 
 Use `evaluate_thinking_handoff_refinement.py` to test a saved parser-valid
