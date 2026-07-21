@@ -647,6 +647,54 @@ class RunOpdPromptContractTests(unittest.TestCase):
         )
         self.assertEqual(strategies.count("baseline"), 4)
 
+    def test_adaptive_game_portfolio_targets_adversarial_history(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
+        question = (
+            "Alice and Bazza play a game. Determine which player has a "
+            "winning strategy."
+        )
+
+        strategies = [
+            run.resolve_proof_generation_strategy(index, cfg, question)
+            for index in range(12)
+        ]
+
+        self.assertEqual(strategies, list(run.ADAPTIVE_GAME_STRATEGY_CYCLE))
+        self.assertEqual(strategies.count("baseline"), 3)
+        self.assertEqual(strategies.count("adversarial_quantifiers"), 3)
+        self.assertEqual(strategies.count("joint_state_inequality"), 2)
+
+    def test_adaptive_iteration_portfolio_targets_transition_closure(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
+        question = "The sequence satisfies a_{n+1}=f(a_n). Determine a_1."
+
+        strategies = [
+            run.resolve_proof_generation_strategy(index, cfg, question)
+            for index in range(12)
+        ]
+
+        self.assertEqual(
+            strategies,
+            list(run.ADAPTIVE_ITERATION_STRATEGY_CYCLE),
+        )
+        self.assertEqual(strategies.count("baseline"), 3)
+        self.assertEqual(strategies.count("exhaustive_transitions"), 3)
+        self.assertEqual(strategies.count("state_invariant"), 2)
+
+    def test_adaptive_generic_portfolio_falls_back_to_diverse_cycle(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
+
+        strategies = [
+            run.resolve_proof_generation_strategy(
+                index,
+                cfg,
+                "Prove that the three circles are concurrent.",
+            )
+            for index in range(8)
+        ]
+
+        self.assertEqual(strategies, list(run.PROOF_GENERATION_STRATEGY_CYCLE))
+
     def test_adversarial_strategy_adds_private_quantifier_discipline(self):
         messages = run.build_opd_proof_generation_prompt(
             "Prove the game claim.",
@@ -662,6 +710,28 @@ class RunOpdPromptContractTests(unittest.TestCase):
             user_prompt.index("<internal_planning_emphasis>"),
             user_prompt.index("Respond in EXACTLY this format:"),
         )
+
+    def test_joint_state_strategy_rejects_one_variable_worst_case_shortcuts(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Prove the game claim.",
+            planning_strategy="joint_state_inequality",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("every state variable", user_prompt)
+        self.assertIn("history-independent worst-case inequality", user_prompt)
+        self.assertIn("opponent saturates a budget", user_prompt)
+
+    def test_state_invariant_strategy_requires_transition_closure(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Determine the valid initial terms of the recurrence.",
+            planning_strategy="state_invariant",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("one-step increase or decrease is not enough", user_prompt)
+        self.assertIn("after every transition", user_prompt)
+        self.assertIn("divisibility", user_prompt)
 
     def test_invalid_proof_strategy_portfolio_is_rejected(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="unknown")

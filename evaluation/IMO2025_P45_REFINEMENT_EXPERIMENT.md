@@ -70,6 +70,37 @@ thinking budgets, and candidate count. Grade every structurally complete proof,
 then compare complete-proof rate, mean score, best score, and the probability
 that at least one candidate reaches each score threshold.
 
+The follow-up baseline pool made the missing obligations more specific: P4
+peaked at `5/7` because its one-step descent claim was never proved closed under
+the divisor transition, while P5 peaked at `3/7` because its large-lambda
+strategy replaced arbitrary Bazza play by budget saturation. The opt-in
+`adaptive` portfolio routes problems by their prompt-visible structure:
+
+| Problem structure | 12-candidate cycle |
+| --- | --- |
+| Adversarial game | 3 baseline, 3 quantifier/history, 2 joint-state inequality, 2 proof-obligation ledger, 1 counterexample audit, 1 independent reformulation |
+| Iterated sequence | 3 baseline, 3 exhaustive transition, 2 state invariant, 2 proof-obligation ledger, 1 counterexample audit, 1 independent reformulation |
+| Other | Existing eight-slot `diverse` cycle |
+
+The joint-state prompt explicitly forbids optimizing one resource while
+ignoring the opponent's remaining resources. The invariant prompt requires
+closure under every next-state case before infinite descent. The obligation
+ledger separates necessity, sufficiency, universal quantifiers, and equality
+cases before the model claims completeness. These are private planning
+instructions; the trained XML output contract is unchanged. `baseline` and
+`diverse` retain their previous behavior.
+
+The next controlled comparison should use:
+
+```text
+AIMO_PROOF_GENERATION_ONLY=true
+AIMO_PROOF_GENERATION_STRATEGY_PORTFOLIO=adaptive
+```
+
+Do not promote `adaptive` to the launcher default unless two-call external
+grading improves the best-of-36 score or produces a correct candidate without
+materially reducing the structurally complete proof rate.
+
 ## Evaluation
 
 Use the same P4/P5 candidate count, verifier mix, and token budgets for the

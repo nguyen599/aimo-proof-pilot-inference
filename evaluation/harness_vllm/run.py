@@ -99,7 +99,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_FAMILY_OPD = "opd"
 PROMPT_FAMILY_DEEPSEEK_MATH_V2 = "deepseek_math_v2"
 REFINEMENT_STRATEGIES = ("repair", "reconstruct", "mixed")
-PROOF_GENERATION_STRATEGY_PORTFOLIOS = ("baseline", "diverse")
+PROOF_GENERATION_STRATEGY_PORTFOLIOS = ("baseline", "diverse", "adaptive")
 PROOF_GENERATION_STRATEGY_CYCLE = (
     "baseline",
     "baseline",
@@ -107,6 +107,34 @@ PROOF_GENERATION_STRATEGY_CYCLE = (
     "baseline",
     "adversarial_quantifiers",
     "exhaustive_transitions",
+    "counterexample_audit",
+    "independent_reformulation",
+)
+ADAPTIVE_GAME_STRATEGY_CYCLE = (
+    "baseline",
+    "baseline",
+    "baseline",
+    "adversarial_quantifiers",
+    "adversarial_quantifiers",
+    "adversarial_quantifiers",
+    "joint_state_inequality",
+    "joint_state_inequality",
+    "proof_obligation_ledger",
+    "proof_obligation_ledger",
+    "counterexample_audit",
+    "independent_reformulation",
+)
+ADAPTIVE_ITERATION_STRATEGY_CYCLE = (
+    "baseline",
+    "baseline",
+    "baseline",
+    "exhaustive_transitions",
+    "exhaustive_transitions",
+    "exhaustive_transitions",
+    "state_invariant",
+    "state_invariant",
+    "proof_obligation_ledger",
+    "proof_obligation_ledger",
     "counterexample_audit",
     "independent_reformulation",
 )
@@ -135,6 +163,29 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
         "first apparent route, such as a state invariant, extremal principle, "
         "algebraic encoding, or auxiliary construction. Choose the route whose "
         "weakest essential lemma can be proved completely."
+    ),
+    "joint_state_inequality": (
+        "Track every state variable or resource that affects future legal moves, "
+        "not only the quantity changed by the opponent's current move. Derive a "
+        "history-independent worst-case inequality, using convexity, "
+        "Cauchy--Schwarz, or another proved extremal argument when appropriate. "
+        "Do not assume that an opponent saturates a budget unless that dominance "
+        "claim is proved with the full future state included."
+    ),
+    "state_invariant": (
+        "For an iterated map or recurrence, a one-step increase or decrease is not "
+        "enough. Classify every possible image state and prove an invariant set or "
+        "well-founded ranking function that remains valid after every transition. "
+        "Explicitly handle states that can change parity, divisibility, sign, or "
+        "case before invoking infinite descent or induction."
+    ),
+    "proof_obligation_ledger": (
+        "Before drafting, privately list the exact final classification and every "
+        "necessary obligation: necessity, sufficiency, all boundary/equality "
+        "cases, and each universal quantifier. Mark an obligation complete only "
+        "after proving it against all legal cases. Do not present the result as a "
+        "complete proof while any essential obligation remains supported only by "
+        "an example, a cooperative play, or an unproved worst-case assertion."
     ),
 }
 
@@ -1441,6 +1492,7 @@ def build_opd_proof_only_generation_prompt(
 def resolve_proof_generation_strategy(
     attempt_idx: int,
     cfg: PipelineConfig,
+    question: str = "",
 ) -> str:
     portfolio = str(
         getattr(cfg, "proof_generation_strategy_portfolio", "baseline")
@@ -1452,9 +1504,30 @@ def resolve_proof_generation_strategy(
         )
     if portfolio == "baseline":
         return "baseline"
-    return PROOF_GENERATION_STRATEGY_CYCLE[
-        int(attempt_idx) % len(PROOF_GENERATION_STRATEGY_CYCLE)
-    ]
+    strategy_cycle = PROOF_GENERATION_STRATEGY_CYCLE
+    if portfolio == "adaptive":
+        normalized_question = " ".join(question.lower().split())
+        game_markers = (
+            " game",
+            "player",
+            "opponent",
+            "winning strategy",
+            "wins",
+            "turn of the game",
+        )
+        iteration_markers = (
+            "sequence",
+            "recurrence",
+            "iterat",
+            "a_{n+1}",
+            "a_{n + 1}",
+            "next term",
+        )
+        if any(marker in normalized_question for marker in game_markers):
+            strategy_cycle = ADAPTIVE_GAME_STRATEGY_CYCLE
+        elif any(marker in normalized_question for marker in iteration_markers):
+            strategy_cycle = ADAPTIVE_ITERATION_STRATEGY_CYCLE
+    return strategy_cycle[int(attempt_idx) % len(strategy_cycle)]
 
 
 VERIFIER_AUDIT_ROLES: tuple[tuple[str, str], ...] = (
@@ -5001,7 +5074,11 @@ async def generate_single_attempt(
         generation_parser = parse_deepseek_generation_response
         thinking_budget_force_text = cfg.deepseek_thinking_budget_force_text
     else:
-        planning_strategy = resolve_proof_generation_strategy(attempt_idx, cfg)
+        planning_strategy = resolve_proof_generation_strategy(
+            attempt_idx,
+            cfg,
+            question,
+        )
         generation_mode = "opd_xml"
         generation_prompt = build_opd_proof_generation_prompt(
             question,
