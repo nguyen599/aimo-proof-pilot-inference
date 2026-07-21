@@ -112,3 +112,17 @@ failed refinement, verifier overconfidence, or selector error.
 the verification/refinement loop for every completed candidate. The final
 proof is the rollback-aware proof actually offered to the selector. Keep
 `--proof-versions final` when only final-candidate grading is required.
+
+After grading the paired records, reduce them into stage gates with:
+
+```bash
+python evaluation/analyze_paired_candidate_grades.py \
+  --candidate-manifest evaluation/runs/<run>/grader_input/all_final_candidates/candidate_manifest.jsonl \
+  --grader-summary evaluation/runs/<run>/grading-paired/summary.json \
+  --output-dir evaluation/runs/<run>/paired-analysis
+```
+
+The paired report separates the initial candidate-pool ceiling from refinement
+gain or regression, strict-pass calibration, and selector ranking. It reports
+both a configurable credible-proof threshold (default `5/7`) and the stronger
+count of candidates receiving `7/7` from every independent grader call.
