@@ -121,11 +121,13 @@ def load_primary_results(run_dir: Path) -> dict[str, dict[str, Any]]:
     return by_problem
 
 
-def candidate_id(problem_id: str, attempt_idx: int) -> str:
+def candidate_id(problem_id: str, attempt_idx: int, proof_version: str) -> str:
     safe_problem_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", problem_id).strip("_")
     if not safe_problem_id:
         raise ValueError(f"problem ID {problem_id!r} has no safe characters")
-    return f"p{safe_problem_id}-c{attempt_idx:02d}-final"
+    if proof_version not in {"initial", "final"}:
+        raise ValueError(f"unsupported proof version {proof_version!r}")
+    return f"p{safe_problem_id}-c{attempt_idx:02d}-{proof_version}"
 
 
 def count_outputs(candidate: dict[str, Any], field: str) -> int:
@@ -133,6 +135,28 @@ def count_outputs(candidate: dict[str, Any], field: str) -> int:
     if not isinstance(value, list):
         raise ValueError(f"candidate field {field!r} must be a list")
     return len(value)
+
+
+def candidate_proofs(
+    candidate: dict[str, Any],
+    proof_versions: list[str],
+) -> list[tuple[str, str]]:
+    proofs: list[tuple[str, str]] = []
+    for proof_version in proof_versions:
+        if proof_version == "initial":
+            generation = candidate.get("proof_generation_output") or {}
+            parsed = generation.get("parsed") or {}
+            proof = str(parsed.get("proof") or "").strip()
+        elif proof_version == "final":
+            proof = str(candidate.get("proof_solution") or "").strip()
+        else:
+            raise ValueError(f"unsupported proof version {proof_version!r}")
+        if not proof:
+            raise RuntimeError(
+                f"empty {proof_version} proof for attempt {candidate.get('attempt_idx')}"
+            )
+        proofs.append((proof_version, proof))
+    return proofs
 
 
 def validate_problem_payloads(
@@ -229,17 +253,13 @@ def candidate_manifest_row(
     payload_path: Path,
     run_dir: Path,
     selected_attempt: int | None,
+    proof_version: str,
+    proof: str,
 ) -> dict[str, Any]:
     attempt_idx = int(candidate["attempt_idx"])
-    proof = str(candidate.get("proof_solution") or "").strip()
-    if not proof:
-        raise RuntimeError(
-            f"empty final proof for problem {payload['problem_id']!r} "
-            f"attempt {attempt_idx}"
-        )
     problem_id = str(payload["problem_id"])
     return {
-        "candidate_id": candidate_id(problem_id, attempt_idx),
+        "candidate_id": candidate_id(problem_id, attempt_idx, proof_version),
         "run_id": str(payload["run_id"]),
         "problem_id": problem_id,
         "problem_ordinal": int(payload["problem_ordinal"]),
@@ -247,6 +267,8 @@ def candidate_manifest_row(
         "rank": int(payload["rank"]),
         "attempt_idx": attempt_idx,
         "candidate_position_in_payload": candidate_position,
+        "proof_version": proof_version,
+        "is_final_version": proof_version == "final",
         "selected_by_pipeline": attempt_idx == selected_attempt,
         "prompt_family": str(candidate.get("prompt_family") or "unknown"),
         "planning_strategy": str(candidate.get("planning_strategy") or "baseline"),
@@ -274,6 +296,7 @@ def candidate_manifest_row(
         "refine_handoff_count": count_outputs(candidate, "proof_refine_handoffs"),
         "validated_critique_count": count_outputs(candidate, "validated_critiques"),
         "proof_characters": len(proof),
+        "proof_sha256": hashlib.sha256(proof.encode("utf-8")).hexdigest(),
         "source_payload": str(payload_path.relative_to(run_dir)),
         "source_payload_sha256": sha256(payload_path),
     }
@@ -284,12 +307,20 @@ def export_candidates(
     rubrics_file: Path,
     output_dir: Path,
     problem_ids: list[str] | None = None,
+    proof_versions: list[str] | None = None,
 ) -> dict[str, Any]:
     manifest_path = run_dir / "manifest.json"
     manifest = read_json(manifest_path)
     rubrics = load_rubrics(rubrics_file)
     selected_results = load_primary_results(run_dir)
     requested = set(problem_ids or [])
+    resolved_proof_versions = proof_versions or ["final"]
+    if (
+        not resolved_proof_versions
+        or len(resolved_proof_versions) != len(set(resolved_proof_versions))
+        or any(value not in {"initial", "final"} for value in resolved_proof_versions)
+    ):
+        raise ValueError("proof versions must be a unique subset of initial and final")
 
     problem_dirs = sorted(
         path for path in (run_dir / "problems").iterdir() if path.is_dir()
@@ -335,42 +366,52 @@ def export_candidates(
 
         problem_candidate_rows: list[dict[str, Any]] = []
         for payload_path, payload, position, candidate in candidates:
-            metadata = candidate_manifest_row(
-                candidate=candidate,
-                candidate_position=position,
-                payload=payload,
-                payload_path=payload_path,
-                run_dir=run_dir,
-                selected_attempt=selected_attempt,
-            )
-            candidate_identifier = metadata["candidate_id"]
-            proof = str(candidate["proof_solution"]).strip()
-            grader_rows.append(
-                {
-                    "problem_id": candidate_identifier,
-                    "final_proof": proof,
-                    "source_problem_id": problem_id,
-                    "candidate_index": metadata["attempt_idx"],
-                    "source_payload": metadata["source_payload"],
-                    "source_payload_sha256": metadata["source_payload_sha256"],
-                }
-            )
-            source_rubric = rubrics[problem_id]
-            grader_rubrics.append(
-                {
-                    "Problem ID": candidate_identifier,
-                    "Problem": source_rubric["Problem"],
-                    "Grading scheme": source_rubric["Grading scheme"],
-                }
-            )
-            candidate_rows.append(metadata)
-            problem_candidate_rows.append(metadata)
+            candidate_versions = candidate_proofs(candidate, resolved_proof_versions)
+            for proof_version, proof in candidate_versions:
+                metadata = candidate_manifest_row(
+                    candidate=candidate,
+                    candidate_position=position,
+                    payload=payload,
+                    payload_path=payload_path,
+                    run_dir=run_dir,
+                    selected_attempt=selected_attempt,
+                    proof_version=proof_version,
+                    proof=proof,
+                )
+                candidate_identifier = metadata["candidate_id"]
+                grader_rows.append(
+                    {
+                        "problem_id": candidate_identifier,
+                        "final_proof": proof,
+                        "source_problem_id": problem_id,
+                        "candidate_index": metadata["attempt_idx"],
+                        "proof_version": proof_version,
+                        "source_payload": metadata["source_payload"],
+                        "source_payload_sha256": metadata["source_payload_sha256"],
+                    }
+                )
+                source_rubric = rubrics[problem_id]
+                grader_rubrics.append(
+                    {
+                        "Problem ID": candidate_identifier,
+                        "Problem": source_rubric["Problem"],
+                        "Grading scheme": source_rubric["Grading scheme"],
+                    }
+                )
+                candidate_rows.append(metadata)
+                problem_candidate_rows.append(metadata)
 
+        final_candidate_rows = [
+            row for row in problem_candidate_rows if row["is_final_version"]
+        ]
+        candidate_summary_rows = final_candidate_rows or [
+            row for row in problem_candidate_rows if row["proof_version"] == "initial"
+        ]
         final_status_counts = Counter(
-            str(row["final_status"]) for row in problem_candidate_rows
+            str(row["final_status"]) for row in candidate_summary_rows
         )
         strategy_counts = Counter(
-            row["planning_strategy"] for row in problem_candidate_rows
+            row["planning_strategy"] for row in candidate_summary_rows
         )
         problem_summaries.append(
             {
@@ -379,13 +420,14 @@ def export_candidates(
                 "assigned_candidates": int(
                     manifest["metadata"]["pipelines_per_problem"]
                 ),
-                "completed_candidates": len(problem_candidate_rows),
+                "completed_candidates": len(candidates),
+                "exported_proof_versions": len(problem_candidate_rows),
                 "failed_candidates": failed_count,
                 "skipped_candidates": skipped_count,
                 "cancelled_candidates": cancelled_count,
                 "selected_attempt": selected_attempt,
                 "selected_candidate_exported": any(
-                    row["selected_by_pipeline"] for row in problem_candidate_rows
+                    row["selected_by_pipeline"] for row in candidate_summary_rows
                 ),
                 "final_status_counts": dict(sorted(final_status_counts.items())),
                 "planning_strategy_counts": dict(sorted(strategy_counts.items())),
@@ -407,8 +449,12 @@ def export_candidates(
         "world_size": int(manifest["world_size"]),
         "pipelines_per_problem": int(manifest["metadata"]["pipelines_per_problem"]),
         "problem_ids": [row["problem_id"] for row in problem_summaries],
+        "proof_versions": resolved_proof_versions,
         "problems": problem_summaries,
-        "exported_candidates": len(candidate_rows),
+        "exported_candidates": sum(
+            row["completed_candidates"] for row in problem_summaries
+        ),
+        "exported_proof_versions": len(candidate_rows),
     }
     write_jsonl(output_dir / "records.jsonl", grader_rows)
     write_jsonl(output_dir / "rubrics.jsonl", grader_rubrics)
@@ -434,12 +480,22 @@ def main() -> None:
     parser.add_argument("--rubrics-file", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--problem-ids", nargs="+")
+    parser.add_argument(
+        "--proof-versions",
+        choices=("final", "initial-final"),
+        default="final",
+        help="Export only final proofs or paired initial and final proofs.",
+    )
     args = parser.parse_args()
+    proof_versions = (
+        ["final"] if args.proof_versions == "final" else ["initial", "final"]
+    )
     summary = export_candidates(
         args.run_dir,
         args.rubrics_file,
         args.output_dir,
         parse_problem_ids(args.problem_ids),
+        proof_versions,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

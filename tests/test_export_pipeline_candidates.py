@@ -26,6 +26,9 @@ def make_candidate(attempt_idx: int, **overrides: object) -> dict[str, object]:
         "generation_mode": "opd_xml",
         "generation_only": False,
         "proof_solution": f"Proof for candidate {attempt_idx}.",
+        "proof_generation_output": {
+            "parsed": {"proof": f"Initial proof for candidate {attempt_idx}."}
+        },
         "proof_generation_outputs": [{}],
         "proof_handoffs": [],
         "proof_verify_output": [{}, {}],
@@ -136,6 +139,7 @@ class ExportPipelineCandidatesTests(unittest.TestCase):
             ["4"],
         )
         self.assertEqual(summary["exported_candidates"], 3)
+        self.assertEqual(summary["exported_proof_versions"], 3)
         self.assertEqual(summary["problems"][0]["failed_candidates"], 1)
 
         records = [
@@ -165,6 +169,28 @@ class ExportPipelineCandidatesTests(unittest.TestCase):
         self.assertEqual(
             [row["Problem ID"] for row in rubrics],
             [row["problem_id"] for row in records],
+        )
+
+    def test_exports_paired_initial_and_final_proofs(self) -> None:
+        summary = export_candidates(
+            self.run_dir,
+            self.rubrics,
+            self.output_dir,
+            ["4"],
+            ["initial", "final"],
+        )
+        self.assertEqual(summary["exported_candidates"], 3)
+        self.assertEqual(summary["exported_proof_versions"], 6)
+        records = [
+            json.loads(line)
+            for line in (self.output_dir / "records.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(
+            [row["problem_id"] for row in records[:2]],
+            ["p4-c00-initial", "p4-c00-final"],
+        )
+        self.assertEqual(
+            {row["proof_version"] for row in records}, {"initial", "final"}
         )
 
     def test_rejects_missing_rank_payload(self) -> None:

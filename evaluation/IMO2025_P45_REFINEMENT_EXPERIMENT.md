@@ -95,6 +95,7 @@ python evaluation/export_pipeline_candidates.py \
   --run-dir evaluation/runs/<run>/runtime \
   --rubrics-file evaluation/data/imo_2025.parquet \
   --output-dir evaluation/runs/<run>/grader_input/all_final_candidates \
+  --proof-versions initial-final \
   --problem-ids 4 5
 ```
 
@@ -106,3 +107,8 @@ handoff/refinement counts, verifier/meta counts, rollback round, internal final
 score, and whether the pipeline selector chose the candidate. This makes the
 external-grade comparison capable of distinguishing a weak initial pool from
 failed refinement, verifier overconfidence, or selector error.
+
+`--proof-versions initial-final` emits a paired grader record before and after
+the verification/refinement loop for every completed candidate. The final
+proof is the rollback-aware proof actually offered to the selector. Keep
+`--proof-versions final` when only final-candidate grading is required.
