@@ -37,7 +37,9 @@ class DFlashContextCutoffPatchTests(unittest.TestCase):
 
     def test_fresh_runner_patch_preserves_native_k_wide_zero_buffer(self) -> None:
         source = (
-            patch_module.RUNNER_GATE_ORIGINAL
+            patch_module.RUNNER_LIMIT_ORIGINAL
+            + "\n"
+            + patch_module.RUNNER_GATE_ORIGINAL
             + "\n"
             + patch_module.EMPTY_DRAFTS_ORIGINAL
         )
@@ -45,6 +47,11 @@ class DFlashContextCutoffPatchTests(unittest.TestCase):
         patched = patch_module.patch_runner_source(source)
 
         self.assertIn(patch_module.RUNNER_GATE_MARKER, patched)
+        self.assertIn("DFLASH_CONTEXT_CUTOFF_WORKER_LIMIT", patched)
+        self.assertIn(
+            "drafter_context_limit = min(drafter_context_limit, explicit_cutoff)",
+            patched,
+        )
         self.assertIn(patch_module.EMPTY_DRAFTS_ORIGINAL, patched)
         self.assertNotIn("DFLASH_CONTEXT_CUTOFF_EMPTY_DRAFTS", patched)
 
@@ -66,9 +73,11 @@ class DFlashContextCutoffPatchTests(unittest.TestCase):
         )
         self.assertIn(
             "self.disable_speculation_above_context_len,\n"
-            "            num_spec_tokens_to_schedule,",
+            "            num_spec_tokens_to_schedule "
+            "+ self.speculation_context_query_extra,",
             patched,
         )
+        self.assertIn("speculative_config.use_dflash()", patched)
 
     def test_scheduler_patch_migrates_legacy_boundary_gate(self) -> None:
         source = (
@@ -82,13 +91,36 @@ class DFlashContextCutoffPatchTests(unittest.TestCase):
         patched = patch_module.patch_scheduler_source(source)
 
         self.assertIn("proposal_width: int = 0", patched)
-        self.assertIn("num_spec_tokens_to_schedule,", patched)
+        self.assertIn(
+            "num_spec_tokens_to_schedule + self.speculation_context_query_extra",
+            patched,
+        )
         self.assertNotIn("return max_scheduled_seq_len >= cutoff", patched)
+        self.assertEqual(patch_module.patch_scheduler_source(patched), patched)
+
+    def test_scheduler_patch_migrates_pre_query_extra_gate(self) -> None:
+        source = (
+            patch_module.SCHEDULER_HELPER_PATCHED
+            + "\n"
+            + patch_module.SCHEDULER_INIT_PRE_QUERY_EXTRA
+            + "\n"
+            + patch_module.SCHEDULER_DECISION_PRE_QUERY_EXTRA
+        )
+
+        patched = patch_module.patch_scheduler_source(source)
+
+        self.assertIn("self.speculation_context_query_extra", patched)
+        self.assertIn(
+            "num_spec_tokens_to_schedule + self.speculation_context_query_extra",
+            patched,
+        )
         self.assertEqual(patch_module.patch_scheduler_source(patched), patched)
 
     def test_runner_patch_migrates_legacy_zero_width_buffer(self) -> None:
         source = (
-            patch_module.RUNNER_GATE_PATCHED
+            patch_module.RUNNER_LIMIT_ORIGINAL
+            + "\n"
+            + patch_module.RUNNER_GATE_PATCHED
             + "\n"
             + patch_module.LEGACY_EMPTY_DRAFTS_PATCHED
         )
@@ -100,7 +132,9 @@ class DFlashContextCutoffPatchTests(unittest.TestCase):
 
     def test_runner_patch_is_idempotent_after_migration(self) -> None:
         source = (
-            patch_module.RUNNER_GATE_ORIGINAL
+            patch_module.RUNNER_LIMIT_ORIGINAL
+            + "\n"
+            + patch_module.RUNNER_GATE_ORIGINAL
             + "\n"
             + patch_module.EMPTY_DRAFTS_ORIGINAL
         )

@@ -127,17 +127,18 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/opd-model \
   }'
 ```
 
-The comparison reserves one full proposal block. With a cutoff of `81920` and
-10 speculative tokens, drafting stops when the scheduled context plus 10 is at
-least `81920`; this prevents a block produced below the limit from containing
-an out-of-range position. Shorter requests in the same batch also stop drafting
-until they are scheduled in a batch whose maximum context is safely below the
-cutoff. The scheduler sets the proposal width to zero, so this remains
-coordinated when `evaluation/harness_vllm/run.py` enables `--async-scheduling`.
-The worker retains vLLM's native K-wide zero buffer while clearing valid drafts;
-that buffer is required when a mixed batch moves from target-only decoding back
-to DFlash. This is a deterministic context policy, not a live acceptance-rate
-controller.
+The comparison reserves the complete DFlash query block: the sampled anchor
+plus all `K` draft queries. With a cutoff of `81920` and 10 speculative tokens,
+the scheduler therefore reserves 11 positions. Shorter requests in the same
+batch also stop drafting until they are scheduled in a batch whose maximum
+context is safely below the cutoff. The scheduler sets the proposal width to
+zero, so this remains coordinated when `evaluation/harness_vllm/run.py` enables
+`--async-scheduling`. Independently, the worker caps vLLM's method-aware
+drafter limit to the explicit cutoff before launching DFlash; this protects the
+kernel even if an asynchronous scheduler estimate is stale. The worker retains
+vLLM's native K-wide zero buffer while clearing valid drafts; that buffer is
+required when a mixed batch moves from target-only decoding back to DFlash.
+This is a deterministic context policy, not a live acceptance-rate controller.
 
 To apply only this patch to an existing vLLM `0.25.1` environment:
 

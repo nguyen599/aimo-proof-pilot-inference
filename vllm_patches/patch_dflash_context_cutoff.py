@@ -100,11 +100,25 @@ SCHEDULER_INIT_ORIGINAL = """        self.dynamic_sd_lookup: list[int] | None = 
         if speculative_config is not None:
 """
 
+SCHEDULER_INIT_PRE_QUERY_EXTRA = """        self.dynamic_sd_lookup: list[int] | None = None
+        self.disable_speculation_above_context_len = (
+            speculative_config.disable_above_context_len
+            if speculative_config is not None
+            else None
+        )
+        if speculative_config is not None:
+"""
+
 SCHEDULER_INIT_PATCHED = """        self.dynamic_sd_lookup: list[int] | None = None
         self.disable_speculation_above_context_len = (
             speculative_config.disable_above_context_len
             if speculative_config is not None
             else None
+        )
+        self.speculation_context_query_extra = (
+            1
+            if speculative_config is not None and speculative_config.use_dflash()
+            else 0
         )
         if speculative_config is not None:
 """
@@ -143,11 +157,48 @@ SCHEDULER_DECISION_PATCHED = (
             self.requests,
             num_scheduled_tokens,
             self.disable_speculation_above_context_len,
+            num_spec_tokens_to_schedule + self.speculation_context_query_extra,
+        ):
+            num_spec_tokens_to_schedule = 0
+"""
+)
+
+SCHEDULER_DECISION_PRE_QUERY_EXTRA = (
+    SCHEDULER_DECISION_ORIGINAL
+    + """
+        # DFLASH_CONTEXT_CUTOFF_SCHEDULER_GATE: reserve a complete proposal
+        # block below the draft model's context limit. Setting K=0 keeps the
+        # V1 async scheduler's placeholders and the worker's proposal width in
+        # agreement. Model Runner V2 is intentionally unchanged.
+        if not self.use_v2_model_runner and _batch_reaches_speculation_context_cutoff(
+            self.requests,
+            num_scheduled_tokens,
+            self.disable_speculation_above_context_len,
             num_spec_tokens_to_schedule,
         ):
             num_spec_tokens_to_schedule = 0
 """
 )
+
+RUNNER_LIMIT_ORIGINAL = """        return (
+            common_attn_metadata.max_seq_len + num_drafter_query_tokens
+            <= self.effective_drafter_max_model_len
+        )
+"""
+
+RUNNER_LIMIT_PATCHED = """        # DFLASH_CONTEXT_CUTOFF_WORKER_LIMIT: cap the native, method-aware
+        # drafter limit as a second line of defense. DFlash already contributes
+        # its extra anchor query through ``num_drafter_query_tokens`` above, so
+        # this check uses the exact K+1 query width seen by its input kernel.
+        drafter_context_limit = self.effective_drafter_max_model_len
+        explicit_cutoff = self.speculative_config.disable_above_context_len
+        if explicit_cutoff is not None:
+            drafter_context_limit = min(drafter_context_limit, explicit_cutoff)
+        return (
+            common_attn_metadata.max_seq_len + num_drafter_query_tokens
+            <= drafter_context_limit
+        )
+"""
 
 RUNNER_GATE_ORIGINAL = """            input_fits_in_drafter = self._input_fits_in_drafter(
                 spec_decode_common_attn_metadata
@@ -229,6 +280,18 @@ def patch_scheduler_source(source: str) -> str:
             SCHEDULER_DECISION_PATCHED,
             1,
         )
+    if SCHEDULER_INIT_PRE_QUERY_EXTRA in source:
+        source = source.replace(
+            SCHEDULER_INIT_PRE_QUERY_EXTRA,
+            SCHEDULER_INIT_PATCHED,
+            1,
+        )
+    if SCHEDULER_DECISION_PRE_QUERY_EXTRA in source:
+        source = source.replace(
+            SCHEDULER_DECISION_PRE_QUERY_EXTRA,
+            SCHEDULER_DECISION_PATCHED,
+            1,
+        )
     source = _replace_once(
         source,
         SCHEDULER_HELPER_INSERTION,
@@ -271,8 +334,16 @@ def patch_runner_source(source: str) -> str:
         RUNNER_GATE_PATCHED,
         "V1 zero-width proposal gate",
     )
+    source = _replace_once(
+        source,
+        RUNNER_LIMIT_ORIGINAL,
+        RUNNER_LIMIT_PATCHED,
+        "V1 worker context limit",
+    )
     if source.count(RUNNER_GATE_MARKER) != 1:
         raise RuntimeError("V1 context cutoff marker is incomplete")
+    if source.count("DFLASH_CONTEXT_CUTOFF_WORKER_LIMIT") != 1:
+        raise RuntimeError("V1 worker context-limit marker is incomplete")
     if "DFLASH_CONTEXT_CUTOFF_EMPTY_DRAFTS" in source:
         raise RuntimeError("Legacy zero-width DFlash draft patch remains installed")
     return source
