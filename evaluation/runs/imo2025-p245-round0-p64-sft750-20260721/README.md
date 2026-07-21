@@ -13,6 +13,10 @@ refinement, handoff, or selector-model stages can affect a candidate.
   `openai/gpt-5.6-sol` calls per proof and arithmetic-mean aggregation. P2/P4
   use six concurrent calls; P5 uses 24, or eight per API key.
 
+If one API account is out of balance, `grader-p5-funded.yaml` preserves eight
+parallel calls per funded key while excluding the depleted account. The July
+21 run used this fallback after key slot 0 returned HTTP 402.
+
 After generation, prepare the exact grader inputs with:
 
 ```bash
