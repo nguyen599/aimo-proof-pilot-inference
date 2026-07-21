@@ -20,6 +20,11 @@ DP_SIZE="${AIMO_DATA_PARALLEL_SIZE:-4}"
 # vLLM applies max_num_seqs independently to every DP engine replica.
 MAX_NUM_SEQS_PER_DP="${AIMO_MAX_NUM_SEQS_PER_DP:-32}"
 REQUESTS_PER_GPU="${AIMO_REQUESTS_PER_GPU:-32}"
+PIPELINES_PER_PROBLEM="${AIMO_PIPELINES_PER_PROBLEM:-36}"
+REFINE_ROUNDS="${AIMO_REFINE_ROUNDS:-4}"
+PROOF_GENERATION_ONLY="${AIMO_PROOF_GENERATION_ONLY:-false}"
+THINKING_BUDGET_HANDOFF_ENABLED="${AIMO_THINKING_BUDGET_HANDOFF_ENABLED:-true}"
+SELECTOR_MODE="${AIMO_SELECTOR_MODE:-llm}"
 VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_REQUEST_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_N="${AIMO_VERIFY_N:-8}"
@@ -33,6 +38,7 @@ for value_name in \
     DP_SIZE \
     MAX_NUM_SEQS_PER_DP \
     REQUESTS_PER_GPU \
+    PIPELINES_PER_PROBLEM \
     VERIFY_N \
     REFINE_REVIEW_N \
     MIN_VALID_LOW \
@@ -44,6 +50,24 @@ do
         exit 2
     fi
 done
+for value_name in REFINE_ROUNDS; do
+    value="${!value_name}"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "$value_name must be a nonnegative integer, got $value" >&2
+        exit 2
+    fi
+done
+for value_name in PROOF_GENERATION_ONLY THINKING_BUDGET_HANDOFF_ENABLED; do
+    value="${!value_name}"
+    if [ "$value" != "true" ] && [ "$value" != "false" ]; then
+        echo "$value_name must be true or false, got $value" >&2
+        exit 2
+    fi
+done
+if [ "$SELECTOR_MODE" != "llm" ] && [ "$SELECTOR_MODE" != "score" ]; then
+    echo "SELECTOR_MODE must be llm or score, got $SELECTOR_MODE" >&2
+    exit 2
+fi
 for value_name in \
     VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING \
     VERIFY_REQUEST_LIMIT_WHILE_GENERATING \
@@ -269,7 +293,7 @@ args=(
     --vllm-extra-args "$vllm_extra_args"
     --served-model-name proof-model
     --server-timeout 7200
-    --pipelines-per-problem 36
+    --pipelines-per-problem "$PIPELINES_PER_PROBLEM"
     --max-concurrent-problems "$MAX_CONCURRENT_PROBLEMS"
     --verify-candidate-limit-while-generating "$VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING"
     --verify-request-limit-while-generating "$VERIFY_REQUEST_LIMIT_WHILE_GENERATING"
@@ -277,18 +301,29 @@ args=(
     --verifier-generalist-n "$VERIFIER_GENERALIST_N"
     --refine-review-n "$REFINE_REVIEW_N"
     --min-valid-low "$MIN_VALID_LOW"
-    --refine-rounds 4
-    --thinking-budget-handoff-enabled
-    --thinking-budget-handoff-mode lossless_partial
-    --thinking-budget-handoff-preserve-refine-rounds
-    --thinking-budget-restart-strategy deadline_aware
-    --thinking-budget-restart-until-complete
-    --thinking-budget-final-round-tokens 0
-    --thinking-budget-refine-handoff-enabled
-    --thinking-budget-refine-tokens "$REFINE_THINKING_BUDGET"
-    --thinking-budget-refine-final-round-tokens "$REFINE_THINKING_BUDGET"
-    --thinking-budget-refine-max-restarts 1
+    --refine-rounds "$REFINE_ROUNDS"
+    --selector-mode "$SELECTOR_MODE"
 )
+
+if [ "$PROOF_GENERATION_ONLY" = "true" ]; then
+    args+=(--proof-generation-only)
+fi
+if [ "$THINKING_BUDGET_HANDOFF_ENABLED" = "true" ]; then
+    args+=(
+        --thinking-budget-handoff-enabled
+        --thinking-budget-handoff-mode lossless_partial
+        --thinking-budget-handoff-preserve-refine-rounds
+        --thinking-budget-restart-strategy deadline_aware
+        --thinking-budget-restart-until-complete
+        --thinking-budget-final-round-tokens 0
+        --thinking-budget-refine-handoff-enabled
+        --thinking-budget-refine-tokens "$REFINE_THINKING_BUDGET"
+        --thinking-budget-refine-final-round-tokens "$REFINE_THINKING_BUDGET"
+        --thinking-budget-refine-max-restarts 1
+    )
+else
+    args+=(--no-thinking-budget-handoff-enabled)
+fi
 
 printf '#!/usr/bin/env bash\nexec ' > "$rank_command"
 printf '%q ' "${args[@]}" >> "$rank_command"
@@ -299,6 +334,7 @@ echo "source_commit=$AIMO_SOURCE_COMMIT"
 echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
 echo "vllm_capacity=tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((8 * REQUESTS_PER_GPU))"
+echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} refine_rounds:${REFINE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE}"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
 echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"
 echo "command_file=$rank_command"

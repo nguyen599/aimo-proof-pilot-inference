@@ -197,6 +197,7 @@ def pipeline_cfg(**overrides):
         "meta_thinking_budget_tokens": 0,
         "meta_thinking_budget_force_text": "",
         "wait_for_all_generations_before_verify": False,
+        "proof_generation_only": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -1644,6 +1645,43 @@ class PriorityRequestSchedulerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_proof_generation_only_skips_all_followup_calls(self):
+        class FakeScheduler:
+            tokenizer = FakeTokenizer()
+
+            def __init__(self):
+                self.calls = []
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append((stage, prompt, kwargs))
+                if stage != "proof_generation":
+                    raise AssertionError(stage)
+                return {
+                    "success": True,
+                    "text": (
+                        "<solution>A complete proof.</solution>"
+                        "<self_evaluation>Every step is justified.</self_evaluation>"
+                        "<score>1</score>"
+                    ),
+                    "finish_reason": "stop",
+                    "usage": {"thinking_budget_applied": False},
+                }
+
+        scheduler = FakeScheduler()
+        result = await run.run_candidate_pipeline(
+            "Prove the claim.",
+            0,
+            1,
+            scheduler,
+            pipeline_cfg(proof_generation_only=True),
+        )
+
+        self.assertEqual([stage for stage, _, _ in scheduler.calls], ["proof_generation"])
+        self.assertIsNone(result["error"])
+        self.assertTrue(result["candidate"]["generation_only"])
+        self.assertEqual(result["candidate"]["final_status"], "proof_generation_only")
+        self.assertEqual(result["candidate"]["proof_solution"], "A complete proof.")
+
     def test_final_restart_round_can_use_a_smaller_reasoning_budget(self):
         cfg = pipeline_cfg(
             proof_max_new_tokens=512,

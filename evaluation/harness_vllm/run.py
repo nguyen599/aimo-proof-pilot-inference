@@ -367,6 +367,7 @@ class CFG:
     stop_on_strict_pass = False
     verification_early_stop = False
     wait_for_all_generations_before_verify = False
+    proof_generation_only = False
     verify_candidate_limit_while_generating = int(
         os.environ.get("AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING", "0")
     )
@@ -560,6 +561,7 @@ class PipelineConfig:
     stop_on_strict_pass: bool
     verification_early_stop: bool
     wait_for_all_generations_before_verify: bool
+    proof_generation_only: bool
     thinking_budget_enabled: bool
     proof_generation_thinking_budgets: list[int]
     thinking_budget_force_text: str
@@ -5964,6 +5966,15 @@ async def run_candidate_pipeline(
                 "candidate": None,
                 "error": "invalid_generation",
             }
+        if cfg.proof_generation_only:
+            return {
+                "attempt_idx": attempt_idx,
+                "candidate": make_generation_only_candidate(
+                    initial_generation,
+                    "proof_generation_only",
+                ),
+                "error": None,
+            }
         wait_decision = await maybe_wait_all_candidates(
             initial_generation,
             cfg,
@@ -6756,6 +6767,7 @@ class ProofRuntime:
         stop_on_strict_pass: bool,
         verification_early_stop: bool,
         wait_for_all_generations_before_verify: bool,
+        proof_generation_only: bool,
         verify_candidate_limit_while_generating: int,
         verify_request_limit_while_generating: int,
         verify_n: int,
@@ -6943,6 +6955,7 @@ class ProofRuntime:
             wait_for_all_generations_before_verify=bool(
                 wait_for_all_generations_before_verify
             ),
+            proof_generation_only=bool(proof_generation_only),
             thinking_budget_enabled=thinking_budget_enabled,
             proof_generation_thinking_budgets=[
                 int(value) for value in proof_generation_thinking_budgets
@@ -7583,6 +7596,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--max-concurrent-problems", type=int)
     pipeline.add_argument("--deepseek-math-v2-candidate-count", type=int)
     pipeline.add_argument(
+        "--proof-generation-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Stop each candidate after its initial proof-generation call; skip "
+            "verifier, meta-verifier, refinement, and LLM selector calls."
+        ),
+    )
+    pipeline.add_argument(
         "--verify-candidate-limit-while-generating",
         type=int,
     )
@@ -7710,6 +7732,7 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "pipelines_per_problem": "pipelines_per_problem",
         "max_concurrent_problems": "max_concurrent_problems",
         "deepseek_math_v2_candidate_count": "deepseek_math_v2_candidate_count",
+        "proof_generation_only": "proof_generation_only",
         "verify_candidate_limit_while_generating": (
             "verify_candidate_limit_while_generating"
         ),
@@ -7954,6 +7977,7 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.deepseek_math_v2_candidate_count
             ),
             "proof_only_candidate_count": int(cfg.proof_only_candidate_count),
+            "proof_generation_only": bool(cfg.proof_generation_only),
             "verify_candidate_limit_while_generating": int(
                 cfg.verify_candidate_limit_while_generating
             ),
@@ -8044,7 +8068,8 @@ def run(cfg: type[CFG] = CFG) -> None:
     setup_logging(runtime_logdir)
     logging.info(
         "Inference runtime: stream_vllm=%s stream_vllm_server_log=%s verbose=%s "
-        "meta_policy=%s strict_pass_meta=%s max_concurrent_problems=%s "
+        "meta_policy=%s strict_pass_meta=%s proof_generation_only=%s "
+        "max_concurrent_problems=%s "
         "candidates=%s deepseek_math_v2_candidates=%s gpus=%s tp=%s dp=%s "
         "max_concurrent_requests=%s requests_per_gpu=%s "
         "verify_candidates_while_generating=%s "
@@ -8063,6 +8088,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.verbose,
         cfg.meta_policy,
         cfg.strict_pass_meta,
+        cfg.proof_generation_only,
         cfg.max_concurrent_problems,
         cfg.pipelines_per_problem,
         cfg.deepseek_math_v2_candidate_count,
@@ -8116,6 +8142,7 @@ def run(cfg: type[CFG] = CFG) -> None:
             wait_for_all_generations_before_verify=(
                 cfg.wait_for_all_generations_before_verify
             ),
+            proof_generation_only=cfg.proof_generation_only,
             verify_candidate_limit_while_generating=(
                 cfg.verify_candidate_limit_while_generating
             ),
