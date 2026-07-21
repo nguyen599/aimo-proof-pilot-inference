@@ -79,6 +79,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--verify-n", type=int, default=4)
+    parser.add_argument(
+        "--verifier-generalist-n",
+        type=int,
+        help=(
+            "Use this many unmodified generalist verifier prompts before "
+            "specialist prompts. Omit it to preserve the legacy all-specialist "
+            "replay behavior."
+        ),
+    )
     parser.add_argument("--meta-n", type=int, default=1)
     parser.add_argument(
         "--meta-policy",
@@ -86,6 +95,14 @@ def parse_args() -> argparse.Namespace:
         default="low-only",
     )
     parser.add_argument("--refine-review-n", type=int, default=2)
+    parser.add_argument("--refine-rounds", type=int, default=1)
+    parser.add_argument("--min-valid-low", type=int, default=1)
+    parser.add_argument(
+        "--strict-pass-meta",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Require every verifier critique to pass meta review for a strict pass.",
+    )
     parser.add_argument("--proof-max-tokens", type=int, default=65_000)
     parser.add_argument("--verifier-max-tokens", type=int, default=32_000)
     parser.add_argument("--meta-max-tokens", type=int, default=32_000)
@@ -384,17 +401,27 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "generation_parsed": parsed,
         "proof": parsed["proof"],
     }
+    verify_n = max(1, int(args.verify_n))
+    verifier_generalist_n = args.verifier_generalist_n
+    if verifier_generalist_n is not None:
+        verifier_generalist_n = int(verifier_generalist_n)
+        if not 0 <= verifier_generalist_n <= verify_n:
+            raise ValueError(
+                "verifier_generalist_n must be between 0 and verify_n"
+            )
+
     cfg = SimpleNamespace(
         proof_max_new_tokens=max(1, int(args.proof_max_tokens)),
         default_temperature=float(args.temperature),
         proof_generation_temperatures=[],
-        verify_n=max(1, int(args.verify_n)),
+        verify_n=verify_n,
+        verifier_generalist_n=verifier_generalist_n,
         meta_n=max(0, int(args.meta_n)),
         meta_policy=str(args.meta_policy),
-        strict_pass_meta=False,
-        refine_rounds=1,
+        strict_pass_meta=bool(args.strict_pass_meta),
+        refine_rounds=max(0, int(args.refine_rounds)),
         refine_review_n=max(1, int(args.refine_review_n)),
-        min_valid_low=1,
+        min_valid_low=max(1, int(args.min_valid_low)),
         verification_early_stop=False,
         thinking_budget_enabled=True,
         thinking_budget_handoff_max_tokens=int(
@@ -451,33 +478,39 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         meta_thinking_budget_force_text=CFG.meta_thinking_budget_force_text,
     )
     resume_details = None
-    if args.resume_refinement_result is not None:
-        candidate, resume_details = await resume_final_refinement(
-            path=args.resume_refinement_result,
-            question=question,
-            initial_parsed=parsed,
-            scheduler=scheduler,
-            cfg=cfg,
-        )
-    else:
-        candidate = await run_single_attempt(
-            question,
-            0,
-            1,
-            scheduler,
-            cfg,
-            initial_generation=initial_generation,
-        )
+    try:
+        if args.resume_refinement_result is not None:
+            candidate, resume_details = await resume_final_refinement(
+                path=args.resume_refinement_result,
+                question=question,
+                initial_parsed=parsed,
+                scheduler=scheduler,
+                cfg=cfg,
+            )
+        else:
+            candidate = await run_single_attempt(
+                question,
+                0,
+                1,
+                scheduler,
+                cfg,
+                initial_generation=initial_generation,
+            )
+    finally:
+        scheduler.close()
     return {
         "source": source,
         "restart_results": str(args.restart_results),
         "question": question,
         "settings": {
             "verify_n": cfg.verify_n,
+            "verifier_generalist_n": cfg.verifier_generalist_n,
             "meta_n": cfg.meta_n,
             "meta_policy": cfg.meta_policy,
+            "strict_pass_meta": cfg.strict_pass_meta,
             "refine_rounds": cfg.refine_rounds,
             "refine_review_n": cfg.refine_review_n,
+            "min_valid_low": cfg.min_valid_low,
             "proof_max_tokens": args.proof_max_tokens,
             "verifier_max_tokens": args.verifier_max_tokens,
             "meta_max_tokens": args.meta_max_tokens,
