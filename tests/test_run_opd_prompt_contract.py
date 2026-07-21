@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,31 @@ from evaluation.harness_vllm import run  # noqa: E402
 
 
 class RunOpdPromptContractTests(unittest.TestCase):
+    def test_cfg_reads_proof_generation_only_environment(self):
+        env = dict(os.environ)
+        env["AIMO_PROOF_GENERATION_ONLY"] = "true"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from evaluation.harness_vllm.run import CFG; "
+                    "print(CFG.proof_generation_only)"
+                ),
+            ],
+            cwd=REPO,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "True")
+
+    def test_nii_launcher_accepts_adaptive_proof_portfolio(self):
+        launcher = (REPO / "scripts" / "launch_nii_imo2025_all.sh").read_text()
+        self.assertIn("baseline|diverse|adaptive", launcher)
+
     def test_cli_overrides_cfg_and_distributed_environment(self):
         cfg = SimpleNamespace(
             model_path=Path("/old-model"),

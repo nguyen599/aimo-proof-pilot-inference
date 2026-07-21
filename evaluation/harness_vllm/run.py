@@ -457,7 +457,10 @@ class CFG:
     stop_on_strict_pass = False
     verification_early_stop = False
     wait_for_all_generations_before_verify = False
-    proof_generation_only = False
+    proof_generation_only = environment_flag(
+        "AIMO_PROOF_GENERATION_ONLY",
+        False,
+    )
     proof_generation_strategy_portfolio = os.environ.get(
         "AIMO_PROOF_GENERATION_STRATEGY_PORTFOLIO",
         "baseline",

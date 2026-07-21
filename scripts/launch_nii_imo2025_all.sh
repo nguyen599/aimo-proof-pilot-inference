@@ -72,9 +72,9 @@ if [ "$SELECTOR_MODE" != "llm" ] && [ "$SELECTOR_MODE" != "score" ]; then
     exit 2
 fi
 case "$PROOF_GENERATION_STRATEGY_PORTFOLIO" in
-    baseline|diverse) ;;
+    baseline|diverse|adaptive) ;;
     *)
-        echo "PROOF_GENERATION_STRATEGY_PORTFOLIO must be baseline or diverse, got $PROOF_GENERATION_STRATEGY_PORTFOLIO" >&2
+        echo "PROOF_GENERATION_STRATEGY_PORTFOLIO must be baseline, diverse, or adaptive, got $PROOF_GENERATION_STRATEGY_PORTFOLIO" >&2
         exit 2
         ;;
 esac
