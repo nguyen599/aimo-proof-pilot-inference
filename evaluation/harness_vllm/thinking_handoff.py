@@ -132,6 +132,7 @@ _PROOF_SHORTCUT = re.compile(
     r"(?i)\b(?:"
     r"straightforward|routine|similarly|analogously|"
     r"details? (?:are )?omitted|proof omitted|without proof|"
+    r"(?:we|i) (?:omit|omitted)|"
     r"left to (?:the )?reader|one can show|it can be shown|"
     r"after (?:some|lengthy|routine) (?:algebra|calculation)|"
     r"by a standard (?:argument|lemma|result)"

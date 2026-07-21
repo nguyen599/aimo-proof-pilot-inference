@@ -1050,6 +1050,31 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertFalse(analysis["is_valid_checkpoint"])
         self.assertIn("L1:proof_contains_omission_shortcut", analysis["issues"])
 
+    def test_proof_checkpoint_analysis_rejects_first_person_omission(self):
+        checkpoint = assemble_handoff(
+            {
+                "established": (
+                    "[PROVED_LEMMA L1]\n"
+                    "STATEMENT:\nThe target geometry statement holds.\n"
+                    "DEPENDENCIES:\nORIGINAL_PROBLEM_ONLY\n"
+                    "FULL_PROOF:\nIntroduce coordinates for all points and "
+                    "expand the claimed circle equation. We omit the detailed "
+                    "algebraic verification, which is the remaining step.\n"
+                    "[END_PROVED_LEMMA]"
+                ),
+                "promising": "NONE",
+                "failed": "NONE",
+                "uncertain": "NONE",
+                "bottleneck": "NONE",
+                "next_steps": "Use L1.",
+            }
+        )
+
+        analysis = analyze_proof_checkpoint(checkpoint)
+
+        self.assertFalse(analysis["is_valid_checkpoint"])
+        self.assertIn("L1:proof_contains_omission_shortcut", analysis["issues"])
+
     def test_proof_checkpoint_analysis_rejects_explicitly_incomplete_proof(self):
         checkpoint = assemble_handoff(
             {
