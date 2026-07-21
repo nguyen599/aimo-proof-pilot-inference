@@ -10,8 +10,8 @@ refinement, handoff, or selector-model stages can affect a candidate.
 - Proof limit: 126,000 completion tokens; the production thinking-budget
   controller records cutoff status in `usage.thinking_budget_applied`.
 - Grading: only non-cutoff, structurally parseable final proofs; two independent
-  `openai/gpt-5.6-sol` calls per proof, arithmetic mean, six concurrent calls
-  spread across three API keys.
+  `openai/gpt-5.6-sol` calls per proof and arithmetic-mean aggregation. P2/P4
+  use six concurrent calls; P5 uses 24, or eight per API key.
 
 After generation, prepare the exact grader inputs with:
 
