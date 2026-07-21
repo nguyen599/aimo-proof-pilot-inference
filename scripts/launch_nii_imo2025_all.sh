@@ -7,7 +7,7 @@ set -euo pipefail
 
 RUN_ID="${AIMO_RUN_ID:?set AIMO_RUN_ID to a unique run identifier}"
 SOURCE_REPO="${AIMO_SOURCE_REPO:-/tmp/aimo-proof-pilot-inference-runtime/repo}"
-SOURCE_REF="main"
+SOURCE_REF="${AIMO_SOURCE_REF:-main}"
 VENV="${AIMO_VENV:-/tmp/aimo-proof-pilot-inference-runtime/venv-vllm-0.25.1}"
 MODEL_PATH="${AIMO_MODEL_PATH:-/tmp/models/olmo3-opd-sft-750-vllm}"
 DFLASH_MODEL_PATH="${AIMO_DFLASH_MODEL_PATH:-/tmp/models/dflash-32b-draft-v2test-phaseL}"
@@ -201,8 +201,8 @@ PY
         fi
         sleep $((attempt * 3))
     done
-    git -C "$code_dir" fetch \
-        "$SOURCE_REPO" "refs/remotes/origin/${SOURCE_REF}"
+    source_commit="$(git -C "$SOURCE_REPO" rev-parse FETCH_HEAD)"
+    git -C "$code_dir" fetch "$SOURCE_REPO" "$source_commit"
     git -C "$code_dir" checkout --detach --force FETCH_HEAD
 
     master_addr="$($VENV/bin/python - <<'PY'
