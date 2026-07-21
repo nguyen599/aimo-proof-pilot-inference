@@ -43,9 +43,11 @@ Handoff modes are:
 
 Restart strategies are `standard` and `deadline_aware`. Prompt variants
 `evidence_first`, `lemma_ledger`, and `continuation_frontier` apply to model
-handoffs. `--thinking-budget-final-round-tokens 0` preserves the previous final
-round behavior; a positive value reserves the rest of `--max-new-tokens` for
-visible output. Disable the feature with
+handoffs. The experimental `proof_checkpoint` variant additionally requires
+every established lemma to carry its complete proof; see the replay results
+below before using it. `--thinking-budget-final-round-tokens 0` preserves the
+previous final-round behavior; a positive value reserves the rest of
+`--max-new-tokens` for visible output. Disable the feature with
 `--no-thinking-budget-handoff-enabled`.
 
 By default, each budget restart consumes one configured refinement round to
@@ -91,6 +93,45 @@ saved prompt text. Equivalent token segmentations may differ slightly in token
 count; `--max-token-drift` defaults to 4 and rejects larger differences.
 It writes each full call under `calls/` and checkpoints `results.jsonl`,
 `results.csv`, and `summary.json` after every completed or failed request.
+
+### Proof-carrying checkpoint replay (2026-07-21)
+
+`proof_checkpoint` asks the stopped solver to archive only lemmas whose full
+proof already exists in the exhausted reasoning context. Each lemma has an
+explicit statement, dependency list, and full proof. A structural filter
+rejects omission phrases and uncertainty language. The optimizer can then run
+a separate fresh-context audit that marks each lemma `REUSABLE`, `MINOR_CHECK`,
+or `REPROVE`; private audit reasoning is ignored and only the final
+`checkpoint_audit` block is parsed.
+
+The NII replay used four diverse saved IMO 2025 cutoff contexts, covering both
+problems in the saved run and both previously parseable and unparseable forced
+outputs. It evaluated temperatures `1.0` and `0.7` with a 32,768-token
+checkpoint limit, one repair attempt, an 8,192-token fresh audit, and eight
+concurrent jobs split across two TP2/DP4 H200 vLLM servers.
+
+| Temperature | Valid XML | Valid checkpoint | Audit pass | Honest no-lemma | Completion tokens |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0.7 | 1/4 | 0/4 | 0/4 | 0/4 | 175,249 |
+| 1.0 | 3/4 | 1/4 | 0/4 | 1/4 | 86,930 |
+
+No generated checkpoint contained an independently reusable proved lemma. The
+common failure was to relabel the original unsolved target as a proved lemma,
+then omit the decisive calculation with language such as "after algebraic
+simplification." The structural checker or fresh auditor rejected these
+outputs. The sole valid checkpoint correctly declared
+`NO_FULLY_PROVED_REUSABLE_LEMMA`, but all other sections were `None`, so it did
+not preserve useful research state. Temperature `0.7` also frequently exhausted
+both the initial and repair budgets without closing a valid checkpoint.
+
+No proof restart was run from this batch: the only accepted checkpoint carried
+no lemma and no continuation state, so such a call would measure an ordinary
+fresh retry rather than checkpoint reuse. Do not enable `proof_checkpoint` in a
+production launcher from this result. Keep `lossless_partial` as the current
+production mode because it preserves the model's detailed partial-progress
+report without promoting unproved claims. A future checkpoint experiment should
+first demonstrate at least one fresh-audited reusable lemma before paying for a
+long restart evaluation.
 
 ## Replay verifier refinement
 

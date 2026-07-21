@@ -18,18 +18,21 @@ from transformers import AutoTokenizer
 try:
     from evaluation.harness_vllm.thinking_handoff import (
         FINAL_PARTIAL_FORCE_MARKER,
+        CHECKPOINT_AUDIT_ASSISTANT_PREFIX,
         HANDOFF_ASSISTANT_PREFIX,
         HANDOFF_REQUIRED_SECTIONS,
         HANDOFF_SECTION_MAX_TOKENS,
         HANDOFF_VARIANTS,
         MAP_REDUCE_SECTION_MAX_TOKENS,
+        PROOF_CHECKPOINT_VARIANT,
         SavedProofGenerationCall,
+        analyze_proof_checkpoint,
         assemble_handoff,
-        build_empty_restart_handoff,
         build_lossless_partial_handoff,
         build_structured_partial_force_text,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
+        build_proof_checkpoint_audit_prompt_ids,
         build_handoff_repair_instruction,
         build_handoff_section_from_digests_prompt_ids,
         build_handoff_section_from_partial_progress_prompt_ids,
@@ -40,6 +43,7 @@ try:
         normalize_handoff_section,
         normalize_research_digest,
         parse_handoff_response,
+        parse_proof_checkpoint_audit,
         parse_saved_proof_generation_call,
         prepare_handoff_research_windows,
         extract_forced_partial_progress,
@@ -50,18 +54,21 @@ except ModuleNotFoundError as exc:
         raise
     from thinking_handoff import (  # type: ignore[no-redef]
         FINAL_PARTIAL_FORCE_MARKER,
+        CHECKPOINT_AUDIT_ASSISTANT_PREFIX,
         HANDOFF_ASSISTANT_PREFIX,
         HANDOFF_REQUIRED_SECTIONS,
         HANDOFF_SECTION_MAX_TOKENS,
         HANDOFF_VARIANTS,
         MAP_REDUCE_SECTION_MAX_TOKENS,
+        PROOF_CHECKPOINT_VARIANT,
         SavedProofGenerationCall,
+        analyze_proof_checkpoint,
         assemble_handoff,
-        build_empty_restart_handoff,
         build_lossless_partial_handoff,
         build_structured_partial_force_text,
         build_fresh_handoff_section_prompt_ids,
         build_handoff_instruction,
+        build_proof_checkpoint_audit_prompt_ids,
         build_handoff_repair_instruction,
         build_handoff_section_from_digests_prompt_ids,
         build_handoff_section_from_partial_progress_prompt_ids,
@@ -72,6 +79,7 @@ except ModuleNotFoundError as exc:
         normalize_handoff_section,
         normalize_research_digest,
         parse_handoff_response,
+        parse_proof_checkpoint_audit,
         parse_saved_proof_generation_call,
         prepare_handoff_research_windows,
         extract_forced_partial_progress,
@@ -111,6 +119,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument(
+        "--checkpoint-audit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "After a proof_checkpoint handoff, run a fresh-context lemma audit "
+            "against the original problem."
+        ),
+    )
+    parser.add_argument("--checkpoint-audit-max-tokens", type=int, default=4096)
+    parser.add_argument("--checkpoint-audit-temperature", type=float, default=0.2)
+    parser.add_argument(
         "--generation-mode",
         choices=(
             "monolithic",
@@ -119,7 +138,6 @@ def parse_args() -> argparse.Namespace:
             "map_reduce",
             "partial_sectioned",
             "partial_passthrough",
-            "empty_baseline",
             "structured_force_passthrough",
         ),
         default="fresh_sectioned",
@@ -302,6 +320,9 @@ def call_handoff(
     top_p: float,
     request_timeout_seconds: float,
     output_dir: Path,
+    checkpoint_audit: bool = False,
+    checkpoint_audit_max_tokens: int = 4096,
+    checkpoint_audit_temperature: float = 0.2,
 ) -> dict[str, Any]:
     started = time.monotonic()
     client = OpenAI(
@@ -339,12 +360,18 @@ def call_handoff(
             for key in ("prompt_tokens", "completion_tokens", "total_tokens")
             if response.usage is not None and hasattr(response.usage, key)
         }
+        parsed = parse_handoff_response(raw_output)
         return {
             "name": attempt_name,
             "prompt_ids": active_prompt_ids,
             "completion_text": completion_text,
             "raw_output": raw_output,
-            "parsed": parse_handoff_response(raw_output),
+            "parsed": parsed,
+            "checkpoint_analysis": (
+                analyze_proof_checkpoint(raw_output)
+                if variant == PROOF_CHECKPOINT_VARIANT
+                else None
+            ),
             "finish_reason": choice.finish_reason,
             "usage": usage,
             "temperature": (
@@ -373,30 +400,6 @@ def call_handoff(
         raw_output = build_lossless_partial_handoff(attempt["raw_output"])
         parsed = parse_handoff_response(raw_output)
         finish_reason = "structured_force_passthrough"
-    elif generation_mode == "empty_baseline":
-        prompt_ids = []
-        raw_output = build_empty_restart_handoff()
-        parsed = parse_handoff_response(raw_output)
-        finish_reason = "empty_baseline"
-        attempts.append(
-            {
-                "name": "empty_baseline",
-                "prompt_ids": prompt_ids,
-                "completion_text": "",
-                "raw_output": raw_output,
-                "parsed": parsed,
-                "finish_reason": finish_reason,
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
-                "temperature": temperature,
-                "context_metadata": {
-                    "baseline": "fresh_restart_without_mathematical_handoff",
-                },
-            }
-        )
     elif generation_mode == "partial_passthrough":
         partial_progress = extract_forced_partial_progress(
             prepared["record"].output_text
@@ -600,7 +603,12 @@ def call_handoff(
             close_open_thinking=True,
         )
         attempts.append(complete(prompt_ids, "initial"))
-        if repair_invalid and not attempts[-1]["parsed"]["is_valid"]:
+        initial_acceptable = bool(attempts[-1]["parsed"]["is_valid"])
+        if variant == PROOF_CHECKPOINT_VARIANT:
+            initial_acceptable = bool(
+                attempts[-1]["checkpoint_analysis"]["is_valid_checkpoint"]
+            )
+        if repair_invalid and not initial_acceptable:
             completion_ids = tokenizer.encode(
                 attempts[-1]["completion_text"],
                 add_special_tokens=False,
@@ -611,7 +619,7 @@ def call_handoff(
             repair_prompt_ids = build_user_turn_prompt_ids(
                 tokenizer,
                 previous_context_ids,
-                build_handoff_repair_instruction(),
+                build_handoff_repair_instruction(variant),
                 close_open_thinking=False,
             )
             attempts.append(complete(repair_prompt_ids, "repair"))
@@ -622,8 +630,66 @@ def call_handoff(
     else:
         raise ValueError(f"unsupported handoff generation mode: {generation_mode!r}")
 
+    checkpoint_analysis = (
+        analyze_proof_checkpoint(raw_output)
+        if variant == PROOF_CHECKPOINT_VARIANT
+        else None
+    )
+    checkpoint_audit_result: dict[str, Any] | None = None
+    if checkpoint_audit and variant == PROOF_CHECKPOINT_VARIANT:
+        audit_prompt_ids = build_proof_checkpoint_audit_prompt_ids(
+            tokenizer,
+            original_input_prompt=prepared["record"].input_prompt,
+            checkpoint_text=raw_output,
+        )
+        audit_response = client.completions.create(
+            model=served_model_name,
+            prompt=audit_prompt_ids,
+            temperature=checkpoint_audit_temperature,
+            top_p=top_p,
+            max_tokens=checkpoint_audit_max_tokens,
+        )
+        audit_choice = audit_response.choices[0]
+        audit_raw_output = (
+            CHECKPOINT_AUDIT_ASSISTANT_PREFIX + (audit_choice.text or "")
+        )
+        audit_parsed = parse_proof_checkpoint_audit(audit_raw_output)
+        checkpoint_ids = {
+            str(lemma["id"])
+            for lemma in (checkpoint_analysis or {}).get("lemmas", [])
+        }
+        audited_ids = {
+            str(audit["id"])
+            for audit in audit_parsed.get("lemma_audits", [])
+        }
+        audit_parsed["covers_all_checkpoint_lemmas"] = (
+            checkpoint_ids == audited_ids
+            and (
+                bool(checkpoint_ids)
+                or audit_parsed.get("overall") == "NO_LEMMAS"
+            )
+        )
+        checkpoint_audit_result = {
+            "prompt_ids": audit_prompt_ids,
+            "raw_output": audit_raw_output,
+            "parsed": audit_parsed,
+            "finish_reason": audit_choice.finish_reason,
+            "temperature": checkpoint_audit_temperature,
+            "usage": {
+                key: getattr(audit_response.usage, key)
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                if audit_response.usage is not None
+                and hasattr(audit_response.usage, key)
+            },
+        }
+
     usage = {
-        key: sum(int(attempt["usage"].get(key) or 0) for attempt in attempts)
+        key: (
+            sum(int(attempt["usage"].get(key) or 0) for attempt in attempts)
+            + int(
+                (checkpoint_audit_result or {}).get("usage", {}).get(key) or 0
+            )
+        )
         for key in ("prompt_tokens", "completion_tokens", "total_tokens")
     }
     run_id = case_run_id(prepared["source"], variant, temperature)
@@ -661,6 +727,21 @@ def call_handoff(
                         "",
                     )
                 ),
+                *(
+                    (
+                        "===== CHECKPOINT AUDIT INPUT =====",
+                        tokenizer.decode(
+                            checkpoint_audit_result["prompt_ids"],
+                            skip_special_tokens=False,
+                        ),
+                        "",
+                        "===== CHECKPOINT AUDIT OUTPUT =====",
+                        checkpoint_audit_result["raw_output"],
+                        "",
+                    )
+                    if checkpoint_audit_result is not None
+                    else ()
+                ),
             ]
         ),
         encoding="utf-8",
@@ -682,6 +763,16 @@ def call_handoff(
         "latency_s": time.monotonic() - started,
         "usage": usage,
         "parsed": parsed,
+        "checkpoint_analysis": checkpoint_analysis,
+        "checkpoint_audit": (
+            {
+                key: value
+                for key, value in checkpoint_audit_result.items()
+                if key != "prompt_ids"
+            }
+            if checkpoint_audit_result is not None
+            else None
+        ),
         "raw_output": raw_output,
         "repair_used": generation_mode == "monolithic" and len(attempts) > 1,
         "attempts": [
@@ -696,6 +787,7 @@ def call_handoff(
                 "temperature": attempt["temperature"],
                 "usage": attempt["usage"],
                 "parsed": attempt["parsed"],
+                "checkpoint_analysis": attempt.get("checkpoint_analysis"),
                 "raw_output": attempt["raw_output"],
             }
             for attempt in attempts
@@ -739,6 +831,44 @@ def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
                 result.get("attempts", [{}])[0].get("parsed", {}).get("is_valid", False)
             ),
             "valid_handoff": result.get("parsed", {}).get("is_valid", False),
+            "valid_checkpoint": (
+                result.get("checkpoint_analysis", {}).get("is_valid_checkpoint")
+                if result.get("checkpoint_analysis") is not None
+                else None
+            ),
+            "checkpoint_lemmas": (
+                result.get("checkpoint_analysis", {}).get("lemma_count")
+                if result.get("checkpoint_analysis") is not None
+                else None
+            ),
+            "structurally_reusable_lemmas": (
+                result.get("checkpoint_analysis", {}).get(
+                    "structurally_reusable_lemma_count"
+                )
+                if result.get("checkpoint_analysis") is not None
+                else None
+            ),
+            "checkpoint_audit_overall": (
+                result.get("checkpoint_audit", {}).get("parsed", {}).get(
+                    "overall"
+                )
+                if result.get("checkpoint_audit") is not None
+                else None
+            ),
+            "checkpoint_audit_reusable": (
+                result.get("checkpoint_audit", {}).get("parsed", {}).get(
+                    "reusable_count"
+                )
+                if result.get("checkpoint_audit") is not None
+                else None
+            ),
+            "checkpoint_audit_reprove": (
+                result.get("checkpoint_audit", {}).get("parsed", {}).get(
+                    "reprove_count"
+                )
+                if result.get("checkpoint_audit") is not None
+                else None
+            ),
             "missing_sections": ",".join(
                 result.get("parsed", {}).get("missing_sections", [])
             ),
@@ -774,6 +904,43 @@ def write_results(output_dir: Path, results: list[dict[str, Any]]) -> None:
                 "failed": len(group) - len(successful),
                 "valid": valid,
                 "valid_fraction": valid / len(successful) if successful else 0.0,
+                "valid_checkpoint_count": sum(
+                    bool(result.get("checkpoint_analysis", {}).get(
+                        "is_valid_checkpoint"
+                    ))
+                    for result in successful
+                ),
+                "structurally_reusable_lemma_count": sum(
+                    int(result.get("checkpoint_analysis", {}).get(
+                        "structurally_reusable_lemma_count"
+                    ) or 0)
+                    for result in successful
+                ),
+                "audit_pass_count": sum(
+                    result.get("checkpoint_audit", {}).get("parsed", {}).get(
+                        "overall"
+                    )
+                    == "PASS"
+                    for result in successful
+                ),
+                "audit_reusable_lemma_count": sum(
+                    int(
+                        result.get("checkpoint_audit", {}).get("parsed", {}).get(
+                            "reusable_count"
+                        )
+                        or 0
+                    )
+                    for result in successful
+                ),
+                "audit_reprove_lemma_count": sum(
+                    int(
+                        result.get("checkpoint_audit", {}).get("parsed", {}).get(
+                            "reprove_count"
+                        )
+                        or 0
+                    )
+                    for result in successful
+                ),
                 "repair_count": sum(
                     bool(result.get("repair_used")) for result in successful
                 ),
@@ -821,6 +988,10 @@ def main() -> None:
     )
     if args.max_tokens < 1:
         raise ValueError("--max-tokens must be positive")
+    if args.checkpoint_audit_max_tokens < 1:
+        raise ValueError("--checkpoint-audit-max-tokens must be positive")
+    if args.checkpoint_audit_temperature < 0:
+        raise ValueError("--checkpoint-audit-temperature cannot be negative")
     if args.max_workers < 1:
         raise ValueError("--max-workers must be positive")
     if args.digest_max_tokens < 1:
@@ -831,7 +1002,19 @@ def main() -> None:
         raise ValueError("--digest-temperature cannot be negative")
     if args.max_token_drift < 0:
         raise ValueError("--max-token-drift cannot be negative")
-    variants = args.variant or list(HANDOFF_VARIANTS)
+    variants = args.variant or [
+        variant
+        for variant in HANDOFF_VARIANTS
+        if variant != PROOF_CHECKPOINT_VARIANT
+    ]
+    if (
+        PROOF_CHECKPOINT_VARIANT in variants
+        and args.generation_mode != "monolithic"
+    ):
+        raise ValueError(
+            "proof_checkpoint requires --generation-mode monolithic so one "
+            "response can preserve complete lemma proofs and dependencies"
+        )
     temperatures = args.temperature or list(DEFAULT_TEMPERATURES)
     if any(temperature < 0 for temperature in temperatures):
         raise ValueError("--temperature cannot be negative")
@@ -923,6 +1106,9 @@ def main() -> None:
                 top_p=args.top_p,
                 request_timeout_seconds=args.request_timeout_seconds,
                 output_dir=args.output_dir,
+                checkpoint_audit=args.checkpoint_audit,
+                checkpoint_audit_max_tokens=args.checkpoint_audit_max_tokens,
+                checkpoint_audit_temperature=args.checkpoint_audit_temperature,
             ): job
             for job in jobs
         }

@@ -26,16 +26,19 @@ from evaluation.harness_vllm.optimize_thinking_handoff import (  # noqa: E402
 from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     FINAL_PARTIAL_FORCE_MARKER,
     HANDOFF_ASSISTANT_PREFIX,
+    PROOF_CHECKPOINT_VARIANT,
     SavedProofGenerationCall,
     _parse_segment,
     append_restart_instruction,
     append_final_output_discipline,
+    analyze_proof_checkpoint,
     assemble_handoff,
-    build_empty_restart_handoff,
     build_fresh_handoff_section_prompt_ids,
     build_handoff_from_digests_prompt_ids,
     build_handoff_instruction,
     build_lossless_partial_handoff,
+    build_proof_checkpoint_instruction,
+    build_proof_checkpoint_audit_prompt_ids,
     build_restart_instruction,
     build_structured_partial_force_text,
     build_handoff_section_from_digests_prompt_ids,
@@ -48,6 +51,7 @@ from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     extract_forced_partial_progress,
     escape_handoff_control_tags,
     parse_handoff_response,
+    parse_proof_checkpoint_audit,
     parse_saved_proof_generation_call,
     prepare_handoff_research_windows,
     remove_final_partial_force_text,
@@ -129,6 +133,7 @@ def pipeline_cfg(**overrides):
         "thinking_budget_handoff_prompt_variant": "evidence_first",
         "thinking_budget_handoff_mode": "model",
         "thinking_budget_restart_strategy": "standard",
+        "thinking_budget_restart_until_complete": False,
         "thinking_budget_final_round_tokens": 0,
         "thinking_budget_refine_handoff_enabled": False,
         "thinking_budget_refine_tokens": 0,
@@ -644,19 +649,6 @@ class HandoffPromptTests(unittest.TestCase):
             "&lt;handoff>x&lt;/handoff>",
         )
 
-    def test_empty_restart_handoff_carries_no_mathematical_state(self):
-        parsed = parse_handoff_response(build_empty_restart_handoff())
-
-        self.assertTrue(parsed["is_valid"])
-        self.assertIn(
-            "No mathematical state is carried",
-            parsed["sections"]["established"],
-        )
-        self.assertIn(
-            "fresh independent proof",
-            parsed["sections"]["next_steps"],
-        )
-
     def test_structured_partial_force_requires_an_extract_only_ledger(self):
         force_text = build_structured_partial_force_text("evidence_first")
 
@@ -712,47 +704,6 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertEqual(result["usage"]["completion_tokens"], 0)
         self.assertTrue(result["attempts"][0]["context_metadata"]["lossless"])
         self.assertIn(partial, result["parsed"]["sections"]["promising"])
-
-    def test_optimizer_builds_empty_restart_baseline_without_model_call(self):
-        class FakeOpenAI:
-            def __init__(self, **kwargs):
-                del kwargs
-
-        with tempfile.TemporaryDirectory() as directory:
-            with patch(
-                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
-                FakeOpenAI,
-            ):
-                result = call_handoff(
-                    prepared={
-                        "record": SimpleNamespace(output_text="unused"),
-                        "pre_force_ids": [],
-                        "source": "rank0/llm_calls/1/call.txt",
-                        "rank": "rank0",
-                        "problem": "1",
-                        "old_parseable": True,
-                    },
-                    tokenizer=FakeTokenizer(),
-                    base_url="http://localhost:8000",
-                    api_key="test",
-                    served_model_name="proof-model",
-                    variant="evidence_first",
-                    temperature=0.7,
-                    max_tokens=4096,
-                    generation_mode="empty_baseline",
-                    repair_invalid=True,
-                    top_p=0.95,
-                    request_timeout_seconds=10,
-                    output_dir=Path(directory),
-                )
-
-        self.assertTrue(result["parsed"]["is_valid"])
-        self.assertEqual(result["finish_reason"], "empty_baseline")
-        self.assertEqual(result["prompt_tokens"], 0)
-        self.assertEqual(
-            result["attempts"][0]["context_metadata"]["baseline"],
-            "fresh_restart_without_mathematical_handoff",
-        )
 
     def test_optimizer_wraps_structured_forced_report_losslessly(self):
         response = SimpleNamespace(
@@ -898,6 +849,114 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertTrue(result["parsed"]["is_valid"])
         self.assertEqual(result["usage"]["completion_tokens"], 30)
 
+    def test_optimizer_generates_and_audits_proof_checkpoint(self):
+        checkpoint_after_prefix = (
+            "<established>[PROVED_LEMMA L1]\n"
+            "STATEMENT:\nFor every integer n, n(n+1) is even.\n"
+            "DEPENDENCIES:\nORIGINAL_PROBLEM_ONLY\n"
+            "FULL_PROOF:\nConsecutive integers have opposite parity, so one "
+            "of n and n+1 is divisible by two. Their product is therefore "
+            "divisible by two, which proves the statement for every integer n.\n"
+            "[END_PROVED_LEMMA]</established>"
+            "<promising>NONE</promising><failed>NONE</failed>"
+            "<uncertain>NONE</uncertain><bottleneck>Use L1.</bottleneck>"
+            "<next_steps>Apply L1.</next_steps></handoff>"
+        )
+        responses = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(text=checkpoint_after_prefix, finish_reason="stop")
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=80,
+                    total_tokens=180,
+                ),
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        text=(
+                            "The supplied parity proof is complete.</think>\n"
+                            "<checkpoint_audit>\n"
+                            "[LEMMA_AUDIT L1]\nVERDICT: REUSABLE\n"
+                            "REASON: The parity proof is complete.\n"
+                            "[END_LEMMA_AUDIT]\nOVERALL: PASS\n"
+                            "</checkpoint_audit>"
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=50,
+                    completion_tokens=20,
+                    total_tokens=70,
+                ),
+            ),
+        ]
+        requests = []
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                requests.append(kwargs)
+                return responses.pop(0)
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                del kwargs
+                self.completions = FakeCompletions()
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "evaluation.harness_vllm.optimize_thinking_handoff.OpenAI",
+                FakeOpenAI,
+            ):
+                result = call_handoff(
+                    prepared={
+                        "record": SimpleNamespace(
+                            input_prompt=(
+                                "<｜begin▁of▁sentence｜><｜User｜>Problem:\nProve X."
+                                "<｜Assistant｜><think>"
+                            )
+                        ),
+                        "pre_force_ids": FakeTokenizer.encode(
+                            "<assistant><think>completed lemma proof"
+                        ),
+                        "source": "rank0/llm_calls/1/call.txt",
+                        "rank": "rank0",
+                        "problem": "1",
+                        "old_parseable": False,
+                    },
+                    tokenizer=FakeTokenizer(),
+                    base_url="http://localhost:8000",
+                    api_key="test",
+                    served_model_name="proof-model",
+                    variant=PROOF_CHECKPOINT_VARIANT,
+                    temperature=0.6,
+                    max_tokens=16_384,
+                    generation_mode="monolithic",
+                    repair_invalid=True,
+                    top_p=0.95,
+                    request_timeout_seconds=10,
+                    output_dir=Path(directory),
+                    checkpoint_audit=True,
+                )
+
+        self.assertTrue(result["checkpoint_analysis"]["is_valid_checkpoint"])
+        self.assertEqual(
+            result["checkpoint_analysis"]["structurally_reusable_lemma_count"],
+            1,
+        )
+        self.assertEqual(
+            result["checkpoint_audit"]["parsed"]["overall"],
+            "PASS",
+        )
+        self.assertTrue(
+            result["checkpoint_audit"]["parsed"]["covers_all_checkpoint_lemmas"]
+        )
+        self.assertEqual(result["usage"]["completion_tokens"], 100)
+        self.assertEqual([request["temperature"] for request in requests], [0.6, 0.2])
+
     def test_sectioned_handoff_assembles_all_required_sections(self):
         handoff = assemble_handoff(
             {
@@ -926,6 +985,169 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertIn("Do not restate the full problem", instruction)
         self.assertIn("at most 6 bullets in established", instruction)
         self.assertIn("Close every XML tag", instruction)
+
+    def test_proof_checkpoint_preserves_complete_lemma_proofs(self):
+        instruction = build_proof_checkpoint_instruction()
+
+        self.assertEqual(
+            build_handoff_instruction(PROOF_CHECKPOINT_VARIANT),
+            instruction,
+        )
+        self.assertIn("[PROVED_LEMMA L1]", instruction)
+        self.assertIn("FULL_PROOF:", instruction)
+        self.assertIn("without deriving it again", instruction)
+        self.assertIn("There is no word or bullet limit", instruction)
+        self.assertNotIn("below 1,200 words", instruction)
+
+    def test_proof_checkpoint_analysis_accepts_complete_blocks(self):
+        checkpoint = assemble_handoff(
+            {
+                "established": (
+                    "[PROVED_LEMMA L1]\n"
+                    "STATEMENT:\nFor every integer n, n(n+1) is even.\n"
+                    "DEPENDENCIES:\nORIGINAL_PROBLEM_ONLY\n"
+                    "FULL_PROOF:\nThe consecutive integers n and n+1 have "
+                    "opposite parity. Therefore one is divisible by 2, so "
+                    "their product n(n+1) is divisible by 2, as claimed.\n"
+                    "[END_PROVED_LEMMA]"
+                ),
+                "promising": "NONE",
+                "failed": "NONE",
+                "uncertain": "NONE",
+                "bottleneck": "Apply L1 to the remaining identity.",
+                "next_steps": "Use L1 directly.",
+            }
+        )
+
+        analysis = analyze_proof_checkpoint(checkpoint)
+
+        self.assertTrue(analysis["is_valid_checkpoint"])
+        self.assertEqual(analysis["lemma_count"], 1)
+        self.assertEqual(analysis["structurally_reusable_lemma_count"], 1)
+        self.assertEqual(analysis["issues"], [])
+
+    def test_proof_checkpoint_analysis_rejects_omitted_proofs(self):
+        checkpoint = assemble_handoff(
+            {
+                "established": (
+                    "[PROVED_LEMMA L1]\n"
+                    "STATEMENT:\nThe desired inequality holds.\n"
+                    "DEPENDENCIES:\nORIGINAL_PROBLEM_ONLY\n"
+                    "FULL_PROOF:\nAfter lengthy algebra, the result follows by "
+                    "a straightforward calculation that is omitted here.\n"
+                    "[END_PROVED_LEMMA]"
+                ),
+                "promising": "NONE",
+                "failed": "NONE",
+                "uncertain": "NONE",
+                "bottleneck": "NONE",
+                "next_steps": "Use L1.",
+            }
+        )
+
+        analysis = analyze_proof_checkpoint(checkpoint)
+
+        self.assertFalse(analysis["is_valid_checkpoint"])
+        self.assertIn("L1:proof_contains_omission_shortcut", analysis["issues"])
+
+    def test_proof_checkpoint_analysis_rejects_explicitly_incomplete_proof(self):
+        checkpoint = assemble_handoff(
+            {
+                "established": (
+                    "[PROVED_LEMMA L1]\n"
+                    "STATEMENT:\nThe target theorem holds.\n"
+                    "DEPENDENCIES:\nORIGINAL_PROBLEM_ONLY\n"
+                    "FULL_PROOF:\nNo complete proof was derived; the reasoning "
+                    "attempted the claim, but the proof remains incomplete.\n"
+                    "[END_PROVED_LEMMA]"
+                ),
+                "promising": "NONE",
+                "failed": "NONE",
+                "uncertain": "NONE",
+                "bottleneck": "NONE",
+                "next_steps": "Reprove the target.",
+            }
+        )
+
+        analysis = analyze_proof_checkpoint(checkpoint)
+
+        self.assertFalse(analysis["is_valid_checkpoint"])
+        self.assertIn("L1:proof_contains_uncertainty", analysis["issues"])
+
+    def test_proof_checkpoint_can_declare_no_complete_lemma(self):
+        checkpoint = assemble_handoff(
+            {
+                "established": "NO_FULLY_PROVED_REUSABLE_LEMMA",
+                "promising": "A useful but incomplete calculation.",
+                "failed": "NONE",
+                "uncertain": "The calculation still needs a bound.",
+                "bottleneck": "The missing bound.",
+                "next_steps": "Prove the bound.",
+            }
+        )
+
+        analysis = analyze_proof_checkpoint(checkpoint)
+
+        self.assertTrue(analysis["is_valid_checkpoint"])
+        self.assertTrue(analysis["declared_no_complete_lemma"])
+        self.assertEqual(analysis["lemma_count"], 0)
+
+    def test_proof_checkpoint_audit_uses_fresh_problem_context(self):
+        original = (
+            "<｜begin▁of▁sentence｜><｜User｜>Problem:\nProve X."
+            "<｜Assistant｜><think>"
+        )
+        prompt = FakeTokenizer.decode(
+            build_proof_checkpoint_audit_prompt_ids(
+                FakeTokenizer(),
+                original_input_prompt=original,
+                checkpoint_text=VALID_HANDOFF,
+            )
+        )
+
+        self.assertIn("Original problem:\nProblem:\nProve X.", prompt)
+        self.assertIn(VALID_HANDOFF, prompt)
+        self.assertIn("VERDICT: REUSABLE", prompt)
+        self.assertIn("Do not solve the original problem from scratch", prompt)
+
+    def test_proof_checkpoint_audit_parser_counts_verdicts(self):
+        audit = parse_proof_checkpoint_audit(
+            "<checkpoint_audit>\n"
+            "[LEMMA_AUDIT L1]\nVERDICT: REUSABLE\n"
+            "REASON: Complete.\n[END_LEMMA_AUDIT]\n"
+            "[LEMMA_AUDIT L2]\nVERDICT: REPROVE\n"
+            "REASON: Missing case.\n[END_LEMMA_AUDIT]\n"
+            "OVERALL: FAIL\n</checkpoint_audit>"
+        )
+
+        self.assertTrue(audit["is_valid"])
+        self.assertEqual(audit["reusable_count"], 1)
+        self.assertEqual(audit["reprove_count"], 1)
+        self.assertEqual(audit["overall"], "FAIL")
+        self.assertTrue(audit["closed"])
+
+    def test_proof_checkpoint_audit_parser_ignores_private_reasoning(self):
+        audit = parse_proof_checkpoint_audit(
+            "Quoted template: [LEMMA_AUDIT FAKE] VERDICT: REUSABLE "
+            "REASON: placeholder [END_LEMMA_AUDIT].</think>\n"
+            "<checkpoint_audit>\nOVERALL: NO_LEMMAS\n</checkpoint_audit>"
+        )
+
+        self.assertTrue(audit["is_valid"])
+        self.assertEqual(audit["overall"], "NO_LEMMAS")
+        self.assertEqual(audit["lemma_audits"], [])
+
+    def test_proof_checkpoint_audit_parser_salvages_complete_unclosed_body(self):
+        audit = parse_proof_checkpoint_audit(
+            "Audit reasoning.</think>\n<checkpoint_audit>\n"
+            "[LEMMA_AUDIT L1]\nVERDICT: REPROVE\n"
+            "REASON: A necessary calculation is missing.\n"
+            "[END_LEMMA_AUDIT]\nOVERALL: FAIL"
+        )
+
+        self.assertTrue(audit["is_valid"])
+        self.assertFalse(audit["closed"])
+        self.assertEqual(audit["reprove_count"], 1)
 
     def test_transition_is_a_real_new_user_turn(self):
         tokenizer = FakeTokenizer()
@@ -978,6 +1200,18 @@ class HandoffPromptTests(unittest.TestCase):
         self.assertIn("well before the external token cutoff", instruction)
         self.assertIn("Reserve enough budget", instruction)
         self.assertIn("strongest rigorous partial proof", instruction)
+
+    def test_checkpoint_restart_reuses_locally_audited_lemmas(self):
+        checkpoint = VALID_HANDOFF.replace(
+            "A proved reduction.",
+            "[PROVED_LEMMA L1] complete block [END_PROVED_LEMMA]",
+        )
+
+        instruction = build_restart_instruction(checkpoint, 1)
+
+        self.assertIn("proof-carrying checkpoints", instruction)
+        self.assertIn("brief local audit", instruction)
+        self.assertIn("do not spend the new attempt rederiving it", instruction)
 
     def test_final_output_discipline_forbids_visible_search(self):
         prompt = [
@@ -1424,6 +1658,83 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
             "A complete restarted proof.",
         )
 
+    async def test_restart_until_complete_allows_multiple_proof_handoffs(self):
+        class FakeScheduler:
+            tokenizer = FakeTokenizer()
+
+            def __init__(self):
+                self.calls = []
+                self.generation_count = 0
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append((stage, prompt, kwargs))
+                if stage == "proof_generation":
+                    self.generation_count += 1
+                    if self.generation_count <= 2:
+                        return {
+                            "success": True,
+                            "text": "<think>unfinished research",
+                            "finish_reason": "thinking_budget_reached",
+                            "usage": {
+                                "completion_tokens": 10,
+                                "estimated_prompt_tokens": 5,
+                                "thinking_budget_applied": True,
+                                "thinking_budget_action": "stop",
+                                "thinking_budget_force_skipped_closed": False,
+                            },
+                            "_thinking_budget_context_ids": [1, 2, 3],
+                        }
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A complete proof after two handoffs.</solution>"
+                            "<self_evaluation>All steps checked.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_handoff":
+                    return {
+                        "success": True,
+                        "text": HANDOFF_ASSISTANT_PREFIX + VALID_HANDOFF_AFTER_PREFIX,
+                        "finish_reason": "stop",
+                        "usage": {},
+                        "_completion_context_ids": [1, 2, 3, 4],
+                    }
+                raise AssertionError(stage)
+
+        scheduler = FakeScheduler()
+        result = await run.generate_single_attempt(
+            "Prove the claim.",
+            0,
+            1,
+            scheduler,
+            pipeline_cfg(
+                refine_rounds=1,
+                thinking_budget_handoff_preserve_refine_rounds=True,
+                thinking_budget_restart_until_complete=True,
+            ),
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            [stage for stage, _, _ in scheduler.calls],
+            [
+                "proof_generation",
+                "proof_handoff",
+                "proof_generation",
+                "proof_handoff",
+                "proof_generation",
+            ],
+        )
+        self.assertEqual(result["budget_restart_count"], 2)
+        self.assertEqual(result["consumed_refine_rounds"], 0)
+        self.assertEqual(
+            result["proof"],
+            "A complete proof after two handoffs.",
+        )
+
     async def test_budget_restart_can_preserve_verifier_refinement_round(self):
         class FakeScheduler:
             tokenizer = FakeTokenizer()
@@ -1667,6 +1978,97 @@ class BudgetRestartPipelineTests(unittest.IsolatedAsyncioTestCase):
             "at most 12,000 tokens",
             str(scheduler.calls[4][1]),
         )
+
+    async def test_restart_until_complete_allows_multiple_refine_handoffs(self):
+        class FakeScheduler:
+            tokenizer = FakeTokenizer()
+
+            def __init__(self):
+                self.calls = []
+                self.refinement_count = 0
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append((stage, prompt, kwargs))
+                if stage == "proof_refine":
+                    self.refinement_count += 1
+                    if self.refinement_count <= 2:
+                        return {
+                            "success": True,
+                            "text": "<think>unfinished verifier-guided repair",
+                            "finish_reason": "thinking_budget_reached",
+                            "usage": {
+                                "completion_tokens": 10,
+                                "estimated_prompt_tokens": 5,
+                                "thinking_budget_applied": True,
+                                "thinking_budget_action": "stop",
+                                "thinking_budget_force_skipped_closed": False,
+                            },
+                            "_thinking_budget_context_ids": [1, 2, 3],
+                        }
+                    return {
+                        "success": True,
+                        "text": (
+                            "<solution>A complete repair after two handoffs.</solution>"
+                            "<self_evaluation>All critiques resolved.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        "finish_reason": "stop",
+                        "usage": {},
+                    }
+                if stage == "proof_refine_handoff":
+                    return {
+                        "success": True,
+                        "text": HANDOFF_ASSISTANT_PREFIX + VALID_HANDOFF_AFTER_PREFIX,
+                        "finish_reason": "stop",
+                        "usage": {},
+                        "_completion_context_ids": [1, 2, 3, 4],
+                    }
+                raise AssertionError(stage)
+
+        scheduler = FakeScheduler()
+        response, parsed, attempts, handoff_outputs, handoffs, restarts = (
+            await run.run_refinement_with_budget_restart(
+                question="Prove the claim.",
+                proof="A proof with a gap.",
+                self_evaluation="One lemma is missing.",
+                selected_critiques=[
+                    {
+                        "evaluation": "The lemma is missing.",
+                        "suggestions": "Prove the lemma.",
+                        "score": 0.0,
+                    }
+                ],
+                attempt_idx=0,
+                round_idx=1,
+                scheduler=scheduler,
+                cfg=pipeline_cfg(
+                    thinking_budget_refine_handoff_enabled=True,
+                    thinking_budget_refine_tokens=10,
+                    thinking_budget_refine_final_round_tokens=10,
+                    thinking_budget_refine_max_restarts=1,
+                    thinking_budget_restart_until_complete=True,
+                ),
+                problem_id="problem",
+                progress=None,
+            )
+        )
+
+        self.assertEqual(
+            [stage for stage, _, _ in scheduler.calls],
+            [
+                "proof_refine",
+                "proof_refine_handoff",
+                "proof_refine",
+                "proof_refine_handoff",
+                "proof_refine",
+            ],
+        )
+        self.assertEqual(restarts, 2)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(handoff_outputs), 2)
+        self.assertEqual(len(handoffs), 2)
+        self.assertEqual(response["finish_reason"], "stop")
+        self.assertEqual(parsed["proof"], "A complete repair after two handoffs.")
 
     async def test_resume_refinement_handoff_runs_only_final_repair_and_verifier(self):
         class FakeScheduler:

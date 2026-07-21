@@ -26,6 +26,7 @@ VERIFY_N="${AIMO_VERIFY_N:-8}"
 VERIFIER_GENERALIST_N="${AIMO_VERIFIER_GENERALIST_N:-4}"
 REFINE_REVIEW_N="${AIMO_REFINE_REVIEW_N:-4}"
 MIN_VALID_LOW="${AIMO_MIN_VALID_LOW:-2}"
+REFINE_THINKING_BUDGET="${AIMO_THINKING_BUDGET_REFINE_TOKENS:-120000}"
 
 for value_name in \
     TP_SIZE \
@@ -34,7 +35,8 @@ for value_name in \
     REQUESTS_PER_GPU \
     VERIFY_N \
     REFINE_REVIEW_N \
-    MIN_VALID_LOW
+    MIN_VALID_LOW \
+    REFINE_THINKING_BUDGET
 do
     value="${!value_name}"
     if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
@@ -280,7 +282,12 @@ args=(
     --thinking-budget-handoff-mode lossless_partial
     --thinking-budget-handoff-preserve-refine-rounds
     --thinking-budget-restart-strategy deadline_aware
+    --thinking-budget-restart-until-complete
     --thinking-budget-final-round-tokens 0
+    --thinking-budget-refine-handoff-enabled
+    --thinking-budget-refine-tokens "$REFINE_THINKING_BUDGET"
+    --thinking-budget-refine-final-round-tokens "$REFINE_THINKING_BUDGET"
+    --thinking-budget-refine-max-restarts 1
 )
 
 printf '#!/usr/bin/env bash\nexec ' > "$rank_command"

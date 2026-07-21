@@ -45,10 +45,12 @@ try:
         HANDOFF_ASSISTANT_PREFIX,
         HANDOFF_MODES,
         HANDOFF_VARIANTS,
+        PROOF_CHECKPOINT_VARIANT,
         RESTART_FINALIZE_FORCE_TEXT,
         RESTART_STRATEGIES,
         append_final_output_discipline,
         append_restart_instruction,
+        analyze_proof_checkpoint,
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_lossless_partial_handoff,
@@ -67,10 +69,12 @@ except ModuleNotFoundError as exc:
         HANDOFF_ASSISTANT_PREFIX,
         HANDOFF_MODES,
         HANDOFF_VARIANTS,
+        PROOF_CHECKPOINT_VARIANT,
         RESTART_FINALIZE_FORCE_TEXT,
         RESTART_STRATEGIES,
         append_final_output_discipline,
         append_restart_instruction,
+        analyze_proof_checkpoint,
         build_handoff_instruction,
         build_handoff_repair_instruction,
         build_lossless_partial_handoff,
@@ -246,6 +250,10 @@ class CFG:
     thinking_budget_restart_strategy = os.environ.get(
         "AIMO_THINKING_BUDGET_RESTART_STRATEGY",
         DEFAULT_RESTART_STRATEGY,
+    )
+    thinking_budget_restart_until_complete = environment_flag(
+        "AIMO_THINKING_BUDGET_RESTART_UNTIL_COMPLETE",
+        False,
     )
     thinking_budget_final_round_tokens = int(
         os.environ.get("AIMO_THINKING_BUDGET_FINAL_ROUND_TOKENS", "0")
@@ -562,6 +570,7 @@ class PipelineConfig:
     thinking_budget_handoff_prompt_variant: str
     thinking_budget_handoff_mode: str
     thinking_budget_restart_strategy: str
+    thinking_budget_restart_until_complete: bool
     thinking_budget_final_round_tokens: int
     thinking_budget_refine_handoff_enabled: bool
     thinking_budget_refine_tokens: int
@@ -4233,6 +4242,13 @@ async def request_proof_attempt_handoff(
     handoff_mode = str(
         getattr(cfg, "thinking_budget_handoff_mode", DEFAULT_HANDOFF_MODE)
     )
+    prompt_variant = str(
+        getattr(
+            cfg,
+            "thinking_budget_handoff_prompt_variant",
+            DEFAULT_HANDOFF_VARIANT,
+        )
+    )
     if handoff_mode == "lossless_partial" and prompt_family == PROMPT_FAMILY_OPD:
         try:
             finalized = await finalize_budget_stopped_generation(
@@ -4271,11 +4287,7 @@ async def request_proof_attempt_handoff(
                     parsed,
                     round_idx=round_idx,
                     handoff_try=1,
-                    prompt_variant=getattr(
-                        cfg,
-                        "thinking_budget_handoff_prompt_variant",
-                        DEFAULT_HANDOFF_VARIANT,
-                    ),
+                    prompt_variant=prompt_variant,
                     handoff_mode=handoff_mode,
                     source_stage=source_stage,
                     partial_progress_chars=len(partial_progress),
@@ -4297,11 +4309,7 @@ async def request_proof_attempt_handoff(
         scheduler.tokenizer,
         context_ids,
         build_handoff_instruction(
-            getattr(
-                cfg,
-                "thinking_budget_handoff_prompt_variant",
-                DEFAULT_HANDOFF_VARIANT,
-            )
+            prompt_variant
         ),
         close_open_thinking=True,
     )
@@ -4313,7 +4321,7 @@ async def request_proof_attempt_handoff(
             prompt_ids = build_user_turn_prompt_ids(
                 scheduler.tokenizer,
                 previous_context_ids,
-                build_handoff_repair_instruction(),
+                build_handoff_repair_instruction(prompt_variant),
                 close_open_thinking=False,
             )
         response = await scheduler.call(
@@ -4336,6 +4344,16 @@ async def request_proof_attempt_handoff(
         )
         previous_context_ids = response.pop("_completion_context_ids", None)
         parsed = parse_handoff_response(response.get("text", ""))
+        checkpoint_analysis = (
+            analyze_proof_checkpoint(response.get("text", ""))
+            if prompt_variant == PROOF_CHECKPOINT_VARIANT
+            else None
+        )
+        handoff_is_acceptable = bool(parsed["is_valid"])
+        if checkpoint_analysis is not None:
+            handoff_is_acceptable = bool(
+                checkpoint_analysis["is_valid_checkpoint"]
+            )
         output = make_output(
             handoff_stage,
             response,
@@ -4344,14 +4362,11 @@ async def request_proof_attempt_handoff(
             handoff_try=handoff_try + 1,
             handoff_mode="model",
             source_stage=source_stage,
-            prompt_variant=getattr(
-                cfg,
-                "thinking_budget_handoff_prompt_variant",
-                DEFAULT_HANDOFF_VARIANT,
-            ),
+            prompt_variant=prompt_variant,
+            checkpoint_analysis=checkpoint_analysis,
         )
         outputs.append(output)
-        if parsed["is_valid"]:
+        if handoff_is_acceptable:
             return parsed, outputs
         if progress is not None:
             progress.log(
@@ -4359,7 +4374,11 @@ async def request_proof_attempt_handoff(
                 attempt_idx,
                 round_idx,
                 handoff_try + 1,
-                ",".join(parsed["missing_sections"]),
+                ",".join(parsed["missing_sections"])
+                or ",".join(
+                    str(issue)
+                    for issue in (checkpoint_analysis or {}).get("issues", [])
+                ),
             )
     return None, outputs
 
@@ -4698,9 +4717,15 @@ async def generate_single_attempt(
     active_prompt = generation_prompt
 
     while True:
+        restart_until_complete = bool(
+            getattr(cfg, "thinking_budget_restart_until_complete", False)
+        )
         can_restart = bool(
             getattr(cfg, "thinking_budget_handoff_enabled", False)
-            and solve_round_idx < cfg.refine_rounds
+            and (
+                restart_until_complete
+                or solve_round_idx < cfg.refine_rounds
+            )
         )
         is_final_restart_round = bool(solve_round_idx > 0 and not can_restart)
         round_force_text = thinking_budget_force_text
@@ -5264,11 +5289,17 @@ async def run_refinement_with_budget_restart(
         0,
         int(getattr(cfg, "thinking_budget_refine_max_restarts", 0)),
     )
+    restart_until_complete = bool(
+        getattr(cfg, "thinking_budget_restart_until_complete", False)
+    )
 
     while True:
         can_restart = bool(
             getattr(cfg, "thinking_budget_refine_handoff_enabled", False)
-            and restart_idx < max_restarts
+            and (
+                restart_until_complete
+                or restart_idx < max_restarts
+            )
             and int(getattr(cfg, "thinking_budget_refine_tokens", 0)) > 0
         )
         budget_tokens = resolve_refinement_thinking_budget_tokens(
@@ -5307,12 +5338,12 @@ async def run_refinement_with_budget_restart(
         if progress is not None:
             progress.log(
                 "candidate=%d round=%d stage=refinement_attempt status=start "
-                "restart=%d/%d budget=%s budget_action=%s temperature=%s "
+                "restart=%d/%s budget=%s budget_action=%s temperature=%s "
                 "visible_limit=%s",
                 attempt_idx,
                 round_idx,
                 restart_idx,
-                max_restarts,
+                "until_complete" if restart_until_complete else max_restarts,
                 budget_tokens,
                 "stop" if can_restart else "finalize",
                 request_temperature,
@@ -6639,6 +6670,7 @@ class ProofRuntime:
         thinking_budget_handoff_prompt_variant: str,
         thinking_budget_handoff_mode: str,
         thinking_budget_restart_strategy: str,
+        thinking_budget_restart_until_complete: bool,
         thinking_budget_final_round_tokens: int,
         thinking_budget_refine_handoff_enabled: bool,
         thinking_budget_refine_tokens: int,
@@ -6819,6 +6851,9 @@ class ProofRuntime:
             ),
             thinking_budget_handoff_mode=normalized_handoff_mode,
             thinking_budget_restart_strategy=normalized_restart_strategy,
+            thinking_budget_restart_until_complete=bool(
+                thinking_budget_restart_until_complete
+            ),
             thinking_budget_final_round_tokens=max(
                 0,
                 int(thinking_budget_final_round_tokens),
@@ -7470,6 +7505,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--thinking-budget-restart-strategy",
         choices=RESTART_STRATEGIES,
     )
+    pipeline.add_argument(
+        "--thinking-budget-restart-until-complete",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Keep summarizing and restarting budget-stopped proof/refinement "
+            "calls until one finishes normally; the per-problem timeout "
+            "remains the hard limit."
+        ),
+    )
     pipeline.add_argument("--thinking-budget-final-round-tokens", type=int)
     pipeline.add_argument(
         "--thinking-budget-refine-handoff-enabled",
@@ -7578,6 +7623,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "thinking_budget_handoff_mode": "thinking_budget_handoff_mode",
         "thinking_budget_restart_strategy": (
             "thinking_budget_restart_strategy"
+        ),
+        "thinking_budget_restart_until_complete": (
+            "thinking_budget_restart_until_complete"
         ),
         "thinking_budget_final_round_tokens": (
             "thinking_budget_final_round_tokens"
@@ -7837,6 +7885,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             "thinking_budget_restart_strategy": str(
                 cfg.thinking_budget_restart_strategy
             ),
+            "thinking_budget_restart_until_complete": bool(
+                cfg.thinking_budget_restart_until_complete
+            ),
             "thinking_budget_final_round_tokens": int(
                 cfg.thinking_budget_final_round_tokens
             ),
@@ -7884,7 +7935,8 @@ def run(cfg: type[CFG] = CFG) -> None:
         "verify_requests_while_generating=%s "
         "thinking_handoff=%s preserve_refine_rounds=%s "
         "handoff_variant=%s handoff_mode=%s "
-        "restart_strategy=%s final_round_budget=%s handoff_tokens=%s "
+        "restart_strategy=%s restart_until_complete=%s "
+        "final_round_budget=%s handoff_tokens=%s "
         "handoff_temperature=%s refine_handoff=%s refine_budget=%s "
         "refine_final_budget=%s refine_max_restarts=%s "
         "refine_final_temperature=%s refine_visible_target=%s "
@@ -7910,6 +7962,7 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.thinking_budget_handoff_prompt_variant,
         cfg.thinking_budget_handoff_mode,
         cfg.thinking_budget_restart_strategy,
+        cfg.thinking_budget_restart_until_complete,
         cfg.thinking_budget_final_round_tokens,
         cfg.thinking_budget_handoff_max_tokens,
         cfg.thinking_budget_handoff_temperature,
@@ -7993,6 +8046,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             thinking_budget_handoff_mode=cfg.thinking_budget_handoff_mode,
             thinking_budget_restart_strategy=(
                 cfg.thinking_budget_restart_strategy
+            ),
+            thinking_budget_restart_until_complete=(
+                cfg.thinking_budget_restart_until_complete
             ),
             thinking_budget_final_round_tokens=(
                 cfg.thinking_budget_final_round_tokens

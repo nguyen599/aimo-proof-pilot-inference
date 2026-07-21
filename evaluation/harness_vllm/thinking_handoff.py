@@ -34,6 +34,10 @@ RESTART_FINALIZE_FORCE_TEXT = (
     "</think>\n\n<solution>\n"
 )
 HANDOFF_ASSISTANT_PREFIX = "\n</think>\n\n<handoff>\n"
+# The chat template already opens the model's private reasoning turn. Let it
+# close that turn itself before emitting the final checkpoint audit; opening
+# the XML here makes private reasoning look like audit content.
+CHECKPOINT_AUDIT_ASSISTANT_PREFIX = ""
 HANDOFF_REQUIRED_SECTIONS = (
     "established",
     "promising",
@@ -42,7 +46,13 @@ HANDOFF_REQUIRED_SECTIONS = (
     "bottleneck",
     "next_steps",
 )
-HANDOFF_VARIANTS = ("evidence_first", "lemma_ledger", "continuation_frontier")
+PROOF_CHECKPOINT_VARIANT = "proof_checkpoint"
+HANDOFF_VARIANTS = (
+    "evidence_first",
+    "lemma_ledger",
+    "continuation_frontier",
+    PROOF_CHECKPOINT_VARIANT,
+)
 DEFAULT_HANDOFF_VARIANT = HANDOFF_VARIANTS[0]
 HANDOFF_MODES = ("model", "lossless_partial")
 DEFAULT_HANDOFF_MODE = HANDOFF_MODES[0]
@@ -109,6 +119,36 @@ _HANDOFF_CONTROL_TAG = re.compile(
     r"(?is)<\s*/?\s*(?:handoff|"
     + "|".join(re.escape(section) for section in HANDOFF_REQUIRED_SECTIONS)
     + r")\s*>"
+)
+_PROVED_LEMMA_BLOCK = re.compile(
+    r"(?is)\[PROVED_LEMMA\s+(?P<identifier>[A-Za-z0-9_.-]+)\]\s*"
+    r"STATEMENT:\s*(?P<statement>.*?)\s*"
+    r"DEPENDENCIES:\s*(?P<dependencies>.*?)\s*"
+    r"FULL_PROOF:\s*(?P<proof>.*?)\s*"
+    r"\[END_PROVED_LEMMA\]"
+)
+_PROOF_CHECKPOINT_NO_LEMMA = "NO_FULLY_PROVED_REUSABLE_LEMMA"
+_PROOF_SHORTCUT = re.compile(
+    r"(?i)\b(?:"
+    r"straightforward|routine|similarly|analogously|"
+    r"details? (?:are )?omitted|proof omitted|without proof|"
+    r"left to (?:the )?reader|one can show|it can be shown|"
+    r"after (?:some|lengthy|routine) (?:algebra|calculation)|"
+    r"by a standard (?:argument|lemma|result)"
+    r")\b"
+)
+_PROOF_UNCERTAINTY = re.compile(
+    r"(?i)\b(?:maybe|likely|possibly|not sure|might|seems?|appears?|"
+    r"conjectur(?:e|ed|al)|unproved|unverified|incomplete|"
+    r"not (?:complete|proved|proven)|no complete proof|"
+    r"remain(?:s|ed)? (?:incomplete|unproved|unproven)|"
+    r"need(?:s)? to (?:be )?(?:prove|proved|proven))\b"
+)
+_CHECKPOINT_AUDIT_BLOCK = re.compile(
+    r"(?is)\[LEMMA_AUDIT\s+(?P<identifier>[A-Za-z0-9_.-]+)\]\s*"
+    r"VERDICT:\s*(?P<verdict>REUSABLE|MINOR_CHECK|REPROVE)\s*"
+    r"REASON:\s*(?P<reason>.*?)\s*"
+    r"\[END_LEMMA_AUDIT\]"
 )
 
 
@@ -304,28 +344,120 @@ def build_lossless_partial_handoff(partial_progress: str) -> str:
     )
 
 
-def build_empty_restart_handoff() -> str:
-    """Build a control handoff that resets context without carrying mathematics."""
+def build_proof_checkpoint_instruction() -> str:
+    """Request a proof-carrying checkpoint from an exhausted proof context."""
 
-    return assemble_handoff(
-        {
-            "established": (
-                "No mathematical state is carried from the previous attempt."
-            ),
-            "promising": (
-                "No previous construction, calculation, or lemma is provided."
-            ),
-            "failed": (
-                "The previous attempt exhausted its reasoning budget before a "
-                "complete proof."
-            ),
-            "uncertain": ("There are no carried claims to trust or reject."),
-            "bottleneck": ("The original problem remains unsolved."),
-            "next_steps": (
-                "Start a fresh independent proof from the original problem."
-            ),
-        }
-    )
+    return f"""The previous proof attempt exhausted its reasoning budget before producing a final answer.
+
+Stop solving. Archive the reusable mathematical state for a fresh solver. This is not a short summary: every lemma placed in `established` must include its complete proof, with all equations, cases, and dependencies needed to check and reuse it without deriving it again.
+
+The response has already been prefixed with `<handoff>`. Begin immediately with `<established>`; do not emit another `<handoff>` opening tag. Close `</established>` only after the final complete lemma block, then emit the other five sections in the exact order below. Emit `</handoff>` exactly once, at the very end.
+
+For every completely proved reusable lemma, use exactly this plain-text block inside `<established>`:
+
+[PROVED_LEMMA L1]
+STATEMENT:
+The exact statement, including every hypothesis and quantifier.
+DEPENDENCIES:
+`ORIGINAL_PROBLEM_ONLY` or a comma-separated list of earlier lemma IDs.
+FULL_PROOF:
+The complete proof already present in the previous reasoning. Preserve every necessary calculation and case. Copy it verbatim when possible; light normalization is allowed only when it does not change the mathematics.
+[END_PROVED_LEMMA]
+
+Number later blocks L2, L3, and so on. If no reusable lemma received a complete proof, write exactly `{_PROOF_CHECKPOINT_NO_LEMMA}` inside `<established>`.
+
+Proof-preservation rules:
+- Never promote a plausible, numerical, incomplete, or contradicted claim into `established`.
+- Never replace proof steps with "straightforward", "routine", "similarly", "one can show", an omitted calculation, or a reference to an unstated standard result.
+- If preserving a complete proof would exceed the response budget, omit that lemma from `established` and put its proved prefix plus exact gap in `uncertain`; do not resume solving to complete it.
+- Do not use the original problem statement or final target as a lemma unless the previous reasoning already contains its complete final proof. Prefer independently reusable intermediate results.
+- A lemma whose proof has any gap belongs in `uncertain`, together with the exact proved prefix and exact missing step.
+- Do not add new mathematics, repair a proof, guess a result, or continue searching.
+- Retain exact notation, constructions, formulas, equality conditions, edge cases, and counterexamples needed by a fresh solver.
+- Prefer one complete reusable lemma over several compressed or incomplete lemmas.
+- There is no word or bullet limit other than the response token limit.
+
+Use the remaining sections as follows:
+- `promising`: detailed reusable derivations or constructions that are not complete proofs.
+- `failed`: attempted routes and their precise failure points.
+- `uncertain`: unproved claims, incomplete lemma proofs, and contradictions. Never put these in `established`.
+- `bottleneck`: the narrowest remaining obstacle.
+- `next_steps`: a concrete continuation plan that cites lemma IDs when applicable.
+
+Output exactly one block and no text outside it:
+
+<handoff>
+<established>proof blocks or {_PROOF_CHECKPOINT_NO_LEMMA}</established>
+<promising>detailed unproved but reusable work, or NONE</promising>
+<failed>failed routes with exact obstructions, or NONE</failed>
+<uncertain>all remaining gaps and contradictions, or NONE</uncertain>
+<bottleneck>the precise unresolved point</bottleneck>
+<next_steps>the prioritized continuation plan</next_steps>
+</handoff>
+
+Close every tag. Do not emit a solution, self-evaluation, score, or new reasoning."""
+
+
+def analyze_proof_checkpoint(text: str) -> dict[str, Any]:
+    """Check checkpoint structure without claiming mathematical correctness."""
+
+    parsed = parse_handoff_response(text)
+    established = parsed["sections"].get("established", "")
+    matches = list(_PROVED_LEMMA_BLOCK.finditer(established))
+    identifiers = [match.group("identifier") for match in matches]
+    issues: list[str] = []
+    lemmas: list[dict[str, Any]] = []
+
+    if len(set(identifiers)) != len(identifiers):
+        issues.append("duplicate_lemma_ids")
+
+    residual = _PROVED_LEMMA_BLOCK.sub("", established).strip()
+    declared_no_lemma = residual == _PROOF_CHECKPOINT_NO_LEMMA
+    if matches and residual:
+        issues.append("text_outside_lemma_blocks")
+    if not matches and not declared_no_lemma:
+        issues.append("missing_lemma_blocks_or_no_lemma_marker")
+
+    for match in matches:
+        statement = match.group("statement").strip()
+        dependencies = match.group("dependencies").strip()
+        proof = match.group("proof").strip()
+        lemma_issues: list[str] = []
+        if not statement:
+            lemma_issues.append("missing_statement")
+        if not dependencies:
+            lemma_issues.append("missing_dependencies")
+        if len(proof) < 80:
+            lemma_issues.append("proof_too_short")
+        if _PROOF_SHORTCUT.search(proof):
+            lemma_issues.append("proof_contains_omission_shortcut")
+        if _PROOF_UNCERTAINTY.search(proof):
+            lemma_issues.append("proof_contains_uncertainty")
+        lemmas.append(
+            {
+                "id": match.group("identifier"),
+                "statement": statement,
+                "dependencies": dependencies,
+                "proof": proof,
+                "proof_chars": len(proof),
+                "issues": lemma_issues,
+                "structurally_reusable": not lemma_issues,
+            }
+        )
+        issues.extend(f"{match.group('identifier')}:{issue}" for issue in lemma_issues)
+
+    return {
+        "is_valid_handoff": bool(parsed["is_valid"]),
+        "is_valid_checkpoint": bool(parsed["is_valid"] and not issues),
+        "declared_no_complete_lemma": declared_no_lemma,
+        "lemma_count": len(lemmas),
+        "structurally_reusable_lemma_count": sum(
+            bool(lemma["structurally_reusable"]) for lemma in lemmas
+        ),
+        "total_proof_chars": sum(int(lemma["proof_chars"]) for lemma in lemmas),
+        "issues": issues,
+        "lemmas": lemmas,
+    }
 
 
 def build_structured_partial_force_text(
@@ -448,6 +580,8 @@ def build_user_turn_prompt_ids(
 def build_handoff_instruction(variant: str = DEFAULT_HANDOFF_VARIANT) -> str:
     if variant not in HANDOFF_VARIANTS:
         raise ValueError(f"unsupported handoff prompt variant: {variant!r}")
+    if variant == PROOF_CHECKPOINT_VARIANT:
+        return build_proof_checkpoint_instruction()
 
     variant_guidance = handoff_variant_guidance(variant)
     return f"""The previous proof attempt exhausted its reasoning budget before producing a final proof.
@@ -493,6 +627,10 @@ def handoff_variant_guidance(variant: str) -> str:
         "continuation_frontier": (
             "Optimize for the next solver: identify the narrowest unresolved frontier "
             "and give a ranked, concrete continuation plan with reusable notation."
+        ),
+        PROOF_CHECKPOINT_VARIANT: (
+            "Preserve complete, dependency-labelled lemma proofs as reusable proof "
+            "checkpoints; never compress an established proof into a claim."
         ),
     }[variant]
 
@@ -761,6 +899,107 @@ def render_handoff_extraction_prompt_ids(
     return [int(value) for value in prompt_ids]
 
 
+def build_proof_checkpoint_audit_prompt_ids(
+    tokenizer: Any,
+    *,
+    original_input_prompt: str,
+    checkpoint_text: str,
+) -> list[int]:
+    """Build a fresh-context audit of checkpoint lemma proofs."""
+
+    problem = extract_rendered_problem_text(original_input_prompt)
+    user_content = f"""Audit a proof checkpoint against the original problem. Do not solve the original problem from scratch and do not improve or complete any proof. Check only whether every claimed `PROVED_LEMMA` is a self-contained, logically valid consequence of its hypotheses and listed dependencies.
+
+Original problem:
+{problem}
+
+Checkpoint:
+{checkpoint_text}
+
+For every `PROVED_LEMMA`, output one block in the same order:
+
+[LEMMA_AUDIT L1]
+VERDICT: REUSABLE
+REASON: A concrete justification in at most four sentences.
+[END_LEMMA_AUDIT]
+
+The verdict must be exactly one of:
+- REUSABLE: the written proof is complete and can be cited without rederivation after checking dependencies.
+- MINOR_CHECK: the proof is essentially complete but one precise local detail needs a brief verification.
+- REPROVE: a missing argument, invalid step, circular dependency, omitted calculation, or false statement requires substantial new proof work.
+
+After all lemma blocks, output exactly `OVERALL: PASS` only if every lemma is REUSABLE or MINOR_CHECK; otherwise output `OVERALL: FAIL`. If the checkpoint declares that no lemma was completed, output only `OVERALL: NO_LEMMAS`.
+
+Do not accept phrases such as "straightforward", "routine", "similarly", or "one can show" in place of an argument. You may reason privately in the model's `<think>` section. After closing `</think>`, output exactly one `<checkpoint_audit>` block, no other visible text, and close the tag."""
+    return render_handoff_extraction_prompt_ids(
+        tokenizer,
+        user_content=user_content,
+        assistant_prefix=CHECKPOINT_AUDIT_ASSISTANT_PREFIX,
+        system_content=(
+            "You are a strict mathematical proof-checkpoint auditor. Judge only "
+            "the supplied lemma proofs and never repair them."
+        ),
+    )
+
+
+def parse_proof_checkpoint_audit(text: str) -> dict[str, Any]:
+    raw = str(text or "")
+    final_region = raw
+    think_close = raw.lower().rfind("</think>")
+    if think_close >= 0:
+        final_region = raw[think_close + len("</think>") :]
+    matches = list(
+        re.finditer(
+            r"(?is)<checkpoint_audit>\s*(.*?)\s*</checkpoint_audit>",
+            final_region,
+        )
+    )
+    closed = bool(matches)
+    if matches:
+        body = matches[-1].group(1).strip()
+    else:
+        open_matches = list(
+            re.finditer(r"(?is)<checkpoint_audit>\s*", final_region)
+        )
+        body = (
+            final_region[open_matches[-1].end() :].strip()
+            if open_matches
+            else ""
+        )
+    audits = [
+        {
+            "id": match.group("identifier"),
+            "verdict": match.group("verdict").upper(),
+            "reason": match.group("reason").strip(),
+        }
+        for match in _CHECKPOINT_AUDIT_BLOCK.finditer(body)
+    ]
+    overall_match = re.search(
+        r"(?im)^\s*OVERALL:\s*(PASS|FAIL|NO_LEMMAS)\s*$",
+        body,
+    )
+    overall = overall_match.group(1).upper() if overall_match else ""
+    has_expected_audits = (
+        bool(audits) if overall in {"PASS", "FAIL"} else not audits
+    )
+    return {
+        "is_valid": bool(body and overall and has_expected_audits),
+        "closed": closed,
+        "overall": overall,
+        "lemma_audits": audits,
+        "reusable_count": sum(
+            audit["verdict"] == "REUSABLE" for audit in audits
+        ),
+        "minor_check_count": sum(
+            audit["verdict"] == "MINOR_CHECK" for audit in audits
+        ),
+        "reprove_count": sum(
+            audit["verdict"] == "REPROVE" for audit in audits
+        ),
+        "text": f"<checkpoint_audit>\n{body}\n</checkpoint_audit>" if body else "",
+    }
+
+
 def build_fresh_handoff_section_prompt_ids(
     tokenizer: Any,
     *,
@@ -950,12 +1189,19 @@ def build_handoff_section_from_partial_progress_prompt_ids(
     )
 
 
-def build_handoff_repair_instruction() -> str:
-    return """Your previous handoff did not satisfy the required XML contract.
+def build_handoff_repair_instruction(
+    variant: str = DEFAULT_HANDOFF_VARIANT,
+) -> str:
+    checkpoint_rules = ""
+    if variant == PROOF_CHECKPOINT_VARIANT:
+        checkpoint_rules = f"""
+
+Preserve the proof-checkpoint contract. Inside `established`, use only complete `[PROVED_LEMMA Lx]` blocks with nonempty `STATEMENT`, `DEPENDENCIES`, and `FULL_PROOF` fields, or exactly `{_PROOF_CHECKPOINT_NO_LEMMA}`. Do not shorten a proof, replace steps with omission language, promote an unproved claim, or add new mathematics. Move every incomplete block to `uncertain`."""
+    return f"""Your previous handoff did not satisfy the required structure.
 
 Re-emit the same mathematical handoff, without adding new reasoning, using exactly one nonempty instance of every required section:
 <handoff><established>...</established><promising>...</promising><failed>...</failed><uncertain>...</uncertain><bottleneck>...</bottleneck><next_steps>...</next_steps></handoff>
-Output no text outside the handoff block."""
+Output no text outside the handoff block.{checkpoint_rules}"""
 
 
 def parse_handoff_response(text: str) -> dict[str, Any]:
@@ -1002,9 +1248,14 @@ def build_restart_instruction(
         deadline_guidance = """
 
 Treat this as the final proof-writing attempt, not another open-ended research pass. Audit the carried notes briefly, choose one coherent route, and stop exploratory case enumeration well before the external token cutoff. Reserve enough budget to close your reasoning and emit the required final answer. If a complete proof remains out of reach, voluntarily stop and present the strongest rigorous partial proof with its gap stated explicitly instead of running until the cutoff."""
-    return f"""A previous attempt exhausted its reasoning budget. Start a fresh independent attempt from the original problem, using the handoff below only as untrusted research notes.
+    checkpoint_guidance = ""
+    if "[PROVED_LEMMA " in handoff_text:
+        checkpoint_guidance = """
 
-Verify every carried claim before relying on it. Do not merely repeat the previous route. Continue promising work where justified, replace failed approaches, and solve the problem completely if possible. This is restart round {restart_round}.{deadline_guidance}
+The `PROVED_LEMMA` blocks are proof-carrying checkpoints, not mere claims. Perform a brief local audit that each statement matches its hypotheses, its listed dependencies are available, and its written proof has no gap. If that audit passes, cite and reuse the lemma directly; do not spend the new attempt rederiving it. Reprove only a block for which you identify a concrete defect. Everything outside those blocks remains untrusted."""
+    return f"""A previous attempt exhausted its reasoning budget. Start a fresh independent attempt from the original problem, using the handoff below as preserved research state.
+
+Verify unproved carried claims before relying on them. Do not merely repeat the previous route. Continue promising work where justified, replace failed approaches, and solve the problem completely if possible. This is restart round {restart_round}.{checkpoint_guidance}{deadline_guidance}
 
 <previous_attempt_handoff>
 {handoff_text}
