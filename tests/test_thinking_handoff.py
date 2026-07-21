@@ -189,6 +189,40 @@ class SavedCallParserTests(unittest.TestCase):
             self.assertTrue(pre_force.strip())
             self.assertIn("<think>", pre_force)
 
+    def test_parser_can_explicitly_accept_unintervened_proof_log(self):
+        text = """stage: proof_generation
+detail: candidate=15 round=0
+prompt_tokens: 11
+max_tokens: 23
+
+===== INPUT PROMPT =====
+rendered problem prompt
+===== OUTPUT =====
+finish_reason: stop
+usage: {"prompt_tokens": 11, "completion_tokens": 7}
+
+<solution>A proof.</solution>
+<self_evaluation>Complete.</self_evaluation>
+<score>1</score>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "cand_15_proof_gen_r0.txt"
+            path.write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "budget-intervened"):
+                parse_saved_proof_generation_call(path)
+
+            record = parse_saved_proof_generation_call(
+                path,
+                allow_unintervened=True,
+            )
+
+        self.assertEqual(record.input_prompt, "rendered problem prompt")
+        self.assertEqual(record.continuation_prompt, "")
+        self.assertEqual(record.continuation_prompt_tokens, 0)
+        self.assertEqual(record.continuation_max_tokens, 0)
+        self.assertEqual(record.finish_reason, "stop")
+        self.assertIn("<solution>A proof.</solution>", record.output_text)
+
     def test_optimizer_selects_eight_diverse_cases(self):
         selected = select_diverse_cases(discover_cases(LOG_ROOT), 8)
         self.assertEqual(len(selected), 8)

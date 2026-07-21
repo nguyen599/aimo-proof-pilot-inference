@@ -330,7 +330,10 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     if restart.get("error"):
         raise ValueError(f"saved restart contains an error: {restart['error']}")
     source = str(restart["source"])
-    record = parse_saved_proof_generation_call(args.logs_root / source)
+    record = parse_saved_proof_generation_call(
+        args.logs_root / source,
+        allow_unintervened=True,
+    )
     question = normalize_problem(record.input_prompt)
     raw_output = str(restart.get("raw_output") or "")
     parsed = parse_generation_response(raw_output, require_self_evaluation=True)

@@ -228,7 +228,11 @@ def _parse_output(section: str) -> tuple[str, dict[str, Any], str]:
     return finish_reason, usage, "\n".join(lines[body_start:]).rstrip()
 
 
-def parse_saved_proof_generation_call(path: Path) -> SavedProofGenerationCall:
+def parse_saved_proof_generation_call(
+    path: Path,
+    *,
+    allow_unintervened: bool = False,
+) -> SavedProofGenerationCall:
     text = path.read_text(encoding="utf-8")
     headers = _parse_header_lines(text)
     ranges = _section_ranges(text)
@@ -238,13 +242,22 @@ def parse_saved_proof_generation_call(path: Path) -> SavedProofGenerationCall:
         (title for title in ranges if title.startswith("CONTINUATION INPUT PROMPT ")),
         key=lambda title: int(title.rsplit(" ", 1)[-1]),
     )
-    if input_range is None or output_range is None or not continuation_titles:
+    if input_range is None or output_range is None:
+        raise ValueError(f"{path} is not a saved proof-generation log")
+    if not continuation_titles and not allow_unintervened:
         raise ValueError(f"{path} is not a budget-intervened proof-generation log")
 
-    continuation_range = ranges[continuation_titles[-1]]
-    continuation_prompt_tokens, continuation_max_tokens, continuation_prompt = (
-        _parse_segment(text[slice(*continuation_range)])
-    )
+    if continuation_titles:
+        continuation_range = ranges[continuation_titles[-1]]
+        (
+            continuation_prompt_tokens,
+            continuation_max_tokens,
+            continuation_prompt,
+        ) = _parse_segment(text[slice(*continuation_range)])
+    else:
+        continuation_prompt_tokens = 0
+        continuation_max_tokens = 0
+        continuation_prompt = ""
     finish_reason, usage, output_text = _parse_output(text[slice(*output_range)])
     return SavedProofGenerationCall(
         path=path,
