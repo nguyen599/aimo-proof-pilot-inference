@@ -85,3 +85,24 @@ baseline and treatment. Compare:
 P5 grading uses three API keys with 24 global workers. The grader assigns
 slots round-robin, so each key has exactly eight concurrent requests. Keep two
 independent grading calls per proof and rerun only missing or failed records.
+
+Export every completed candidate from the distributed rank payloads before
+grading. Do not use only rank zero's `results.jsonl`; that file intentionally
+contains the selector winner but not the full candidate bodies.
+
+```bash
+python evaluation/export_pipeline_candidates.py \
+  --run-dir evaluation/runs/<run>/runtime \
+  --rubrics-file evaluation/data/imo_2025.parquet \
+  --output-dir evaluation/runs/<run>/grader_input/all_final_candidates \
+  --problem-ids 4 5
+```
+
+The exporter requires a complete rank set, verifies that every configured
+candidate attempt is completed, failed, skipped, or cancelled exactly once,
+and emits matching `records.jsonl`, `rubrics.jsonl`, and
+`candidate_manifest.jsonl`. The manifest preserves initial planning strategy,
+handoff/refinement counts, verifier/meta counts, rollback round, internal final
+score, and whether the pipeline selector chose the candidate. This makes the
+external-grade comparison capable of distinguishing a weak initial pool from
+failed refinement, verifier overconfidence, or selector error.
