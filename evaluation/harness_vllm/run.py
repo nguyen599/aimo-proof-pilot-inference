@@ -1526,6 +1526,16 @@ def verifier_audit_instructions(
                 "self-score, or agreement with another verifier. Before assigning "
                 "score 1, identify the proof's weakest essential claim and report "
                 "the concrete checks used to validate it.",
+                "Your final evaluation must contain these exact labeled fields:\n"
+                "CLAIM_UNDER_TEST: the weakest conclusion on which the proof depends\n"
+                "ADVERSARIAL_TEST: a concrete negation, boundary case, legal "
+                "opponent response, or independent recomputation used to attack it\n"
+                "CHECK_RESULT: the explicit calculation or deduction showing whether "
+                "the claim survives\n"
+                "PASS_JUSTIFICATION: why that completed check is sufficient, or why "
+                "the gap forces score 0 or 0.5\n"
+                "A generic statement that the argument is rigorous, or that deviations "
+                "only help, is not a completed audit and cannot receive score 1.",
             ]
         )
     prior_text = format_prior_verifier_critiques(prior_critiques)
@@ -1607,12 +1617,60 @@ Here is your task input:
 
 
 def build_deepseek_meta_verification_prompt(
-    question: str, proof: str, proof_analysis: str
+    question: str,
+    proof: str,
+    proof_analysis: str,
+    *,
+    audit_positive_verdicts: bool = False,
 ) -> str:
     proof_analysis, _ = clip_middle_text(
         proof_analysis,
         MAX_FORWARDED_EVALUATION_CHARS,
     )
+    if audit_positive_verdicts:
+        return rf"""You are an adversarial second-opinion auditor. You are given a problem, a candidate solution, and a first verifier's evaluation. Your task is to determine whether the verifier's verdict is justified by the actual proof.
+
+Do not defer to polished prose, the candidate's self-score, or the first verifier. A positive evaluation is valid only after an independent stress test of the proof's weakest essential claim.
+
+Audit procedure:
+1. State the exact conclusion and its quantifiers.
+2. Identify the weakest essential claim in the proof's dependency chain.
+3. Negate that claim and attempt a concrete counterexample, boundary case, degenerate case, or independent recomputation.
+4. For a game or adversarial strategy, test the proposed move after arbitrary legal prior play and at least one non-greedy opponent response. One cooperative infinite play never proves that neither player has a winning strategy.
+5. Recompute the decisive algebra and all equality or monotonicity conditions used to turn the local claim into the final conclusion.
+6. Compare these checks with the first verifier's evaluation.
+
+Rate the first verifier, not the prose quality:
+- 1: its verdict is supported by a completed independent audit and it missed no material defect.
+- 0.5: its verdict is only partly supported, its audit is incomplete, or it missed a repairable gap.
+- 0: it approved a proof with a fatal gap/counterexample, or rejected a sound proof for an invalid reason.
+
+Your analysis must contain these exact labeled fields:
+CLAIM_UNDER_TEST:
+ADVERSARIAL_TEST:
+CHECK_RESULT:
+MISSED_DEFECT:
+
+Output exactly:
+
+Here is my analysis of the "solution evaluation":
+...your labeled audit...
+
+Based on my analysis, I rate the "solution evaluation" as:
+\boxed{{...}}
+
+where ... is exactly 0, 0.5, or 1.
+
+---
+
+## Problem
+{question}
+
+## Solution
+{proof}
+
+## Solution Evaluation
+{proof_analysis}"""
     return rf"""You are given a "problem", "solution", and "solution evaluation", and you need to assess whether this "solution evaluation" is reasonable.
 
 First, "solution evaluation" is generated to evaluate the quality of the "solution", by prompting a verifier with the rules below (these are not your rules):
@@ -2599,6 +2657,7 @@ def aggregate_proof_label(
     min_valid_low: int,
     strict_pass_meta: bool = False,
     meta_n: int = 0,
+    audit_positive_meta: bool = False,
 ) -> dict[str, Any]:
     validated_critiques = []
     low_scores_seen = 0
@@ -2635,6 +2694,51 @@ def aggregate_proof_label(
             validated_critiques.append(critique)
         elif meta_summary["validated"]:
             validated_critiques.append(critique)
+
+    positive_meta_challenges = []
+    if audit_positive_meta and meta_n > 0:
+        for idx, verifier in enumerate(verifier_results):
+            verifier_index = int(verifier.get("verifier_index", idx))
+            if coerce_score(verifier.get("score")) != 1.0:
+                continue
+            challenged_meta = [
+                result
+                for result in meta_results_by_verifier.get(verifier_index, [])
+                if (
+                    coerce_score(result.get("score")) is not None
+                    and coerce_score(result.get("score")) < 1.0
+                )
+            ]
+            if not challenged_meta:
+                continue
+            strongest_challenge = min(
+                challenged_meta,
+                key=lambda result: float(coerce_score(result.get("score")) or 0.0),
+            )
+            challenge_score = coerce_score(strongest_challenge.get("score"))
+            analysis = str(strongest_challenge.get("analysis") or "").strip()
+            critique = {
+                "verifier_index": verifier_index,
+                "verifier_role": verifier.get("verifier_role"),
+                "verifier_group": verifier.get("verifier_group"),
+                "score": challenge_score,
+                "evaluation": (
+                    "Adversarial meta-audit rejected the verifier's positive "
+                    f"verdict.\n{analysis}"
+                ).strip(),
+                "review": analysis,
+                "critique_source": "positive_meta_audit",
+                "meta_summary": {
+                    **summarize_meta_votes(
+                        meta_results_by_verifier.get(verifier_index, [])
+                    ),
+                    "validated": True,
+                    "validation_source": "adversarial_positive_meta",
+                },
+            }
+            positive_meta_challenges.append(critique)
+            validated_critiques.append(critique)
+            low_scores_seen += 1
 
     strict_pass = compute_strict_pass(
         verifier_results,
@@ -2710,6 +2814,7 @@ def aggregate_proof_label(
         "verifier_group_scores": verifier_group_scores,
         "verifier_score_summaries": score_summaries,
         "low_scores_seen": low_scores_seen,
+        "positive_meta_challenges": positive_meta_challenges,
         **strict_pass,
     }
 
@@ -4972,6 +5077,7 @@ async def run_verification_round(
             cfg.min_valid_low,
             strict_pass_meta=cfg.strict_pass_meta and cfg.meta_n > 0,
             meta_n=cfg.meta_n,
+            audit_positive_meta=cfg.meta_policy == "all-reviews",
         )
 
     def enough_validated_critiques() -> bool:
@@ -5029,6 +5135,9 @@ async def run_verification_round(
                         question,
                         proof,
                         verifier_result.get("evaluation", ""),
+                        audit_positive_verdicts=(
+                            cfg.meta_policy == "all-reviews"
+                        ),
                     ),
                     progress=progress,
                     detail=(
@@ -5542,9 +5651,12 @@ async def run_single_attempt(
         if score is None:
             return -1.0
         try:
-            return float(score)
+            value = float(score)
         except (TypeError, ValueError):
             return -1.0
+        if aggregation.get("positive_meta_challenges"):
+            value -= 0.5
+        return value
 
     for round_idx in range(consumed_refine_rounds, cfg.refine_rounds + 1):
         if progress is not None:
@@ -5793,6 +5905,9 @@ async def run_single_attempt(
         "validated_critiques": final_aggregation.get("validated_critiques", []),
         "validated_fatal_critiques": final_aggregation.get(
             "validated_fatal_critiques", []
+        ),
+        "positive_meta_challenges": final_aggregation.get(
+            "positive_meta_challenges", []
         ),
         "fatal_score_cap_applied": final_aggregation.get(
             "fatal_score_cap_applied", False
@@ -7849,6 +7964,7 @@ def run(cfg: type[CFG] = CFG) -> None:
             "verifier_generalist_n": int(cfg.verifier_generalist_n),
             "meta_n": int(cfg.meta_n),
             "meta_policy": str(cfg.meta_policy),
+            "audit_positive_meta": str(cfg.meta_policy) == "all-reviews",
             "strict_pass_meta": bool(cfg.strict_pass_meta),
             "refine_rounds": int(cfg.refine_rounds),
             "refine_review_n": int(cfg.refine_review_n),

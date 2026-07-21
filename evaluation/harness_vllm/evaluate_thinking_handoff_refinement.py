@@ -301,6 +301,9 @@ async def resume_final_refinement(
                 "validated_critiques": aggregation.get(
                     "validated_critiques", []
                 ),
+                "positive_meta_challenges": aggregation.get(
+                    "positive_meta_challenges", []
+                ),
                 "verifier_score_summaries": aggregation.get(
                     "verifier_score_summaries", []
                 ),
@@ -510,6 +513,7 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "verifier_generalist_n": cfg.verifier_generalist_n,
             "meta_n": cfg.meta_n,
             "meta_policy": cfg.meta_policy,
+            "audit_positive_meta": cfg.meta_policy == "all-reviews",
             "strict_pass_meta": cfg.strict_pass_meta,
             "refine_rounds": cfg.refine_rounds,
             "refine_review_n": cfg.refine_review_n,

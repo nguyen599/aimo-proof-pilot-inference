@@ -389,6 +389,26 @@ class RunOpdPromptContractTests(unittest.TestCase):
             self.assertTrue(
                 any(f"audit role: {role_name}" in prompt for prompt in prompts[4:])
             )
+        for prompt in prompts[4:]:
+            self.assertIn("CLAIM_UNDER_TEST:", prompt)
+            self.assertIn("ADVERSARIAL_TEST:", prompt)
+            self.assertIn("CHECK_RESULT:", prompt)
+            self.assertIn("PASS_JUSTIFICATION:", prompt)
+
+    def test_all_reviews_meta_independently_audits_positive_verdicts(self):
+        prompt = run.build_deepseek_meta_verification_prompt(
+            "Problem.",
+            "Candidate proof.",
+            "The proof is correct.",
+            audit_positive_verdicts=True,
+        )
+
+        self.assertIn("adversarial second-opinion auditor", prompt)
+        self.assertIn("One cooperative infinite play never proves", prompt)
+        self.assertIn("CLAIM_UNDER_TEST:", prompt)
+        self.assertNotIn(
+            "positive components about the solution", prompt
+        )
 
     def test_verifier_reaudits_prior_validated_critiques(self):
         messages = run.build_opd_proof_verification_prompt(
@@ -542,6 +562,47 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(two_critiques["final_score"], 0.5)
         self.assertTrue(two_critiques["validated_critique_quorum"])
         self.assertTrue(two_critiques["validated_low_score_cap_applied"])
+
+    def test_rejected_positive_meta_verdicts_become_refinement_critiques(self):
+        verifier_results = [
+            {
+                "verifier_index": index,
+                "verifier_role": f"specialist_{index}",
+                "verifier_group": "specialist",
+                "score": 1.0,
+                "evaluation": "The proof passes.",
+            }
+            for index in range(2)
+        ]
+        meta_results = {
+            0: [
+                {
+                    "score": 0.0,
+                    "analysis": "A legal counterexample breaks the strategy.",
+                }
+            ],
+            1: [
+                {
+                    "score": 0.5,
+                    "analysis": "The decisive monotonicity claim is unchecked.",
+                }
+            ],
+        }
+
+        result = run.aggregate_proof_label(
+            verifier_results,
+            meta_results,
+            min_valid_low=2,
+            strict_pass_meta=True,
+            meta_n=1,
+            audit_positive_meta=True,
+        )
+
+        self.assertEqual(len(result["positive_meta_challenges"]), 2)
+        self.assertEqual(len(result["validated_critiques"]), 2)
+        self.assertEqual(result["final_score"], 0.25)
+        self.assertEqual(result["final_status"], "validated_low_score")
+        self.assertFalse(result["strict_pass"])
 
     def test_prover_uses_trained_system_user_prompt(self):
         messages = run.build_opd_proof_generation_prompt("Prove the claim.")
