@@ -10,6 +10,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -19,7 +20,11 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from evaluation.harness_vllm.run import parse_generation_response
+from evaluation.harness_vllm.run import (
+    PROOF_GENERATION_STRATEGY_PORTFOLIOS,
+    parse_generation_response,
+    resolve_proof_generation_strategy,
+)
 from evaluation.harness_vllm.thinking_handoff import (
     parse_saved_proof_generation_call,
 )
@@ -140,9 +145,18 @@ def prepare(
     rubrics_file: Path,
     problem_ids: list[str],
     expected_candidates: int,
+    strategy_portfolio: str = "baseline",
 ) -> dict[str, Any]:
+    if strategy_portfolio not in PROOF_GENERATION_STRATEGY_PORTFOLIOS:
+        raise ValueError(
+            "strategy portfolio must be one of "
+            + ", ".join(PROOF_GENERATION_STRATEGY_PORTFOLIOS)
+        )
     calls = discover_calls(run_dir, problem_ids, expected_candidates)
     rubrics = load_rubrics(rubrics_file, problem_ids)
+    strategy_cfg = SimpleNamespace(
+        proof_generation_strategy_portfolio=strategy_portfolio
+    )
     generation_rows: list[dict[str, Any]] = []
     grader_rows: list[dict[str, Any]] = []
     grader_rubrics: list[dict[str, Any]] = []
@@ -172,6 +186,11 @@ def prepare(
             structurally_complete = bool(parsed["is_valid_candidate_response"])
             eligible = bool(not budget_reached and structurally_complete)
             candidate_id = f"p{problem_id}-c{candidate_index:02d}"
+            planning_strategy = resolve_proof_generation_strategy(
+                candidate_index,
+                strategy_cfg,
+                rubrics[problem_id]["Problem"],
+            )
             relative_path = str(path.relative_to(run_dir))
             if budget_reached:
                 rejection_reason = "thinking_budget_reached"
@@ -184,6 +203,7 @@ def prepare(
                 "candidate_id": candidate_id,
                 "problem_id": problem_id,
                 "candidate_index": candidate_index,
+                "planning_strategy": planning_strategy,
                 "source_log": relative_path,
                 "source_sha256": sha256(path),
                 "stage": saved.stage,
@@ -210,6 +230,7 @@ def prepare(
                     "final_proof": proof,
                     "source_problem_id": problem_id,
                     "candidate_index": candidate_index,
+                    "planning_strategy": planning_strategy,
                     "source_log": relative_path,
                     "source_sha256": row["source_sha256"],
                 }
@@ -227,6 +248,7 @@ def prepare(
                     "candidate_id": candidate_id,
                     "problem_id": problem_id,
                     "candidate_index": candidate_index,
+                    "planning_strategy": planning_strategy,
                     "source_log": relative_path,
                     "source_sha256": row["source_sha256"],
                 }
@@ -242,6 +264,26 @@ def prepare(
             not row["thinking_budget_reached"] and not row["structurally_complete"]
             for row in rows
         )
+        strategy_summaries = []
+        for strategy in dict.fromkeys(row["planning_strategy"] for row in rows):
+            strategy_rows = [
+                row for row in rows if row["planning_strategy"] == strategy
+            ]
+            strategy_summaries.append(
+                {
+                    "planning_strategy": strategy,
+                    "total_candidates": len(strategy_rows),
+                    "thinking_budget_not_reached_count": sum(
+                        not row["thinking_budget_reached"] for row in strategy_rows
+                    ),
+                    "structurally_complete_nonbudget_count": sum(
+                        row["eligible_for_grading"] for row in strategy_rows
+                    ),
+                    "grader_candidate_count": sum(
+                        row["eligible_for_grading"] for row in strategy_rows
+                    ),
+                }
+            )
         problem_summaries.append(
             {
                 "problem_id": problem_id,
@@ -256,6 +298,7 @@ def prepare(
                 ),
                 "invalid_nonbudget_count": invalid_no_budget,
                 "grader_candidate_count": eligible_count,
+                "strategies": strategy_summaries,
             }
         )
 
@@ -264,6 +307,7 @@ def prepare(
         "methodology": {
             "round": 0,
             "expected_candidates_per_problem": expected_candidates,
+            "proof_generation_strategy_portfolio": strategy_portfolio,
             "thinking_budget_reached_source": "usage.thinking_budget_applied",
             "complete_response_definition": (
                 "parse_generation_response(require_self_evaluation=True) accepted "
@@ -352,6 +396,52 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
         call_scores = [score for row in candidates for score in row["attempt_scores"]]
         call_counts = Counter(call_scores)
         candidate_counts = Counter(row["mean_score_out_of_7"] for row in candidates)
+        strategy_results = []
+        for generation_strategy in generation_problem.get("strategies", []):
+            strategy = generation_strategy["planning_strategy"]
+            strategy_candidates = [
+                row
+                for row in candidates
+                if row.get("planning_strategy", "baseline") == strategy
+            ]
+            strategy_call_scores = [
+                score
+                for row in strategy_candidates
+                for score in row["attempt_scores"]
+            ]
+            strategy_results.append(
+                {
+                    **generation_strategy,
+                    "grader_calls": len(strategy_call_scores),
+                    "average_score_out_of_7": (
+                        mean(
+                            row["mean_score_out_of_7"]
+                            for row in strategy_candidates
+                        )
+                        if strategy_candidates
+                        else None
+                    ),
+                    "best_mean_score_out_of_7": (
+                        max(
+                            row["mean_score_out_of_7"]
+                            for row in strategy_candidates
+                        )
+                        if strategy_candidates
+                        else None
+                    ),
+                    "candidate_count_at_or_above": {
+                        str(threshold): sum(
+                            row["mean_score_out_of_7"] >= threshold
+                            for row in strategy_candidates
+                        )
+                        for threshold in (4, 5, 6, 7)
+                    },
+                    "grader_call_score_distribution": {
+                        str(score): Counter(strategy_call_scores).get(score, 0)
+                        for score in range(8)
+                    },
+                }
+            )
         problem_results.append(
             {
                 **generation_problem,
@@ -362,6 +452,18 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
                     if candidates
                     else None
                 ),
+                "best_mean_score_out_of_7": (
+                    max(row["mean_score_out_of_7"] for row in candidates)
+                    if candidates
+                    else None
+                ),
+                "candidate_count_at_or_above": {
+                    str(threshold): sum(
+                        row["mean_score_out_of_7"] >= threshold
+                        for row in candidates
+                    )
+                    for threshold in (4, 5, 6, 7)
+                },
                 "grader_call_score_distribution": {
                     str(score): call_counts.get(score, 0) for score in range(8)
                 },
@@ -369,6 +471,7 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
                     format_mean(score / 2): candidate_counts.get(score / 2, 0)
                     for score in range(15)
                 },
+                "strategies": strategy_results,
             }
         )
 
@@ -390,7 +493,7 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
         average = row["average_score_out_of_7"]
         table_rows.append(
             "| {problem_id} | {total_candidates} | {no_budget} | {no_budget_rate:.1%} "
-            "| {complete} | {graded} | {average} |".format(
+            "| {complete} | {graded} | {average} | {best} |".format(
                 problem_id=row["problem_id"],
                 total_candidates=row["total_candidates"],
                 no_budget=row["thinking_budget_not_reached_count"],
@@ -398,6 +501,11 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
                 complete=row["structurally_complete_nonbudget_count"],
                 graded=row["grader_candidate_count"],
                 average=f"{average:.3f}" if average is not None else "n/a",
+                best=(
+                    f"{row['best_mean_score_out_of_7']:.1f}"
+                    if row["best_mean_score_out_of_7"] is not None
+                    else "n/a"
+                ),
             )
         )
     distribution_rows = []
@@ -409,19 +517,47 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
                 counts=" | ".join(str(counts[str(score)]) for score in range(8)),
             )
         )
+    strategy_rows = []
+    for problem in problem_results:
+        for strategy in problem.get("strategies", []):
+            average = strategy["average_score_out_of_7"]
+            best = strategy["best_mean_score_out_of_7"]
+            strategy_rows.append(
+                "| {problem} | {strategy} | {total} | {complete} | {graded} | "
+                "{average} | {best} | {ge6} | {ge7} |".format(
+                    problem=problem["problem_id"],
+                    strategy=strategy["planning_strategy"],
+                    total=strategy["total_candidates"],
+                    complete=strategy["structurally_complete_nonbudget_count"],
+                    graded=strategy["grader_candidate_count"],
+                    average=f"{average:.3f}" if average is not None else "n/a",
+                    best=f"{best:.1f}" if best is not None else "n/a",
+                    ge6=strategy["candidate_count_at_or_above"]["6"],
+                    ge7=strategy["candidate_count_at_or_above"]["7"],
+                )
+            )
     overall = summary["average_score_out_of_7"]
+    expected_candidates = generation_summary["methodology"][
+        "expected_candidates_per_problem"
+    ]
+    problem_label = ", ".join(generation_summary["problem_ids"])
+    strategy_portfolio = generation_summary["methodology"].get(
+        "proof_generation_strategy_portfolio",
+        "baseline",
+    )
     report = "\n".join(
         [
             "# IMO 2025 round-0 proof-generation quality",
             "",
-            "Each of problems 2, 4, and 5 has 64 independent round-0 proof calls. "
+            f"Problems {problem_label} each have {expected_candidates} independent "
+            f"round-0 proof calls using the `{strategy_portfolio}` planning portfolio. "
             "A candidate is graded only when `usage.thinking_budget_applied` is "
             "false and the production parser accepts its final visible XML response. "
             "This is a structural completeness check; GPT-5.6 performs the "
             "mathematical grading.",
             "",
-            "| Problem | Total | No budget | No-budget rate | Parseable complete | Graded | Avg / 7 |",
-            "|---:|---:|---:|---:|---:|---:|---:|",
+            "| Problem | Total | No budget | No-budget rate | Parseable complete | Graded | Avg / 7 | Best / 7 |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|",
             *table_rows,
             "",
             f"Overall graded-candidate average: {overall:.3f}/7."
@@ -438,6 +574,12 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
             "",
             "The exact per-candidate two-call scores and half-point mean "
             "distribution are in `analysis/final_summary.json`.",
+            "",
+            "## Planning-strategy outcomes",
+            "",
+            "| Problem | Strategy | Total | Complete | Graded | Avg / 7 | Best / 7 | >=6 | 7 |",
+            "|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+            *strategy_rows,
             "",
         ]
     )
@@ -460,6 +602,11 @@ def main() -> None:
     prepare_parser.add_argument("--rubrics-file", required=True, type=Path)
     prepare_parser.add_argument("--problem-ids", nargs="+", default=["2", "4", "5"])
     prepare_parser.add_argument("--expected-candidates", type=int, default=64)
+    prepare_parser.add_argument(
+        "--strategy-portfolio",
+        choices=PROOF_GENERATION_STRATEGY_PORTFOLIOS,
+        default="baseline",
+    )
     finalize_parser = subparsers.add_parser("finalize")
     finalize_parser.add_argument("--run-dir", required=True, type=Path)
     finalize_parser.add_argument("--grading-dir", required=True, type=Path)
@@ -473,6 +620,7 @@ def main() -> None:
             args.rubrics_file,
             parse_problem_ids(args.problem_ids),
             args.expected_candidates,
+            args.strategy_portfolio,
         )
     else:
         result = finalize(args.run_dir, args.grading_dir)

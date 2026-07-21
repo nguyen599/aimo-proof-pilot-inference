@@ -143,6 +143,66 @@ class RoundZeroProofQualityTests(unittest.TestCase):
                 expected_candidates=2,
             )
 
+    def test_prepare_reports_adaptive_strategy_allocation(self) -> None:
+        self.rubrics.write_text(
+            json.dumps(
+                {
+                    "Problem ID": "4",
+                    "Problem": (
+                        "The sequence satisfies a_{n+1}=f(a_n). Determine all "
+                        "possible initial values."
+                    ),
+                    "Grading scheme": "1. [7 pts] Complete proof: Correct.",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        for candidate_index in range(12):
+            write_call(
+                self.run_dir
+                / "logs"
+                / f"rank_000{candidate_index % 2}"
+                / "llm_calls"
+                / "4"
+                / f"cand_{candidate_index}_proof_gen_r0.txt",
+                budget_reached=False,
+            )
+
+        prepared = prepare(
+            self.run_dir,
+            self.rubrics,
+            ["4"],
+            expected_candidates=12,
+            strategy_portfolio="adaptive",
+        )
+
+        strategies = {
+            row["planning_strategy"]: row
+            for row in prepared["problems"][0]["strategies"]
+        }
+        self.assertEqual(strategies["baseline"]["total_candidates"], 3)
+        self.assertEqual(
+            strategies["exhaustive_transitions"]["total_candidates"],
+            3,
+        )
+        self.assertEqual(strategies["state_invariant"]["total_candidates"], 2)
+        self.assertEqual(
+            strategies["proof_obligation_ledger"]["total_candidates"],
+            2,
+        )
+        self.assertEqual(strategies["counterexample_audit"]["total_candidates"], 1)
+        self.assertEqual(
+            strategies["independent_reformulation"]["total_candidates"],
+            1,
+        )
+        self.assertTrue(
+            all(
+                row["grader_candidate_count"] == row["total_candidates"]
+                for row in strategies.values()
+            )
+        )
+
     def test_finalize_rejects_missing_second_grade(self) -> None:
         self.populate_calls()
         prepare(
