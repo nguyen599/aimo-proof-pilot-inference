@@ -165,6 +165,44 @@ done
 printf '%s\n' healthy > "$ROOT/vllm.status"
 date -u +%FT%TZ > "$ROOT/vllm.ready_at"
 
+if [ "${DFLASH_BOUNDARY_SMOKE:-1}" = "1" ]; then
+    "$VENV/bin/python" - "$ROOT/dflash_boundary_smoke.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from openai import OpenAI
+
+output_path = Path(sys.argv[1])
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key="vllm-local",
+    timeout=1800,
+    max_retries=0,
+)
+prompt_tokens = 65_524
+decode_tokens = 32
+response = client.completions.create(
+    model="proof-model",
+    prompt=[42] * prompt_tokens,
+    max_tokens=decode_tokens,
+    temperature=0.0,
+    extra_body={"ignore_eos": True},
+)
+result = {
+    "prompt_tokens": prompt_tokens,
+    "requested_decode_tokens": decode_tokens,
+    "completion_tokens": response.usage.completion_tokens,
+    "finish_reason": response.choices[0].finish_reason,
+}
+output_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+if response.usage.completion_tokens != decode_tokens:
+    raise RuntimeError(f"Boundary smoke stopped early: {result}")
+PY
+    curl -fsS --max-time 5 http://127.0.0.1:8000/health >/dev/null
+    printf '%s\n' boundary_smoke_passed > "$ROOT/vllm.status"
+fi
+
 run_replay() {
     local logs_root=$1 restart=$2 output=$3 rounds=$4 log=$5
     PYTHONPATH="$CODE" "$VENV/bin/python" \
