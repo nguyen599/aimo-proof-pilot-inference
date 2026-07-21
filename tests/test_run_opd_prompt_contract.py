@@ -608,6 +608,28 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(result["final_status"], "validated_low_score")
         self.assertFalse(result["strict_pass"])
 
+    def test_validated_critique_preserves_requested_fix(self):
+        result = run.aggregate_proof_label(
+            [
+                {
+                    "verifier_index": 0,
+                    "verifier_role": "transition_closure",
+                    "verifier_group": "specialist",
+                    "score": 0.0,
+                    "evaluation": "The one-step descent is not closed.",
+                    "suggestions": "Prove closure under every successor state.",
+                }
+            ],
+            {},
+            min_valid_low=1,
+            meta_n=0,
+        )
+
+        self.assertEqual(
+            result["validated_critiques"][0]["suggestions"],
+            "Prove closure under every successor state.",
+        )
+
     def test_prover_uses_trained_system_user_prompt(self):
         messages = run.build_opd_proof_generation_prompt("Prove the claim.")
 
@@ -940,6 +962,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn('<candidate id="P3">', user)
         self.assertIn('<verifier_review score="0.5">', user)
         self.assertIn("Candidate audit.", user)
+        self.assertIn('<repair id="R1" role="unknown" score="0.5">', user)
+        self.assertIn("Minor gap.", user)
+        self.assertIn("Fill it.", user)
+        self.assertIn("REPAIR_STATUS Rn", user)
 
     def test_reconstruction_prompt_treats_candidate_as_fallible(self):
         messages = run.build_opd_proof_reconstruction_prompt(
@@ -964,6 +990,32 @@ class RunOpdPromptContractTests(unittest.TestCase):
             '<verifier_review role="dependency_lemma" score="1">',
             messages[1]["content"],
         )
+        self.assertIn(
+            '<repair id="R1" role="dependency_lemma" score="1">',
+            messages[1]["content"],
+        )
+        self.assertIn(
+            "repeating an unsupported claim",
+            messages[0]["content"].lower(),
+        )
+
+    def test_refinement_repair_ledger_deduplicates_and_falls_back(self):
+        critique = {
+            "verifier_role": "transition_closure",
+            "score": 0.0,
+            "evaluation": "The descent lemma is not closed under iteration.",
+            "suggestions": "Prove that every successor remains in the decreasing set.",
+        }
+
+        ledger = run.build_refinement_repair_ledger([critique, dict(critique)])
+        fallback = run.build_refinement_repair_ledger(
+            [{"score": 0.5, "review": "An unsupported boundary claim remains."}]
+        )
+
+        self.assertEqual(ledger.count('<repair id="R1"'), 1)
+        self.assertNotIn('<repair id="R2"', ledger)
+        self.assertIn("every successor remains", ledger)
+        self.assertIn("Supply a complete proof", fallback)
 
     def test_mixed_refinement_strategy_splits_candidates_deterministically(self):
         cfg = SimpleNamespace(refinement_strategy="mixed")

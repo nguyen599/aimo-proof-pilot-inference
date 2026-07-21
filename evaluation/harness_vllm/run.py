@@ -612,6 +612,7 @@ MAX_FORWARDED_EVALUATION_CHARS = 32_000
 MAX_FORWARDED_META_ANALYSIS_CHARS = 24_000
 MAX_PRIOR_VERIFIER_CRITIQUES = 8
 MAX_PRIOR_VERIFIER_CRITIQUE_CHARS = 4_000
+MAX_REPAIR_LEDGER_FIELD_CHARS = 1_500
 REPETITION_GUARD_RECENT_TOKENS = 500
 REPETITION_GUARD_DUPLICATE_LINE_THRESHOLD = 20
 REASONING_REPETITION_WINDOW_WORDS = 32
@@ -1912,6 +1913,96 @@ Here is your task input:
 {proof_analysis}"""
 
 
+def _refinement_critique_fields(
+    critique: dict[str, Any],
+) -> tuple[str, str]:
+    evaluation = str(critique.get("evaluation") or "").strip()
+    suggestions = str(critique.get("suggestions") or "").strip()
+    review = str(critique.get("review") or "").strip()
+    if review:
+        if not evaluation:
+            match = last_pattern_match(_XML_EVALUATION_PATTERN, review)
+            if match is not None:
+                evaluation = match.group(1).strip()
+        if not suggestions:
+            match = last_pattern_match(_XML_SUGGESTIONS_PATTERN, review)
+            if match is not None:
+                suggestions = match.group(1).strip()
+    if not evaluation:
+        evaluation = review
+    if not suggestions:
+        suggestions = (
+            "Supply a complete proof of the identified weak claim, or remove "
+            "every conclusion that depends on it."
+        )
+    evaluation, _ = clip_middle_text(
+        evaluation,
+        MAX_REPAIR_LEDGER_FIELD_CHARS,
+    )
+    suggestions, _ = clip_middle_text(
+        suggestions,
+        MAX_REPAIR_LEDGER_FIELD_CHARS,
+    )
+    return evaluation, suggestions
+
+
+def build_refinement_repair_ledger(
+    proof_analyses: list[dict[str, Any]],
+) -> str:
+    lines = [
+        "<repair_obligations>",
+        (
+            "Treat every item below as a non-negotiable proof obligation, not "
+            "as automatically correct feedback. Independently audit it. For "
+            "each valid item, either provide the missing proof at the exact "
+            "point where it is needed or replace the argument so it no longer "
+            "depends on that claim. Rephrasing or repeating the claim is not a "
+            "repair. For an invalid item, give a concrete refutation. Do not "
+            "claim a complete proof while any valid item remains unresolved."
+        ),
+    ]
+    seen: set[str] = set()
+    repair_index = 0
+    for analysis in proof_analyses:
+        evaluation, suggestions = _refinement_critique_fields(analysis)
+        normalized = re.sub(
+            r"\s+",
+            " ",
+            f"{evaluation}\n{suggestions}".strip().lower(),
+        )
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        repair_index += 1
+        score = coerce_score(analysis.get("score"))
+        score_text = "?" if score is None else f"{score:g}"
+        role = str(analysis.get("verifier_role") or "unknown").strip()
+        lines.extend(
+            [
+                f'<repair id="R{repair_index}" role="{role}" score="{score_text}">',
+                "<identified_defect>",
+                evaluation,
+                "</identified_defect>",
+                "<required_fix>",
+                suggestions,
+                "</required_fix>",
+                "</repair>",
+            ]
+        )
+    lines.extend(
+        [
+            (
+                "In <self_evaluation>, include one line per item in the form "
+                "REPAIR_STATUS Rn: resolved | invalid | unresolved - followed "
+                "by the exact lemma, calculation, case split, or counterargument "
+                "that supports that status."
+            ),
+            "</repair_obligations>",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def build_opd_proof_refinement_prompt(
     question: str,
     candidate_id: str,
@@ -1920,6 +2011,7 @@ def build_opd_proof_refinement_prompt(
     proof_analyses: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
     parts = [
+        build_refinement_repair_ledger(proof_analyses),
         f'<candidate id="{candidate_id}">',
         "<proof>",
         proof,
@@ -1956,6 +2048,7 @@ def build_opd_proof_reconstruction_prompt(
     strict_pass_challenge: bool = False,
 ) -> list[dict[str, str]]:
     parts = [
+        build_refinement_repair_ledger(proof_analyses),
         f'<candidate id="{candidate_id}">',
         "<proof>",
         proof,
@@ -2028,6 +2121,7 @@ def strict_pass_challenge_reviews(
                 "verifier_group": verifier.get("verifier_group"),
                 "score": verifier.get("score"),
                 "evaluation": verifier.get("evaluation", ""),
+                "suggestions": verifier.get("suggestions", ""),
                 "review": review,
                 "critique_source": "strict_pass_challenge",
             }
@@ -2944,6 +3038,7 @@ def aggregate_proof_label(
             "verifier_group": verifier.get("verifier_group"),
             "score": score,
             "evaluation": verifier.get("evaluation", ""),
+            "suggestions": verifier.get("suggestions", ""),
             "review": verifier.get("review", verifier.get("evaluation", "")),
             "meta_summary": meta_summary,
         }
@@ -2989,6 +3084,10 @@ def aggregate_proof_label(
                     f"verdict.\n{analysis}"
                 ).strip(),
                 "review": analysis,
+                "suggestions": (
+                    "Re-audit the challenged positive verdict and repair or "
+                    "remove the claim exposed by the adversarial meta-analysis."
+                ),
                 "critique_source": "positive_meta_audit",
                 "meta_summary": {
                     **summarize_meta_votes(

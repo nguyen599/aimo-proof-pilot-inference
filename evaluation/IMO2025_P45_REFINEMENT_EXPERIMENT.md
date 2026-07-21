@@ -42,6 +42,15 @@ AIMO_STRICT_PASS_CHALLENGE_ROUNDS=1
 Legacy callers remain backward compatible because `run.py` defaults to
 `repair` and zero strict-pass challenges unless the launcher or CLI opts in.
 
+Every repair and reconstruction prompt now begins with a compact indexed repair
+ledger derived from the meta-validated verifier findings. Each item keeps the
+identified defect and requested fix separate. The refiner must prove the fix,
+remove the dependency, or concretely refute the critique, then report an
+indexed status in its self-evaluation. This targets the observed P4 failure in
+which the verifier correctly found a missing transition invariant but the next
+proof merely repeated the unsupported descent claim. The response XML schema
+is unchanged.
+
 ## Initial-proof portfolio
 
 The external grader shows that refinement cannot recover when every initial
