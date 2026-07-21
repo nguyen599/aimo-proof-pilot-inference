@@ -140,6 +140,22 @@ class GradeProofsTests(unittest.TestCase):
         self.assertFalse(grader["prompt_cache_options_enabled"])
         self.assertFalse(grader["zero_veto"])
 
+    def test_p5_grader_uses_eight_workers_per_api_key(self):
+        grader = load_config(
+            REPO
+            / "evaluation"
+            / "runs"
+            / "imo2025-p245-round0-p64-sft750-20260721"
+            / "grader-p5.yaml"
+        )["grader"]
+
+        self.assertEqual(len(grader["api_key_envs"]), 3)
+        self.assertEqual(grader["concurrency"], 24)
+        self.assertEqual(
+            grader["concurrency"] // len(grader["api_key_envs"]),
+            8,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,10 +17,13 @@ VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GEN
 VERIFY_REQUEST_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_N="${AIMO_VERIFY_N:-8}"
 REFINE_REVIEW_N="${AIMO_REFINE_REVIEW_N:-4}"
+REFINEMENT_STRATEGY="${AIMO_REFINEMENT_STRATEGY:-mixed}"
+STRICT_PASS_CHALLENGE_ROUNDS="${AIMO_STRICT_PASS_CHALLENGE_ROUNDS:-1}"
 
 for value_name in \
     VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING \
-    VERIFY_REQUEST_LIMIT_WHILE_GENERATING
+    VERIFY_REQUEST_LIMIT_WHILE_GENERATING \
+    STRICT_PASS_CHALLENGE_ROUNDS
 do
     value="${!value_name}"
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -35,6 +38,13 @@ for value_name in VERIFY_N REFINE_REVIEW_N; do
         exit 2
     fi
 done
+case "$REFINEMENT_STRATEGY" in
+    repair|reconstruct|mixed) ;;
+    *)
+        echo "REFINEMENT_STRATEGY must be repair, reconstruct, or mixed; got $REFINEMENT_STRATEGY" >&2
+        exit 2
+        ;;
+esac
 if [ "$REFINE_REVIEW_N" -gt "$VERIFY_N" ]; then
     echo "REFINE_REVIEW_N cannot exceed VERIFY_N" >&2
     exit 2
@@ -199,6 +209,8 @@ args=(
     --verify-n "$VERIFY_N"
     --refine-review-n "$REFINE_REVIEW_N"
     --refine-rounds 4
+    --refinement-strategy "$REFINEMENT_STRATEGY"
+    --strict-pass-challenge-rounds "$STRICT_PASS_CHALLENGE_ROUNDS"
     --thinking-budget-handoff-enabled
     --thinking-budget-handoff-mode lossless_partial
     --thinking-budget-handoff-preserve-refine-rounds

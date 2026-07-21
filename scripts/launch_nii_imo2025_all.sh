@@ -32,6 +32,8 @@ VERIFIER_GENERALIST_N="${AIMO_VERIFIER_GENERALIST_N:-4}"
 REFINE_REVIEW_N="${AIMO_REFINE_REVIEW_N:-4}"
 MIN_VALID_LOW="${AIMO_MIN_VALID_LOW:-2}"
 REFINE_THINKING_BUDGET="${AIMO_THINKING_BUDGET_REFINE_TOKENS:-120000}"
+REFINEMENT_STRATEGY="${AIMO_REFINEMENT_STRATEGY:-mixed}"
+STRICT_PASS_CHALLENGE_ROUNDS="${AIMO_STRICT_PASS_CHALLENGE_ROUNDS:-1}"
 
 for value_name in \
     TP_SIZE \
@@ -50,7 +52,7 @@ do
         exit 2
     fi
 done
-for value_name in REFINE_ROUNDS; do
+for value_name in REFINE_ROUNDS STRICT_PASS_CHALLENGE_ROUNDS; do
     value="${!value_name}"
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
         echo "$value_name must be a nonnegative integer, got $value" >&2
@@ -68,6 +70,13 @@ if [ "$SELECTOR_MODE" != "llm" ] && [ "$SELECTOR_MODE" != "score" ]; then
     echo "SELECTOR_MODE must be llm or score, got $SELECTOR_MODE" >&2
     exit 2
 fi
+case "$REFINEMENT_STRATEGY" in
+    repair|reconstruct|mixed) ;;
+    *)
+        echo "REFINEMENT_STRATEGY must be repair, reconstruct, or mixed; got $REFINEMENT_STRATEGY" >&2
+        exit 2
+        ;;
+esac
 for value_name in \
     VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING \
     VERIFY_REQUEST_LIMIT_WHILE_GENERATING \
@@ -302,6 +311,8 @@ args=(
     --refine-review-n "$REFINE_REVIEW_N"
     --min-valid-low "$MIN_VALID_LOW"
     --refine-rounds "$REFINE_ROUNDS"
+    --refinement-strategy "$REFINEMENT_STRATEGY"
+    --strict-pass-challenge-rounds "$STRICT_PASS_CHALLENGE_ROUNDS"
     --selector-mode "$SELECTOR_MODE"
 )
 
@@ -334,7 +345,7 @@ echo "source_commit=$AIMO_SOURCE_COMMIT"
 echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
 echo "vllm_capacity=tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((8 * REQUESTS_PER_GPU))"
-echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} refine_rounds:${REFINE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE}"
+echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE}"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
 echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"
 echo "command_file=$rank_command"

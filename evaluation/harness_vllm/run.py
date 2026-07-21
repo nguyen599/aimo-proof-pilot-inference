@@ -98,6 +98,7 @@ DEFAULT_SELECTION_RESERVE_SECONDS = 1_800
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_FAMILY_OPD = "opd"
 PROMPT_FAMILY_DEEPSEEK_MATH_V2 = "deepseek_math_v2"
+REFINEMENT_STRATEGIES = ("repair", "reconstruct", "mixed")
 
 
 class InferenceServerUnavailable(RuntimeError):
@@ -384,6 +385,10 @@ class CFG:
     refine_rounds = int(os.environ.get("AIMO_REFINE_ROUNDS", "1"))
     refine_review_n = int(os.environ.get("AIMO_REFINE_REVIEW_N", "4"))
     min_valid_low = int(os.environ.get("AIMO_MIN_VALID_LOW", "2"))
+    refinement_strategy = os.environ.get("AIMO_REFINEMENT_STRATEGY", "repair")
+    strict_pass_challenge_rounds = int(
+        os.environ.get("AIMO_STRICT_PASS_CHALLENGE_ROUNDS", "0")
+    )
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
     selection_reserve_seconds = DEFAULT_SELECTION_RESERVE_SECONDS
     selection_temperature = 1.0
@@ -597,6 +602,8 @@ class PipelineConfig:
     refine_rounds: int
     refine_review_n: int
     min_valid_low: int
+    refinement_strategy: str
+    strict_pass_challenge_rounds: int
     selector_max_candidate_chars: int
     selection_temperature: float
     selector_mode: str
@@ -1779,6 +1786,101 @@ def build_opd_proof_refinement_prompt(
         problem=question,
         candidate_bundle="\n".join(parts),
     )
+
+
+def build_opd_proof_reconstruction_prompt(
+    question: str,
+    candidate_id: str,
+    proof: str,
+    self_evaluation: str,
+    proof_analyses: list[dict[str, Any]],
+    *,
+    strict_pass_challenge: bool = False,
+) -> list[dict[str, str]]:
+    parts = [
+        f'<candidate id="{candidate_id}">',
+        "<proof>",
+        proof,
+        "</proof>",
+    ]
+    for analysis in proof_analyses:
+        score = coerce_score(analysis.get("score"))
+        score_text = "?" if score is None else f"{score:g}"
+        role = str(analysis.get("verifier_role") or "unknown")
+        review = str(analysis.get("review") or analysis.get("evaluation") or "").strip()
+        parts.extend(
+            [
+                f'<verifier_review role="{role}" score="{score_text}">',
+                review,
+                "</verifier_review>",
+            ]
+        )
+    if self_evaluation:
+        parts.extend(["<self_evaluation>", self_evaluation, "</self_evaluation>"])
+    parts.append("</candidate>")
+    challenge_instruction = (
+        "This is an adversarial challenge to a proof that received a perfect "
+        "internal score. Treat that score as untrusted and independently "
+        "reconstruct the argument before accepting any central claim."
+        if strict_pass_challenge
+        else (
+            "The supplied proof is incomplete or unreliable. Reconstruct the "
+            "solution independently instead of editing its prose line by line."
+        )
+    )
+    return _opd_messages(
+        "refiner_reconstruct.txt",
+        problem=question,
+        candidate_bundle="\n".join(parts),
+        challenge_instruction=challenge_instruction,
+    )
+
+
+def resolve_refinement_strategy(
+    cfg: PipelineConfig,
+    attempt_idx: int,
+    *,
+    strict_pass_challenge: bool = False,
+) -> str:
+    if strict_pass_challenge:
+        return "reconstruct"
+    configured = str(getattr(cfg, "refinement_strategy", "repair")).strip().lower()
+    if configured == "mixed":
+        return "repair" if attempt_idx % 2 == 0 else "reconstruct"
+    if configured not in REFINEMENT_STRATEGIES:
+        raise ValueError(
+            "refinement_strategy must be one of " + ", ".join(REFINEMENT_STRATEGIES)
+        )
+    return configured
+
+
+def strict_pass_challenge_reviews(
+    verifier_results: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    reviews = []
+    for verifier in verifier_results:
+        review = str(verifier.get("review") or verifier.get("evaluation") or "").strip()
+        if not review:
+            continue
+        reviews.append(
+            {
+                "verifier_index": verifier.get("verifier_index"),
+                "verifier_role": verifier.get("verifier_role"),
+                "verifier_group": verifier.get("verifier_group"),
+                "score": verifier.get("score"),
+                "evaluation": verifier.get("evaluation", ""),
+                "review": review,
+                "critique_source": "strict_pass_challenge",
+            }
+        )
+    reviews.sort(
+        key=lambda review: (
+            0 if review.get("verifier_group") == "specialist" else 1,
+            int(review.get("verifier_index") or 0),
+        )
+    )
+    return reviews[: max(1, int(limit))]
 
 
 def format_selected_verifier_scores(candidate: Optional[dict[str, Any]]) -> str:
@@ -5376,6 +5478,8 @@ async def run_refinement_with_budget_restart(
     cfg: PipelineConfig,
     problem_id: Any,
     progress: Optional[PipelineProgress],
+    refinement_strategy: str = "repair",
+    strict_pass_challenge: bool = False,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -5384,13 +5488,25 @@ async def run_refinement_with_budget_restart(
     list[dict[str, Any]],
     int,
 ]:
-    base_prompt = build_opd_proof_refinement_prompt(
-        question,
-        f"P{attempt_idx}",
-        proof,
-        self_evaluation,
-        selected_critiques,
-    )
+    if refinement_strategy == "reconstruct":
+        base_prompt = build_opd_proof_reconstruction_prompt(
+            question,
+            f"P{attempt_idx}",
+            proof,
+            self_evaluation,
+            selected_critiques,
+            strict_pass_challenge=strict_pass_challenge,
+        )
+    elif refinement_strategy == "repair":
+        base_prompt = build_opd_proof_refinement_prompt(
+            question,
+            f"P{attempt_idx}",
+            proof,
+            self_evaluation,
+            selected_critiques,
+        )
+    else:
+        raise ValueError(f"unsupported refinement strategy: {refinement_strategy!r}")
     active_prompt = base_prompt
     attempt_outputs: list[dict[str, Any]] = []
     handoff_outputs: list[dict[str, Any]] = []
@@ -5449,10 +5565,13 @@ async def run_refinement_with_budget_restart(
         if progress is not None:
             progress.log(
                 "candidate=%d round=%d stage=refinement_attempt status=start "
-                "restart=%d/%s budget=%s budget_action=%s temperature=%s "
+                "strategy=%s strict_pass_challenge=%s restart=%d/%s "
+                "budget=%s budget_action=%s temperature=%s "
                 "visible_limit=%s",
                 attempt_idx,
                 round_idx,
+                refinement_strategy,
+                strict_pass_challenge,
                 restart_idx,
                 "until_complete" if restart_until_complete else max_restarts,
                 budget_tokens,
@@ -5467,7 +5586,7 @@ async def run_refinement_with_budget_restart(
             progress=progress,
             detail=(
                 f"candidate={attempt_idx} round={round_idx} "
-                f"restart={restart_idx}"
+                f"strategy={refinement_strategy} restart={restart_idx}"
             ),
             thinking_budget_tokens=budget_tokens,
             thinking_budget_force_text=force_text if budget_tokens else "",
@@ -5647,6 +5766,8 @@ async def run_single_attempt(
     latest_verified_round_idx = -1
     critique_history: list[dict[str, Any]] = []
     critique_history_keys: set[str] = set()
+    strict_pass_challenges_used = 0
+    pending_strict_pass_challenge = False
 
     def aggregation_score_value(aggregation: dict[str, Any]) -> float:
         score = aggregation.get("final_score")
@@ -5658,6 +5779,8 @@ async def run_single_attempt(
             return -1.0
         if aggregation.get("positive_meta_challenges"):
             value -= 0.5
+        if aggregation.get("strict_pass_challenge_survived"):
+            value += 0.001
         return value
 
     for round_idx in range(consumed_refine_rounds, cfg.refine_rounds + 1):
@@ -5697,6 +5820,12 @@ async def run_single_attempt(
         proof_verify_output.extend(verifier_outputs)
         proof_meta_verify_output.extend(meta_outputs)
         latest_verified_round_idx = round_idx
+        if pending_strict_pass_challenge and final_aggregation.get("strict_pass"):
+            final_aggregation = {
+                **final_aggregation,
+                "strict_pass_challenge_survived": True,
+            }
+        pending_strict_pass_challenge = False
         if best_round_idx < 0 or aggregation_score_value(
             final_aggregation
         ) >= aggregation_score_value(best_aggregation):
@@ -5720,12 +5849,19 @@ async def run_single_attempt(
                 len(final_aggregation.get("validated_critiques") or []),
                 final_aggregation.get("final_status"),
             )
-        should_refine = (
+        normal_refinement = (
             round_idx < cfg.refine_rounds
             and final_aggregation.get("final_score") is not None
             and final_aggregation.get("final_score") < 1.0
             and final_aggregation.get("validated_critiques")
         )
+        strict_pass_challenge = bool(
+            round_idx < cfg.refine_rounds
+            and final_aggregation.get("strict_pass")
+            and strict_pass_challenges_used
+            < max(0, int(getattr(cfg, "strict_pass_challenge_rounds", 0)))
+        )
+        should_refine = bool(normal_refinement or strict_pass_challenge)
         if not should_refine:
             if progress is not None:
                 progress.log(
@@ -5740,41 +5876,59 @@ async def run_single_attempt(
                 )
             break
 
-        ranked_critiques = sorted(
-            final_aggregation["validated_critiques"],
-            key=lambda critique: (
-                float(
-                    critique.get("score") if critique.get("score") is not None else 1.0
-                ),
-                int(critique.get("verifier_index") or 0),
-            ),
-        )
-        current_critiques = ranked_critiques[: max(1, cfg.refine_review_n)]
-        for critique in current_critiques:
-            history_entry = {**critique, "origin_round": round_idx}
-            history_key = re.sub(
-                r"\s+",
-                " ",
-                str(
-                    history_entry.get("evaluation")
-                    or history_entry.get("review")
-                    or ""
-                ).strip().lower(),
+        if strict_pass_challenge:
+            current_critiques = strict_pass_challenge_reviews(
+                verifier_results,
+                cfg.refine_review_n,
             )
-            if not history_key or history_key in critique_history_keys:
-                continue
-            critique_history_keys.add(history_key)
-            critique_history.append(history_entry)
-        selected_critiques = critique_history[-MAX_PRIOR_VERIFIER_CRITIQUES:]
+            selected_critiques = current_critiques
+            strict_pass_challenges_used += 1
+        else:
+            ranked_critiques = sorted(
+                final_aggregation["validated_critiques"],
+                key=lambda critique: (
+                    float(
+                        critique.get("score")
+                        if critique.get("score") is not None
+                        else 1.0
+                    ),
+                    int(critique.get("verifier_index") or 0),
+                ),
+            )
+            current_critiques = ranked_critiques[: max(1, cfg.refine_review_n)]
+            for critique in current_critiques:
+                history_entry = {**critique, "origin_round": round_idx}
+                history_key = re.sub(
+                    r"\s+",
+                    " ",
+                    str(
+                        history_entry.get("evaluation")
+                        or history_entry.get("review")
+                        or ""
+                    ).strip().lower(),
+                )
+                if not history_key or history_key in critique_history_keys:
+                    continue
+                critique_history_keys.add(history_key)
+                critique_history.append(history_entry)
+            selected_critiques = critique_history[-MAX_PRIOR_VERIFIER_CRITIQUES:]
+        refinement_strategy = resolve_refinement_strategy(
+            cfg,
+            attempt_idx,
+            strict_pass_challenge=strict_pass_challenge,
+        )
         critiques = [
             format_refinement_critique(critique) for critique in selected_critiques
         ]
         if progress is not None:
             progress.log(
-                "candidate=%d round=%d/%d stage=refinement status=start reviews=%d",
+                "candidate=%d round=%d/%d stage=refinement status=start "
+                "strategy=%s strict_pass_challenge=%s reviews=%d",
                 attempt_idx,
                 round_idx + 1,
                 cfg.refine_rounds,
+                refinement_strategy,
+                strict_pass_challenge,
                 len(critiques),
             )
         (
@@ -5797,7 +5951,10 @@ async def run_single_attempt(
             cfg=cfg,
             problem_id=problem_id,
             progress=progress,
+            refinement_strategy=refinement_strategy,
+            strict_pass_challenge=strict_pass_challenge,
         )
+        pending_strict_pass_challenge = strict_pass_challenge
         proof_refine_attempt_output.extend(refinement_attempts)
         proof_refine_handoff_output.extend(refinement_handoff_outputs)
         proof_refine_handoffs.extend(refinement_handoffs)
@@ -5816,6 +5973,8 @@ async def run_single_attempt(
                     refinement_parsed,
                     round_idx=round_idx + 1,
                     used_critiques=critiques,
+                    refinement_strategy=refinement_strategy,
+                    strict_pass_challenge=strict_pass_challenge,
                     invalid=True,
                     prompt_family=PROMPT_FAMILY_OPD,
                 )
@@ -5836,6 +5995,8 @@ async def run_single_attempt(
                 refinement_parsed,
                 round_idx=round_idx + 1,
                 used_critiques=critiques,
+                refinement_strategy=refinement_strategy,
+                strict_pass_challenge=strict_pass_challenge,
                 prompt_family=PROMPT_FAMILY_OPD,
             )
         )
@@ -5901,6 +6062,7 @@ async def run_single_attempt(
         "proof_refine_handoff_output": proof_refine_handoff_output,
         "proof_refine_handoffs": proof_refine_handoffs,
         "refine_budget_restart_count": refine_budget_restart_count,
+        "strict_pass_challenges_used": strict_pass_challenges_used,
         "proof_solution": proof,
         "self_evaluation": latest_generation_parsed.get("self_evaluation"),
         "self_score": latest_generation_parsed.get("self_score"),
@@ -6778,6 +6940,8 @@ class ProofRuntime:
         refine_rounds: int,
         refine_review_n: int,
         min_valid_low: int,
+        refinement_strategy: str,
+        strict_pass_challenge_rounds: int,
         problem_timeout_seconds: int,
         selection_reserve_seconds: int,
         temperature: float,
@@ -6910,6 +7074,12 @@ class ProofRuntime:
         normalized_selector_mode = selector_mode.strip().lower()
         if normalized_selector_mode not in {"llm", "score"}:
             raise ValueError("selector_mode must be either 'llm' or 'score'")
+        normalized_refinement_strategy = refinement_strategy.strip().lower()
+        if normalized_refinement_strategy not in REFINEMENT_STRATEGIES:
+            raise ValueError(
+                "refinement_strategy must be one of "
+                + ", ".join(REFINEMENT_STRATEGIES)
+            )
         normalized_handoff_variant = (
             thinking_budget_handoff_prompt_variant.strip().lower()
         )
@@ -7042,6 +7212,11 @@ class ProofRuntime:
             refine_rounds=max(0, refine_rounds),
             refine_review_n=max(1, refine_review_n),
             min_valid_low=max(1, min_valid_low),
+            refinement_strategy=normalized_refinement_strategy,
+            strict_pass_challenge_rounds=max(
+                0,
+                int(strict_pass_challenge_rounds),
+            ),
             selector_max_candidate_chars=max(1000, selector_max_candidate_chars),
             selection_temperature=selection_temperature,
             selector_mode=normalized_selector_mode,
@@ -7619,6 +7794,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--refine-review-n", type=int)
     pipeline.add_argument("--min-valid-low", type=int)
     pipeline.add_argument(
+        "--refinement-strategy",
+        choices=REFINEMENT_STRATEGIES,
+    )
+    pipeline.add_argument("--strict-pass-challenge-rounds", type=int)
+    pipeline.add_argument(
         "--thinking-budget-handoff-enabled",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -7745,6 +7925,8 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "refine_rounds": "refine_rounds",
         "refine_review_n": "refine_review_n",
         "min_valid_low": "min_valid_low",
+        "refinement_strategy": "refinement_strategy",
+        "strict_pass_challenge_rounds": "strict_pass_challenge_rounds",
         "thinking_budget_handoff_enabled": "thinking_budget_handoff_enabled",
         "thinking_budget_handoff_preserve_refine_rounds": (
             "thinking_budget_handoff_preserve_refine_rounds"
@@ -7993,6 +8175,10 @@ def run(cfg: type[CFG] = CFG) -> None:
             "refine_rounds": int(cfg.refine_rounds),
             "refine_review_n": int(cfg.refine_review_n),
             "min_valid_low": int(cfg.min_valid_low),
+            "refinement_strategy": str(cfg.refinement_strategy),
+            "strict_pass_challenge_rounds": int(
+                cfg.strict_pass_challenge_rounds
+            ),
             "selector_mode": str(cfg.selector_mode),
             "temperature": float(cfg.temperature),
             "top_p": float(cfg.top_p),
@@ -8069,6 +8255,7 @@ def run(cfg: type[CFG] = CFG) -> None:
     logging.info(
         "Inference runtime: stream_vllm=%s stream_vllm_server_log=%s verbose=%s "
         "meta_policy=%s strict_pass_meta=%s proof_generation_only=%s "
+        "refinement_strategy=%s strict_pass_challenge_rounds=%s "
         "max_concurrent_problems=%s "
         "candidates=%s deepseek_math_v2_candidates=%s gpus=%s tp=%s dp=%s "
         "max_concurrent_requests=%s requests_per_gpu=%s "
@@ -8089,6 +8276,8 @@ def run(cfg: type[CFG] = CFG) -> None:
         cfg.meta_policy,
         cfg.strict_pass_meta,
         cfg.proof_generation_only,
+        cfg.refinement_strategy,
+        cfg.strict_pass_challenge_rounds,
         cfg.max_concurrent_problems,
         cfg.pipelines_per_problem,
         cfg.deepseek_math_v2_candidate_count,
@@ -8157,6 +8346,8 @@ def run(cfg: type[CFG] = CFG) -> None:
             refine_rounds=cfg.refine_rounds,
             refine_review_n=cfg.refine_review_n,
             min_valid_low=cfg.min_valid_low,
+            refinement_strategy=cfg.refinement_strategy,
+            strict_pass_challenge_rounds=cfg.strict_pass_challenge_rounds,
             problem_timeout_seconds=cfg.problem_timeout_seconds,
             selection_reserve_seconds=cfg.selection_reserve_seconds,
             temperature=cfg.temperature,

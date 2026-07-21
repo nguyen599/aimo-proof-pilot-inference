@@ -818,6 +818,44 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn('<verifier_review score="0.5">', user)
         self.assertIn("Candidate audit.", user)
 
+    def test_reconstruction_prompt_treats_candidate_as_fallible(self):
+        messages = run.build_opd_proof_reconstruction_prompt(
+            "Problem.",
+            "P5",
+            "Candidate proof.",
+            "Candidate audit.",
+            [
+                {
+                    "verifier_role": "dependency_lemma",
+                    "score": 1.0,
+                    "review": "The weakest claim appears plausible.",
+                }
+            ],
+            strict_pass_challenge=True,
+        )
+
+        self.assertIn("Re-solve the olympiad problem from first principles", messages[0]["content"])
+        self.assertIn("replace it completely", messages[0]["content"])
+        self.assertIn("perfect internal score", messages[1]["content"])
+        self.assertIn(
+            '<verifier_review role="dependency_lemma" score="1">',
+            messages[1]["content"],
+        )
+
+    def test_mixed_refinement_strategy_splits_candidates_deterministically(self):
+        cfg = SimpleNamespace(refinement_strategy="mixed")
+
+        self.assertEqual(run.resolve_refinement_strategy(cfg, 0), "repair")
+        self.assertEqual(run.resolve_refinement_strategy(cfg, 1), "reconstruct")
+        self.assertEqual(
+            run.resolve_refinement_strategy(
+                cfg,
+                0,
+                strict_pass_challenge=True,
+            ),
+            "reconstruct",
+        )
+
     def test_selector_uses_trained_id_contract(self):
         messages = run.build_selection_prompt(
             "Problem.",
@@ -879,6 +917,176 @@ class RunOpdPromptContractTests(unittest.TestCase):
 
 
 class MixedPromptRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_strict_pass_gets_one_shadow_reconstruction_challenge(self):
+        class FakeScheduler:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+                self.responses = iter(
+                    [
+                        (
+                            "<evaluation>The proof appears complete; weakest claim is L.</evaluation>"
+                            "<suggestions>Stress-test L.</suggestions><score>1</score>"
+                        ),
+                        (
+                            "<solution>Independently reconstructed proof.</solution>"
+                            "<self_evaluation>All cases rechecked.</self_evaluation>"
+                            "<score>1</score>"
+                        ),
+                        (
+                            "<evaluation>The reconstruction proves L independently.</evaluation>"
+                            "<suggestions>None.</suggestions><score>1</score>"
+                        ),
+                    ]
+                )
+
+            async def call(self, stage: str, prompt: object, **kwargs: object):
+                del kwargs
+                self.calls.append((stage, prompt))
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": next(self.responses),
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        initial_text = (
+            "<solution>Original proof.</solution>"
+            "<self_evaluation>Looks complete.</self_evaluation><score>1</score>"
+        )
+        initial_parsed = run.parse_generation_response(initial_text)
+        initial_generation = {
+            "attempt_idx": 0,
+            "prompt_family": run.PROMPT_FAMILY_OPD,
+            "generation_mode": "opd_xml",
+            "generation_output": run.make_output(
+                "proof_generation",
+                {"success": True, "text": initial_text},
+                initial_parsed,
+            ),
+            "generation_parsed": initial_parsed,
+            "proof": initial_parsed["proof"],
+        }
+        cfg = SimpleNamespace(
+            verify_n=1,
+            meta_n=0,
+            meta_policy="all-reviews",
+            strict_pass_meta=False,
+            refine_rounds=1,
+            refine_review_n=1,
+            min_valid_low=1,
+            verification_early_stop=False,
+            thinking_budget_enabled=False,
+            verifier_thinking_budget_tokens=0,
+            verifier_thinking_budget_force_text="<evaluation>\n",
+            deepseek_verifier_thinking_budget_force_text="",
+            meta_thinking_budget_tokens=0,
+            meta_thinking_budget_force_text="",
+            refinement_strategy="mixed",
+            strict_pass_challenge_rounds=1,
+        )
+        scheduler = FakeScheduler()
+
+        result = await run.run_single_attempt(
+            "Problem.",
+            0,
+            1,
+            scheduler,
+            cfg,
+            initial_generation=initial_generation,
+        )
+
+        self.assertEqual(
+            [stage for stage, _ in scheduler.calls],
+            ["proof_verify", "proof_refine", "proof_verify"],
+        )
+        refinement_prompt = scheduler.calls[1][1]
+        self.assertIn("independent mathematical proof researcher", refinement_prompt[0]["content"])
+        self.assertEqual(result["strict_pass_challenges_used"], 1)
+        self.assertEqual(result["selected_verification_round"], 1)
+        self.assertEqual(result["proof_solution"], "Independently reconstructed proof.")
+        self.assertTrue(result["proof_refine_output"][0]["strict_pass_challenge"])
+        self.assertEqual(
+            result["proof_refine_output"][0]["refinement_strategy"],
+            "reconstruct",
+        )
+
+    async def test_failed_strict_pass_challenge_rolls_back_to_original(self):
+        class FakeScheduler:
+            def __init__(self) -> None:
+                self.responses = iter(
+                    [
+                        "<evaluation>Accepted.</evaluation><suggestions>None.</suggestions><score>1</score>",
+                        (
+                            "<solution>Broken reconstruction.</solution>"
+                            "<self_evaluation>Uncertain.</self_evaluation><score>0</score>"
+                        ),
+                        "<evaluation>Fatal gap.</evaluation><suggestions>Restart.</suggestions><score>0</score>",
+                    ]
+                )
+
+            async def call(self, stage: str, prompt: object, **kwargs: object):
+                del stage, prompt, kwargs
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": next(self.responses),
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        initial_text = (
+            "<solution>Original proof.</solution>"
+            "<self_evaluation>Looks complete.</self_evaluation><score>1</score>"
+        )
+        initial_parsed = run.parse_generation_response(initial_text)
+        cfg = SimpleNamespace(
+            verify_n=1,
+            meta_n=0,
+            meta_policy="all-reviews",
+            strict_pass_meta=False,
+            refine_rounds=1,
+            refine_review_n=1,
+            min_valid_low=1,
+            verification_early_stop=False,
+            thinking_budget_enabled=False,
+            verifier_thinking_budget_tokens=0,
+            verifier_thinking_budget_force_text="<evaluation>\n",
+            deepseek_verifier_thinking_budget_force_text="",
+            meta_thinking_budget_tokens=0,
+            meta_thinking_budget_force_text="",
+            refinement_strategy="mixed",
+            strict_pass_challenge_rounds=1,
+        )
+
+        result = await run.run_single_attempt(
+            "Problem.",
+            0,
+            1,
+            FakeScheduler(),
+            cfg,
+            initial_generation={
+                "attempt_idx": 0,
+                "prompt_family": run.PROMPT_FAMILY_OPD,
+                "generation_mode": "opd_xml",
+                "generation_output": run.make_output(
+                    "proof_generation",
+                    {"success": True, "text": initial_text},
+                    initial_parsed,
+                ),
+                "generation_parsed": initial_parsed,
+                "proof": initial_parsed["proof"],
+            },
+        )
+
+        self.assertEqual(result["proof_solution"], "Original proof.")
+        self.assertEqual(result["selected_verification_round"], 0)
+        self.assertEqual(result["rollback_from_round"], 1)
+
     async def test_refinement_preserves_prior_critique_audits(self):
         class FakeScheduler:
             def __init__(self) -> None:
