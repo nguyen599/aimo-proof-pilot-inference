@@ -49,7 +49,14 @@ cleanup_server() {
         esac
     done
 }
-trap cleanup_server EXIT
+on_exit() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        printf '%s\n' failed > "$ROOT/status"
+    fi
+    cleanup_server
+}
+trap on_exit EXIT
 
 git -C "$SOURCE_REPO" fetch origin main
 if [ ! -d "$CODE/.git" ]; then
@@ -65,6 +72,8 @@ printf '%s\n' "$actual_commit" > "$ROOT/source_commit"
     echo "Unexpected source commit $actual_commit"
     exit 3
 }
+
+"$VENV/bin/python" "$CODE/vllm_patches/patch_dflash_context_cutoff.py" "$VENV"
 
 cd "$CODE"
 PYTHONPATH="$CODE" "$VENV/bin/python" - \
@@ -185,6 +194,7 @@ run_replay() {
         --temperature 0.6 \
         --top-p 0.95 \
         --request-timeout-seconds 7200 \
+        --require-complete-calls \
         > "$log" 2>&1
 }
 

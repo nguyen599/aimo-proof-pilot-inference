@@ -48,6 +48,44 @@ class DFlashContextCutoffPatchTests(unittest.TestCase):
         self.assertIn(patch_module.EMPTY_DRAFTS_ORIGINAL, patched)
         self.assertNotIn("DFLASH_CONTEXT_CUTOFF_EMPTY_DRAFTS", patched)
 
+    def test_scheduler_patch_reserves_full_proposal_width(self) -> None:
+        source = (
+            patch_module.SCHEDULER_HELPER_INSERTION
+            + "\n"
+            + patch_module.SCHEDULER_INIT_ORIGINAL
+            + "\n"
+            + patch_module.SCHEDULER_DECISION_ORIGINAL
+        )
+
+        patched = patch_module.patch_scheduler_source(source)
+
+        self.assertIn("proposal_width: int = 0", patched)
+        self.assertIn(
+            "max_scheduled_seq_len + max(0, proposal_width) >= cutoff",
+            patched,
+        )
+        self.assertIn(
+            "self.disable_speculation_above_context_len,\n"
+            "            num_spec_tokens_to_schedule,",
+            patched,
+        )
+
+    def test_scheduler_patch_migrates_legacy_boundary_gate(self) -> None:
+        source = (
+            patch_module.SCHEDULER_HELPER_LEGACY
+            + "\n"
+            + patch_module.SCHEDULER_INIT_PATCHED
+            + "\n"
+            + patch_module.SCHEDULER_DECISION_LEGACY
+        )
+
+        patched = patch_module.patch_scheduler_source(source)
+
+        self.assertIn("proposal_width: int = 0", patched)
+        self.assertIn("num_spec_tokens_to_schedule,", patched)
+        self.assertNotIn("return max_scheduled_seq_len >= cutoff", patched)
+        self.assertEqual(patch_module.patch_scheduler_source(patched), patched)
+
     def test_runner_patch_migrates_legacy_zero_width_buffer(self) -> None:
         source = (
             patch_module.RUNNER_GATE_PATCHED

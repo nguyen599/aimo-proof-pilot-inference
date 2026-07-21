@@ -70,6 +70,45 @@ LOG_ROOT = (
 )
 
 
+class ReplayCallIntegrityTests(unittest.TestCase):
+    def test_complete_initial_audit_is_accepted(self) -> None:
+        candidate = {
+            "proof_verify_output": [{"success": True} for _ in range(8)],
+            "proof_meta_verify_output": [{"success": True} for _ in range(8)],
+            "proof_refine_output": [],
+        }
+
+        summary = evaluate_thinking_handoff_refinement.summarize_call_integrity(
+            candidate,
+            expected_initial_verifiers=8,
+            expected_initial_meta=8,
+        )
+
+        self.assertTrue(summary["complete"])
+        self.assertEqual(summary["failed_calls"], [])
+
+    def test_failed_and_missing_calls_invalidate_audit(self) -> None:
+        candidate = {
+            "proof_verify_output": [
+                {"success": True},
+                {"success": False, "error": "engine died"},
+            ],
+            "proof_meta_verify_output": [{"success": True}],
+            "proof_refine_output": [],
+        }
+
+        summary = evaluate_thinking_handoff_refinement.summarize_call_integrity(
+            candidate,
+            expected_initial_verifiers=4,
+            expected_initial_meta=4,
+        )
+
+        self.assertFalse(summary["complete"])
+        self.assertEqual(summary["missing_initial_verifiers"], 2)
+        self.assertEqual(summary["missing_initial_meta"], 3)
+        self.assertEqual(summary["failed_calls"][0]["error"], "engine died")
+
+
 class FakeTokenizer:
     def apply_chat_template(
         self,

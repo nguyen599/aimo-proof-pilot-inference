@@ -148,6 +148,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--request-timeout-seconds", type=float, default=7200.0)
+    parser.add_argument(
+        "--require-complete-calls",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Exit unsuccessfully after writing artifacts when any verifier or "
+            "meta-verifier call failed, or when the initial round did not "
+            "produce the configured number of calls."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -186,6 +196,49 @@ def score_value(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return -1.0
+
+
+def summarize_call_integrity(
+    candidate: dict[str, Any],
+    *,
+    expected_initial_verifiers: int,
+    expected_initial_meta: int,
+) -> dict[str, Any]:
+    stage_keys = (
+        "proof_verify_output",
+        "proof_meta_verify_output",
+        "proof_refine_output",
+        "proof_refine_attempt_output",
+        "proof_refine_handoff_output",
+    )
+    failures: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for key in stage_keys:
+        calls = candidate.get(key) or []
+        counts[key] = len(calls)
+        for index, call in enumerate(calls):
+            if call.get("success") is True:
+                continue
+            failures.append(
+                {
+                    "stage": key,
+                    "index": index,
+                    "error": str(call.get("error") or "unsuccessful call"),
+                }
+            )
+
+    verifier_count = counts["proof_verify_output"]
+    meta_count = counts["proof_meta_verify_output"]
+    missing_initial_verifiers = max(0, expected_initial_verifiers - verifier_count)
+    missing_initial_meta = max(0, expected_initial_meta - meta_count)
+    complete = not failures and not missing_initial_verifiers and not missing_initial_meta
+    return {
+        "complete": complete,
+        "counts": counts,
+        "failed_calls": failures,
+        "missing_initial_verifiers": missing_initial_verifiers,
+        "missing_initial_meta": missing_initial_meta,
+    }
 
 
 async def resume_final_refinement(
@@ -558,6 +611,16 @@ def main() -> None:
     args = parse_args()
     result = asyncio.run(evaluate(args))
     atomic_write_json(args.output_dir / "result.json", result)
+    expected_initial_meta = (
+        int(result["settings"]["verify_n"]) * int(result["settings"]["meta_n"])
+        if result["settings"]["meta_policy"] == "all-reviews"
+        else 0
+    )
+    call_integrity = summarize_call_integrity(
+        result["candidate"],
+        expected_initial_verifiers=int(result["settings"]["verify_n"]),
+        expected_initial_meta=expected_initial_meta,
+    )
     summary = {
         "source": result["source"],
         "initial_restart": result["initial_restart"],
@@ -594,9 +657,15 @@ def main() -> None:
             if result.get("resume_refinement")
             else None
         ),
+        "call_integrity": call_integrity,
     }
     atomic_write_json(args.output_dir / "summary.json", summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if args.require_complete_calls and not call_integrity["complete"]:
+        raise RuntimeError(
+            "Replay contains incomplete verifier/meta calls; see "
+            f"{args.output_dir / 'summary.json'}"
+        )
 
 
 if __name__ == "__main__":

@@ -26,8 +26,9 @@ serve Proof Pilot OLMo3Sink checkpoints with vLLM.
 - Fails model loading when a local layer is missing its sink tensor or a sink
   tensor has the wrong number of heads.
 - Adds `disable_above_context_len` to `--speculative-config` on vLLM `0.25.1`.
-  When the largest request in a batch reaches the threshold, the V1 runner skips
-  the drafter, clears pending draft tokens, and continues target-only decoding.
+  Before another complete draft block could reach the threshold, the V1 runner
+  skips the drafter, clears pending draft tokens, and continues target-only
+  decoding.
 - Adds the SM90 FA4 FP8-KV path and its vLLM routing on vLLM `0.25.1`.
   Queries remain unquantized at the layer boundary while FA4 applies the K/V
   descales in the attention kernel.
@@ -126,14 +127,17 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve /path/to/opd-model \
   }'
 ```
 
-The comparison is inclusive: a batch with maximum context length `81920` or
-larger runs target-only. Shorter requests in the same batch also stop drafting
-until they are scheduled in a batch whose maximum context is below the cutoff.
-The scheduler sets the proposal width to zero, so this remains coordinated when
-`evaluation/harness_vllm/run.py` enables `--async-scheduling`. The worker retains vLLM's native K-wide
-zero buffer while clearing valid drafts; that buffer is required when a mixed
-batch moves from target-only decoding back to DFlash. This is a deterministic
-context policy, not a live acceptance-rate controller.
+The comparison reserves one full proposal block. With a cutoff of `81920` and
+10 speculative tokens, drafting stops when the scheduled context plus 10 is at
+least `81920`; this prevents a block produced below the limit from containing
+an out-of-range position. Shorter requests in the same batch also stop drafting
+until they are scheduled in a batch whose maximum context is safely below the
+cutoff. The scheduler sets the proposal width to zero, so this remains
+coordinated when `evaluation/harness_vllm/run.py` enables `--async-scheduling`.
+The worker retains vLLM's native K-wide zero buffer while clearing valid drafts;
+that buffer is required when a mixed batch moves from target-only decoding back
+to DFlash. This is a deterministic context policy, not a live acceptance-rate
+controller.
 
 To apply only this patch to an existing vLLM `0.25.1` environment:
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Add a batch-wide context cutoff to vLLM 0.25.1's V1 drafter.
 
-The scheduler sets the next draft width to zero at the cutoff, including when
-async scheduling is enabled. The V1 worker then skips the drafter while keeping
-vLLM's native K-wide zero buffer for async bookkeeping, so the target model
-continues ordinary one-token decoding without stale or missing draft storage.
+The scheduler sets the next draft width to zero before a full speculative block
+could cross the cutoff, including when async scheduling is enabled. The V1
+worker then skips the drafter while keeping vLLM's native K-wide zero buffer for
+async bookkeeping, so the target model continues ordinary one-token decoding
+without stale or missing draft storage.
 
 The patch is source-shaped, idempotent, and fail-closed. It deliberately does
 not patch Model Runner V2 because this repository forces
@@ -49,7 +50,7 @@ CONFIG_PATCHED = (
 
 SCHEDULER_HELPER_INSERTION = "logger = init_logger(__name__)\n"
 
-SCHEDULER_HELPER_PATCHED = '''logger = init_logger(__name__)
+SCHEDULER_HELPER_LEGACY = '''logger = init_logger(__name__)
 
 
 # DFLASH_CONTEXT_CUTOFF_BATCH_DECISION
@@ -66,6 +67,33 @@ def _batch_reaches_speculation_context_cutoff(
         for req_id, num_tokens in num_scheduled_tokens.items()
     )
     return max_scheduled_seq_len >= cutoff
+'''
+
+SCHEDULER_HELPER_PATCHED = '''logger = init_logger(__name__)
+
+
+# DFLASH_CONTEXT_CUTOFF_BATCH_DECISION
+def _batch_reaches_speculation_context_cutoff(
+    requests: dict[str, Request],
+    num_scheduled_tokens: dict[str, int],
+    cutoff: int | None,
+    proposal_width: int = 0,
+) -> bool:
+    """Return whether another full draft block could reach the cutoff.
+
+    ``num_scheduled_tokens`` describes the target tokens in the current step.
+    A draft generated after that step starts at the resulting sequence length,
+    so reserve the complete proposal width before launching the drafter. This
+    avoids producing a block below the cutoff whose final positions extend
+    past the draft model's positional capacity.
+    """
+    if cutoff is None or not num_scheduled_tokens:
+        return False
+    max_scheduled_seq_len = max(
+        requests[req_id].num_computed_tokens + num_tokens
+        for req_id, num_tokens in num_scheduled_tokens.items()
+    )
+    return max_scheduled_seq_len + max(0, proposal_width) >= cutoff
 '''
 
 SCHEDULER_INIT_ORIGINAL = """        self.dynamic_sd_lookup: list[int] | None = None
@@ -89,7 +117,7 @@ SCHEDULER_DECISION_ORIGINAL = """        # Dynamic speculative decoding: compute
             ]
 """
 
-SCHEDULER_DECISION_PATCHED = (
+SCHEDULER_DECISION_LEGACY = (
     SCHEDULER_DECISION_ORIGINAL
     + """
         # DFLASH_CONTEXT_CUTOFF_SCHEDULER_GATE: setting K=0 keeps the V1
@@ -99,6 +127,23 @@ SCHEDULER_DECISION_PATCHED = (
             self.requests,
             num_scheduled_tokens,
             self.disable_speculation_above_context_len,
+        ):
+            num_spec_tokens_to_schedule = 0
+"""
+)
+
+SCHEDULER_DECISION_PATCHED = (
+    SCHEDULER_DECISION_ORIGINAL
+    + """
+        # DFLASH_CONTEXT_CUTOFF_SCHEDULER_GATE: reserve a complete proposal
+        # block below the draft model's context limit. Setting K=0 keeps the
+        # V1 async scheduler's placeholders and the worker's proposal width in
+        # agreement. Model Runner V2 is intentionally unchanged.
+        if not self.use_v2_model_runner and _batch_reaches_speculation_context_cutoff(
+            self.requests,
+            num_scheduled_tokens,
+            self.disable_speculation_above_context_len,
+            num_spec_tokens_to_schedule,
         ):
             num_spec_tokens_to_schedule = 0
 """
@@ -172,6 +217,18 @@ def patch_config_source(source: str) -> str:
 
 
 def patch_scheduler_source(source: str) -> str:
+    if SCHEDULER_HELPER_LEGACY in source:
+        source = source.replace(
+            SCHEDULER_HELPER_LEGACY,
+            SCHEDULER_HELPER_PATCHED,
+            1,
+        )
+    if SCHEDULER_DECISION_LEGACY in source:
+        source = source.replace(
+            SCHEDULER_DECISION_LEGACY,
+            SCHEDULER_DECISION_PATCHED,
+            1,
+        )
     source = _replace_once(
         source,
         SCHEDULER_HELPER_INSERTION,
