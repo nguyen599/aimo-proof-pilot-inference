@@ -13,4 +13,6 @@ refinement rounds. It changes only the measured P4/P5 interventions:
 Do not launch it while the baseline run
 `imo2025-p45-r4-mixed-challenge-p36-2node-20260721T212441Z` owns nodes 2 and 3.
 After completion, export and grade every initial/final candidate with the same
-two-call GPT-5.6 grader used for the baseline.
+two-call GPT-5.6 grader used for the baseline. `grader.yaml` assigns 24 reusable
+slots round-robin across three keys, giving each key exactly eight concurrent
+calls.
