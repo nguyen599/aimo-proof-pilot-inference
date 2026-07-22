@@ -1539,73 +1539,24 @@ class RunOpdPromptContractTests(unittest.TestCase):
         )
         self.assertEqual(strategies.count("baseline"), 4)
 
-    def test_adaptive_game_portfolio_targets_adversarial_history(self):
+    def test_adaptive_portfolio_does_not_inspect_problem_text(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
-        question = (
-            "Alice and Bazza play a game. Determine which player has a "
-            "winning strategy."
+        questions = (
+            "Alice and Bob play a game. Determine the winning player.",
+            "The sequence satisfies a_{n+1}=f(a_n). Determine a_1.",
+            "Prove that the three circles are concurrent.",
         )
 
-        strategies = [
-            run.resolve_proof_generation_strategy(index, cfg, question)
-            for index in range(12)
+        strategy_lists = [
+            [
+                run.resolve_proof_generation_strategy(index, cfg, question)
+                for index in range(8)
+            ]
+            for question in questions
         ]
 
-        self.assertEqual(strategies, list(run.ADAPTIVE_GAME_STRATEGY_CYCLE))
-        self.assertEqual(strategies.count("baseline"), 2)
-        self.assertEqual(strategies.count("adversarial_quantifiers"), 3)
-        self.assertEqual(strategies.count("joint_state_inequality"), 3)
-        self.assertEqual(strategies.count("proof_obligation_ledger"), 2)
-        self.assertEqual(strategies.count("game_regime_completeness"), 1)
-
-    def test_adaptive_iteration_portfolio_targets_transition_closure(self):
-        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
-        question = "The sequence satisfies a_{n+1}=f(a_n). Determine a_1."
-
-        strategies = [
-            run.resolve_proof_generation_strategy(index, cfg, question)
-            for index in range(12)
-        ]
-
-        self.assertEqual(
-            strategies,
-            list(run.ADAPTIVE_ITERATION_STRATEGY_CYCLE),
-        )
-        self.assertEqual(strategies.count("baseline"), 3)
-        self.assertEqual(strategies.count("exhaustive_transitions"), 3)
-        self.assertEqual(strategies.count("state_invariant"), 2)
-
-    def test_adaptive_imo2025_p4_uses_generic_iteration_cycle(self):
-        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
-        question = (
-            "The infinite sequence $a_1,a_2,\\ldots$ has at least three proper "
-            "divisors per term. Each next term is the sum of the three largest "
-            "proper divisors. Determine all possible values of $a_1$."
-        )
-
-        strategies = [
-            run.resolve_proof_generation_strategy(index, cfg, question)
-            for index in range(12)
-        ]
-
-        self.assertEqual(strategies, list(run.ADAPTIVE_ITERATION_STRATEGY_CYCLE))
-        self.assertNotIn("p4", " ".join(strategies))
-
-    def test_adaptive_imo2025_p5_uses_generic_game_cycle(self):
-        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
-        question = (
-            "Alice and Bazza play the inekoalaty game depending on a positive "
-            "real number $\\lambda$. Determine both players' winning regimes."
-        )
-
-        strategies = [
-            run.resolve_proof_generation_strategy(index, cfg, question)
-            for index in range(12)
-        ]
-
-        self.assertEqual(strategies, list(run.ADAPTIVE_GAME_STRATEGY_CYCLE))
-        self.assertEqual(strategies.count("baseline"), 2)
-        self.assertNotIn("p5", " ".join(strategies))
+        expected = list(run.PROOF_GENERATION_STRATEGY_CYCLE)
+        self.assertEqual(strategy_lists, [expected, expected, expected])
 
     def test_targeted_imo2025_portfolio_is_rejected(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="p45_targeted")
@@ -1613,7 +1564,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be one of"):
             run.resolve_proof_generation_strategy(0, cfg, "Any problem.")
 
-    def test_adaptive_generic_portfolio_falls_back_to_diverse_cycle(self):
+    def test_adaptive_name_is_a_problem_agnostic_diverse_alias(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
 
         strategies = [
@@ -1643,39 +1594,22 @@ class RunOpdPromptContractTests(unittest.TestCase):
             user_prompt.index("Respond in EXACTLY this format:"),
         )
 
-    def test_joint_state_strategy_rejects_one_variable_worst_case_shortcuts(self):
-        messages = run.build_opd_proof_generation_prompt(
-            "Prove the game claim.",
-            planning_strategy="joint_state_inequality",
-        )
-        user_prompt = messages[-1]["content"]
-
-        self.assertIn("every state variable", user_prompt)
-        self.assertIn("history-independent worst-case inequality", user_prompt)
-        self.assertIn("opponent saturates a budget", user_prompt)
-
-    def test_game_regime_strategy_requires_universal_boundary_play(self):
-        messages = run.build_opd_proof_generation_prompt(
-            "Classify the winner for every value of the game parameter.",
-            planning_strategy="game_regime_completeness",
-        )
-        user_prompt = messages[-1]["content"]
-
-        self.assertIn("each regime as a separate proof obligation", user_prompt)
-        self.assertIn("against every legal opposing history", user_prompt)
-        self.assertIn("one cooperative infinite play is insufficient", user_prompt)
-        self.assertIn("prevents the other player from winning", user_prompt)
-
-    def test_state_invariant_strategy_requires_transition_closure(self):
-        messages = run.build_opd_proof_generation_prompt(
-            "Determine the valid initial terms of the recurrence.",
-            planning_strategy="state_invariant",
-        )
-        user_prompt = messages[-1]["content"]
-
-        self.assertIn("one-step increase or decrease is not enough", user_prompt)
-        self.assertIn("after every transition", user_prompt)
-        self.assertIn("divisibility", user_prompt)
+    def test_problem_category_specific_strategies_are_rejected(self):
+        for strategy in (
+            "joint_state_inequality",
+            "game_regime_completeness",
+            "state_invariant",
+            "proof_obligation_ledger",
+        ):
+            with self.subTest(strategy=strategy):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "unknown proof-generation strategy",
+                ):
+                    run.build_opd_proof_generation_prompt(
+                        "Solve this problem.",
+                        planning_strategy=strategy,
+                    )
 
     def test_generation_planning_emphases_do_not_embed_benchmark_answers(self):
         prompt_text = "\n".join(run.PROOF_GENERATION_PLANNING_EMPHASES.values())
