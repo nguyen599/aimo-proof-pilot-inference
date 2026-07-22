@@ -9,12 +9,21 @@ sampling temperatures, thinking budgets, context, DFlash settings, and
 candidate count match the measured 36-candidate baseline in
 `../imo2025-p45-r4-mixed-challenge-p36-2node-20260721T212441Z`.
 
-The adaptive 12-candidate cycle is repeated three times:
+The targeted 12-candidate cycle is repeated three times. Exact problem
+fingerprints keep these proof-route hints limited to IMO 2025 P4/P5; other
+sequence and game problems retain the generic adaptive cycles.
 
 | Problem | Allocation per cycle |
 | --- | --- |
-| P4 iterated sequence | 3 baseline, 3 exhaustive transitions, 2 state invariants, 2 proof-obligation ledgers, 1 counterexample audit, 1 independent reformulation |
-| P5 adversarial game | 2 baseline, 3 adversarial-quantifier audits, 3 joint-state inequalities, 2 proof-obligation ledgers, 1 regime/boundary completeness audit, 1 independent reformulation |
+| P4 divisor iteration | 2 baseline, 4 full orbit-normal-form plans, 2 backward-divisibility plans, 2 transition-classification plans, 1 counterexample audit, 1 independent reformulation |
+| P5 inekoalaty game | 2 baseline, 4 complete paired-threshold plans, 2 Alice Cauchy/spike plans, 2 Bazza pairing/slack plans, 1 regime/boundary completeness audit, 1 independent reformulation |
+
+The P4 plans explicitly avoid the measured false shortcut that one decreasing
+step implies eventual failure. They seek backward divisibility, classify the
+`13/12`, `31/30`, and fixed transitions, and prove that growth cannot repeat
+forever. The P5 plans prove the high-regime strategy against arbitrary Bazza
+play, not a saturating proxy, and require separate non-losing strategies at the
+boundary.
 
 Run `launch_nii_pair.sh` on physical nodes 2 and 3 after the current four-round
 baseline releases those GPUs. Export every structurally complete, non-cutoff

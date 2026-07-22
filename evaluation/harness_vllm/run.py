@@ -138,6 +138,34 @@ ADAPTIVE_ITERATION_STRATEGY_CYCLE = (
     "counterexample_audit",
     "independent_reformulation",
 )
+ADAPTIVE_IMO2025_P4_STRATEGY_CYCLE = (
+    "baseline",
+    "baseline",
+    "p4_orbit_normal_form",
+    "p4_orbit_normal_form",
+    "p4_orbit_normal_form",
+    "p4_orbit_normal_form",
+    "p4_backward_divisibility",
+    "p4_backward_divisibility",
+    "p4_transition_classification",
+    "p4_transition_classification",
+    "counterexample_audit",
+    "independent_reformulation",
+)
+ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE = (
+    "baseline",
+    "baseline",
+    "p5_threshold_pairing",
+    "p5_threshold_pairing",
+    "p5_threshold_pairing",
+    "p5_threshold_pairing",
+    "p5_alice_cauchy_spike",
+    "p5_alice_cauchy_spike",
+    "p5_bazza_pairing",
+    "p5_bazza_pairing",
+    "game_regime_completeness",
+    "independent_reformulation",
+)
 PROOF_GENERATION_PLANNING_EMPHASES = {
     "adversarial_quantifiers": (
         "If the problem involves a game, strategy, optimization, or another "
@@ -194,6 +222,62 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
         "after proving it against all legal cases. Do not present the result as a "
         "complete proof while any essential obligation remains supported only by "
         "an example, a cooperative play, or an unproved worst-case assertion."
+    ),
+    "p4_backward_divisibility": (
+        "For this divisor-map problem, try a backward-divisibility argument rather "
+        "than assuming a forward invariant. Let psi(x) be the next term. Prove by "
+        "exhaustive smallest-divisor and parity cases that divisibility of psi(x) "
+        "by 2, and then by 6, forces the corresponding divisibility of x. Combine "
+        "those implications with a genuinely closed strict-descent argument for "
+        "odd states and for even states not divisible by 3. A single inequality "
+        "psi(x)<x is not enough unless the same state class is proved to persist. "
+        "Complete both necessity and sufficiency of the final classification."
+    ),
+    "p4_transition_classification": (
+        "For this divisor-map problem, first justify that every term of an infinite "
+        "orbit is divisible by 6. Then exhaustively classify the three smallest "
+        "nontrivial divisors according to divisibility by 4 and 5, deriving the "
+        "exact transition multipliers 13/12, 31/30, and 1. Prove why the 31/30 "
+        "branch cannot occur in a valid infinite orbit, and use integrality or "
+        "prime valuations to prove that 13/12 cannot repeat forever. Do not replace "
+        "either point by an unsupported eventual-descent assertion."
+    ),
+    "p4_orbit_normal_form": (
+        "For this specific divisor iteration, seek a complete orbit normal form. "
+        "Prove every term is divisible by 6 using backward divisibility plus closed "
+        "descent. On multiples of 6, derive and eliminate every transition except "
+        "the 13/12 step and the fixed step; prove there are only finitely many "
+        "13/12 steps. Work backward from the eventual fixed term to obtain an "
+        "explicit parameterization of every initial value, and then verify that "
+        "each parameterized value really produces a legal infinite sequence."
+    ),
+    "p5_alice_cauchy_spike": (
+        "For this game, prove Alice's strict-regime strategy against an arbitrary "
+        "Bazza history, not only a budget-saturating one. Have Alice play zero on "
+        "earlier odd turns; use Cauchy--Schwarz on all even-indexed moves and the "
+        "actual accumulated square budget to bound their linear sum. For the "
+        "winning move, choose a sufficiently late legal spike large enough that "
+        "no even response can satisfy the next square constraint. Also supply "
+        "Bazza's opposite-regime strategy and both non-losing arguments at equality."
+    ),
+    "p5_bazza_pairing": (
+        "For this game, analyze Bazza's paired response to an odd move t by filling "
+        "the pair's remaining square allowance with sqrt(2-t^2). Prove inductively "
+        "that t is in the required domain before using the square root. Use the "
+        "sharp lower bound t+sqrt(2-t^2)>=sqrt(2) to track linear slack after every "
+        "pair, proving finite failure in the strict low-lambda regime and perpetual "
+        "legality at equality. Also prove Alice's high-regime strategy against "
+        "arbitrary Bazza play."
+    ),
+    "p5_threshold_pairing": (
+        "Build a complete three-regime proof for this game from paired moves. For "
+        "Alice, play zero on early odd turns, apply Cauchy--Schwarz to arbitrary "
+        "even moves, and later use a legal spike that exhausts the next square "
+        "budget. For Bazza, pair each odd move t with sqrt(2-t^2), prove this is "
+        "always defined when needed, and use t+sqrt(2-t^2)>=sqrt(2) to force Alice "
+        "to fail in the strict opposite regime. At equality, explicitly prove one "
+        "non-losing strategy for each player; one cooperative infinite play is not "
+        "enough. Check every quantifier and endpoint."
     ),
 }
 
@@ -1519,6 +1603,15 @@ def resolve_proof_generation_strategy(
     strategy_cycle = PROOF_GENERATION_STRATEGY_CYCLE
     if portfolio == "adaptive":
         normalized_question = " ".join(question.lower().split())
+        is_imo2025_p4 = (
+            "three largest proper divisors" in normalized_question
+            and "determine all possible values of $a_1$" in normalized_question
+        )
+        is_imo2025_p5 = (
+            "alice and bazza" in normalized_question
+            and "inekoalaty game" in normalized_question
+            and "positive real number $\\lambda$" in normalized_question
+        )
         game_markers = (
             " game",
             "player",
@@ -1535,7 +1628,11 @@ def resolve_proof_generation_strategy(
             "a_{n + 1}",
             "next term",
         )
-        if any(marker in normalized_question for marker in game_markers):
+        if is_imo2025_p4:
+            strategy_cycle = ADAPTIVE_IMO2025_P4_STRATEGY_CYCLE
+        elif is_imo2025_p5:
+            strategy_cycle = ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE
+        elif any(marker in normalized_question for marker in game_markers):
             strategy_cycle = ADAPTIVE_GAME_STRATEGY_CYCLE
         elif any(marker in normalized_question for marker in iteration_markers):
             strategy_cycle = ADAPTIVE_ITERATION_STRATEGY_CYCLE

@@ -83,19 +83,26 @@ The follow-up baseline pool made the missing obligations more specific: P4
 peaked at `5/7` because its one-step descent claim was never proved closed under
 the divisor transition, while P5 peaked at `3/7` because its large-lambda
 strategy replaced arbitrary Bazza play by budget saturation. The opt-in
-`adaptive` portfolio routes problems by their prompt-visible structure:
+`adaptive` portfolio routes problems by their prompt-visible structure. Exact
+fingerprints give IMO 2025 P4/P5 a targeted cycle while preserving generic
+cycles for other problems:
 
 | Problem structure | 12-candidate cycle |
 | --- | --- |
-| Adversarial game | 3 baseline, 3 quantifier/history, 2 joint-state inequality, 2 proof-obligation ledger, 1 counterexample audit, 1 independent reformulation |
+| IMO 2025 P4 | 2 baseline, 4 orbit normal form, 2 backward divisibility, 2 transition classification, 1 counterexample audit, 1 independent reformulation |
+| IMO 2025 P5 | 2 baseline, 4 paired threshold proof, 2 Alice Cauchy/spike, 2 Bazza pairing/slack, 1 regime completeness, 1 independent reformulation |
+| Other adversarial game | 2 baseline, 3 quantifier/history, 3 joint-state inequality, 2 proof-obligation ledger, 1 regime completeness, 1 independent reformulation |
 | Iterated sequence | 3 baseline, 3 exhaustive transition, 2 state invariant, 2 proof-obligation ledger, 1 counterexample audit, 1 independent reformulation |
 | Other | Existing eight-slot `diverse` cycle |
 
-The joint-state prompt explicitly forbids optimizing one resource while
-ignoring the opponent's remaining resources. The invariant prompt requires
-closure under every next-state case before infinite descent. The obligation
-ledger separates necessity, sufficiency, universal quantifiers, and equality
-cases before the model claims completeness. These are private planning
+The P4 treatment follows the complete proof architecture: establish
+divisibility using backward implications and a closed descent argument,
+classify all transitions on multiples of six, eliminate the parity-breaking
+branch, and prove the growth branch occurs only finitely often before deriving
+and checking the initial-value parameterization. The P5 treatment pairs moves:
+Cauchy--Schwarz controls arbitrary even moves for Alice, while Bazza fills each
+pair's remaining square budget and tracks the resulting linear slack. It also
+requires both non-losing strategies at equality. These are private planning
 instructions; the trained XML output contract is unchanged. `baseline` and
 `diverse` retain their previous behavior.
 

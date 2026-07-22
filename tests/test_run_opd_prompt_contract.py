@@ -731,6 +731,43 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(strategies.count("exhaustive_transitions"), 3)
         self.assertEqual(strategies.count("state_invariant"), 2)
 
+    def test_adaptive_imo2025_p4_portfolio_targets_complete_orbit_normal_form(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
+        question = (
+            "The infinite sequence $a_1,a_2,\\ldots$ has at least three proper "
+            "divisors per term. Each next term is the sum of the three largest "
+            "proper divisors. Determine all possible values of $a_1$."
+        )
+
+        strategies = [
+            run.resolve_proof_generation_strategy(index, cfg, question)
+            for index in range(12)
+        ]
+
+        self.assertEqual(strategies, list(run.ADAPTIVE_IMO2025_P4_STRATEGY_CYCLE))
+        self.assertEqual(strategies.count("baseline"), 2)
+        self.assertEqual(strategies.count("p4_orbit_normal_form"), 4)
+        self.assertEqual(strategies.count("p4_backward_divisibility"), 2)
+        self.assertEqual(strategies.count("p4_transition_classification"), 2)
+
+    def test_adaptive_imo2025_p5_portfolio_targets_both_player_strategies(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
+        question = (
+            "Alice and Bazza play the inekoalaty game depending on a positive "
+            "real number $\\lambda$. Determine both players' winning regimes."
+        )
+
+        strategies = [
+            run.resolve_proof_generation_strategy(index, cfg, question)
+            for index in range(12)
+        ]
+
+        self.assertEqual(strategies, list(run.ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE))
+        self.assertEqual(strategies.count("baseline"), 2)
+        self.assertEqual(strategies.count("p5_threshold_pairing"), 4)
+        self.assertEqual(strategies.count("p5_alice_cauchy_spike"), 2)
+        self.assertEqual(strategies.count("p5_bazza_pairing"), 2)
+
     def test_adaptive_generic_portfolio_falls_back_to_diverse_cycle(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
 
@@ -794,6 +831,28 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("one-step increase or decrease is not enough", user_prompt)
         self.assertIn("after every transition", user_prompt)
         self.assertIn("divisibility", user_prompt)
+
+    def test_p4_orbit_strategy_requires_backward_closure_and_finite_growth(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Determine all possible initial terms.",
+            planning_strategy="p4_orbit_normal_form",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("backward divisibility", user_prompt)
+        self.assertIn("only finitely many", user_prompt)
+        self.assertIn("verify that each parameterized value", user_prompt)
+
+    def test_p5_threshold_strategy_requires_arbitrary_play_and_boundary(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Classify the winner in the game.",
+            planning_strategy="p5_threshold_pairing",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("arbitrary even moves", user_prompt)
+        self.assertIn("sqrt(2-t^2)", user_prompt)
+        self.assertIn("non-losing strategy for each player", user_prompt)
 
     def test_invalid_proof_strategy_portfolio_is_rejected(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="unknown")
