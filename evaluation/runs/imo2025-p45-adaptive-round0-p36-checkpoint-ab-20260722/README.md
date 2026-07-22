@@ -1,5 +1,12 @@
 # IMO 2025 P4/P5 checkpoint A/B
 
+> **Contaminated diagnostic, not a fair benchmark.** The `adaptive` portfolio
+> used for this run fingerprinted the exact IMO 2025 P4/P5 statements and
+> injected problem-specific lemmas and proof skeletons. The raw artifacts are
+> retained for debugging, but the scores below must not be used to compare
+> checkpoints or claim general proof quality. The fingerprinting and all
+> answer-bearing generation prompts have since been removed.
+
 This experiment compares the current SFT-750 model with the teammate pipeline's
 OPD step-225 checkpoint on the same IMO 2025 P4/P5 round-zero workload.
 
@@ -39,20 +46,11 @@ completed 94/94 calls, with no failed, invalid, missing, or duplicate calls.
 | P5 | SFT-750 | 26 (72.2%) | 2.538 | 5.0 | 3 |
 | P5 | OPD step-225 | 19 (52.8%) | 2.395 | **7.0** | 2 |
 
-SFT-750 is the stronger general initial-prover checkpoint: it has materially
-higher completion rates and higher mean scores on both problems, and it wins
-P4 on both mean and best score. Step-225 should nevertheless remain in the P5
-initial pool because `p5-c30` (`p5_alice_cauchy_spike`) received `[7, 7]` and
-is the only fully correct initial P5 proof in either 36-candidate run. Selecting
-only by mean checkpoint quality would discard the most important tail event.
-
-The next initial-pool experiment should therefore use SFT-750 for all P4
-candidates and a heterogeneous P5 pool containing both SFT-750 and step-225.
-P4 allocation should emphasize the orbit-normal-form and backward-divisibility
-routes. P5 allocation should emphasize the Alice Cauchy spike and the complete
-three-regime pairing proof. The experiment must retain checkpoint identity in
-candidate metadata so later verifier and selector analysis can measure whether
-the perfect step-225 tail is preserved.
+These numbers describe behavior under the contaminated prompts only. A new A/B
+run with problem-agnostic prompts is required before choosing a checkpoint or
+candidate allocation. In particular, the `[7, 7]` P5 sample cannot be treated
+as an independently discovered tail event because its generation prompt
+contained the key proof construction.
 
 ## Recurring proof failures
 

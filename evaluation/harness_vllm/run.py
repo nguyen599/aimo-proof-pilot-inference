@@ -104,7 +104,6 @@ PROOF_GENERATION_STRATEGY_PORTFOLIOS = (
     "baseline",
     "diverse",
     "adaptive",
-    "p45_targeted",
 )
 PROOF_GENERATION_STRATEGY_CYCLE = (
     "baseline",
@@ -143,70 +142,6 @@ ADAPTIVE_ITERATION_STRATEGY_CYCLE = (
     "proof_obligation_ledger",
     "counterexample_audit",
     "independent_reformulation",
-)
-ADAPTIVE_IMO2025_P4_STRATEGY_CYCLE = (
-    "baseline",
-    "baseline",
-    "p4_orbit_normal_form",
-    "p4_orbit_normal_form",
-    "p4_orbit_normal_form",
-    "p4_orbit_normal_form",
-    "p4_backward_divisibility",
-    "p4_backward_divisibility",
-    "p4_transition_classification",
-    "p4_transition_classification",
-    "counterexample_audit",
-    "independent_reformulation",
-)
-ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE = (
-    "baseline",
-    "baseline",
-    "p5_threshold_pairing",
-    "p5_threshold_pairing",
-    "p5_threshold_pairing",
-    "p5_threshold_pairing",
-    "p5_alice_cauchy_spike",
-    "p5_alice_cauchy_spike",
-    "p5_bazza_pairing",
-    "p5_bazza_pairing",
-    "game_regime_completeness",
-    "independent_reformulation",
-)
-TARGETED_IMO2025_P4_STRATEGY_CYCLE = (
-    "p4_closed_descent_reduction",
-    "p4_closed_descent_reduction",
-    "p4_closed_descent_reduction",
-    "p4_closed_descent_reduction",
-    "p4_closed_descent_reduction",
-    "p4_closed_descent_reduction",
-    "p4_closed_descent_reduction",
-    "p4_closed_descent_reduction",
-    "p4_orbit_normal_form",
-    "p4_orbit_normal_form",
-    "p4_orbit_normal_form",
-    "p4_orbit_normal_form",
-    "p4_backward_divisibility",
-    "p4_backward_divisibility",
-    "p4_transition_classification",
-    "counterexample_audit",
-)
-TARGETED_IMO2025_P5_STRATEGY_CYCLE = (
-    "p5_complete_three_regime",
-    "p5_complete_three_regime",
-    "p5_complete_three_regime",
-    "p5_complete_three_regime",
-    "p5_complete_three_regime",
-    "p5_complete_three_regime",
-    "p5_complete_three_regime",
-    "p5_complete_three_regime",
-    "p5_alice_cauchy_spike",
-    "p5_alice_cauchy_spike",
-    "p5_alice_cauchy_spike",
-    "p5_alice_cauchy_spike",
-    "p5_threshold_pairing",
-    "p5_threshold_pairing",
-    "p5_bazza_pairing",
-    "game_regime_completeness",
 )
 PROOF_GENERATION_PLANNING_EMPHASES = {
     "adversarial_quantifiers": (
@@ -264,135 +199,6 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
         "after proving it against all legal cases. Do not present the result as a "
         "complete proof while any essential obligation remains supported only by "
         "an example, a cooperative play, or an unproved worst-case assertion."
-    ),
-    "p4_backward_divisibility": (
-        "For this divisor-map problem, try a backward-divisibility argument rather "
-        "than assuming a forward invariant. Let psi(x) be the next term. Prove by "
-        "exhaustive smallest-divisor and parity cases that divisibility of psi(x) "
-        "by 2, and then by 6, forces the corresponding divisibility of x. Combine "
-        "those implications with a genuinely closed strict-descent argument for "
-        "odd states, including odd multiples of 3, and for even states not "
-        "divisible by 3. For the latter case write x=2^e m with 3 not dividing m. "
-        "If e=1, the first denominators are 2,p and either an odd q or 2p: in the "
-        "odd-q branch psi(x) is odd, while in the 2p branch "
-        "psi(x)/x=1/2+1/p+1/(2p) is congruent to 2 modulo 3. If e=2 the "
-        "denominators 2,4,p make psi(x)/x congruent to 1/p modulo 3; if e>=3, "
-        "the denominators 2,4,min(8,p) make it congruent to the inverse of the "
-        "third denominator. Thus psi(x) is never divisible by 6, and the same "
-        "case bounds also give psi(x)<x, closing the descent under iteration. "
-        "Explicitly test x=70: its three smallest nontrivial "
-        "divisors are 2, 5, and 7, so psi(70)=35+14+10=59; do not assume that "
-        "x/(2p) outranks x/q for the next odd prime divisor q. A single inequality "
-        "psi(x)<x is not enough unless the same state class is proved to persist. "
-        "Complete both necessity and sufficiency of the final classification."
-    ),
-    "p4_transition_classification": (
-        "For this divisor-map problem, first justify that every term of an infinite "
-        "orbit is divisible by 6. Then exhaustively classify the three smallest "
-        "nontrivial divisors according to divisibility by 4 and 5, deriving the "
-        "exact transition multipliers 13/12, 31/30, and 1. Prove why the 31/30 "
-        "branch cannot occur in a valid infinite orbit, and use integrality or "
-        "prime valuations to prove that 13/12 cannot repeat forever. Do not replace "
-        "either point by an unsupported eventual-descent assertion."
-    ),
-    "p4_orbit_normal_form": (
-        "For this specific divisor iteration, seek a complete orbit normal form. "
-        "Prove every term is divisible by 6 using backward divisibility plus closed "
-        "descent that covers odd multiples of 3. For x=2^e m with 3 not dividing "
-        "m, explicitly split e=1, e=2, and e>=3; use parity or reduction modulo 3 "
-        "of the three reciprocal denominators to prove psi(x) is still outside "
-        "6Z, not merely smaller. The split must survive the x=70 divisor-order "
-        "test. On multiples of 6, derive and eliminate every transition except "
-        "the 13/12 step and the fixed step; prove there are only finitely many "
-        "13/12 steps. Work backward from the eventual fixed term to obtain an "
-        "explicit parameterization of every initial value, and then verify that "
-        "each parameterized value really produces a legal infinite sequence."
-    ),
-    "p4_closed_descent_reduction": (
-        "For this divisor iteration, use the following complete proof skeleton; "
-        "do not replace any case by an 'analogous' assertion. Write psi(x) for "
-        "the next term. First prove that odd x stays odd and has psi(x)<x. Next "
-        "let x=2^e m with m odd and 3 not dividing m. If e=1, let p be the "
-        "smallest prime divisor of m and let q be the smallest divisor of m "
-        "strictly greater than p, taking q=+infinity if none exists. The first "
-        "three complementary denominators are "
-        "2,p,min(2p,q): when q<2p the next term is odd, while when 2p<=q it is "
-        "m+3m/p, which is nonzero modulo 3. When m=1, interpret p as "
-        "+infinity. If e=2, the denominators are 2,4,p "
-        "and psi(x)=x/2+x/4+x/p is nonzero modulo 3. If e>=3, the denominators "
-        "are 2,4,min(8,p), and the same reciprocal calculation is nonzero "
-        "modulo 3. In every branch also prove psi(x)<x. This makes the complement "
-        "of 6Z closed under a strict descent and includes the mandatory x=70 "
-        "check, where the denominators are 2,5,7 and psi(70)=59. Conclude that "
-        "every infinite orbit lies in 6Z. Then prove the exact reduction: if "
-        "x=12k, psi(x)=13k and x has an infinite valid orbit if and only if k "
-        "does, because all valid iterates are multiples of 6 and multiplying "
-        "such an iterate by 13 does not change its three smallest nontrivial "
-        "divisors. Repeatedly remove factors of 12. For the remaining k, use "
-        "6|k and 12 not dividing k. If 5 does not divide k, its denominators "
-        "2,3,6 make it fixed; if 5 divides k, its denominators 2,3,5 give "
-        "psi(k)=31k/30, which is odd. State the resulting family and prove both "
-        "necessity and sufficiency."
-    ),
-    "p5_alice_cauchy_spike": (
-        "For this game, prove Alice's strict-regime strategy against an arbitrary "
-        "Bazza history, not only a budget-saturating one. Have Alice play zero on "
-        "earlier odd turns. At a preselected late turn 2K-1, write S and Q for "
-        "the sum and square-sum of Bazza's K-1 earlier moves, set "
-        "A=lambda(2K-1), and play t=A-S. Prove legality from "
-        "S<=(K-1)sqrt(2)<A. Then apply Cauchy--Schwarz to those K-1 moves "
-        "together with t: Q+t^2>=A^2/K. Choose K so that "
-        "lambda^2(2K-1)^2>2K^2, forcing Q+t^2>2K and leaving Bazza no legal "
-        "reply. Also supply Bazza's opposite-regime strategy and both non-losing "
-        "arguments at equality."
-    ),
-    "p5_bazza_pairing": (
-        "For this game, analyze Bazza's paired response to an odd move t by filling "
-        "the pair's remaining square allowance with sqrt(2-t^2). Prove inductively "
-        "that t is in the required domain before using the square root. Use the "
-        "sharp lower bound t+sqrt(2-t^2)>=sqrt(2) to track linear slack after every "
-        "pair, proving finite failure in the strict low-lambda regime and perpetual "
-        "legality at equality. At equality, separately show that Alice's all-zero "
-        "strategy survives every Bazza history by Cauchy--Schwarz, and that Bazza's "
-        "pair-filling strategy survives every Alice history; one cooperative play "
-        "does not establish a draw. Also prove Alice's high-regime spike against "
-        "arbitrary Bazza play."
-    ),
-    "p5_threshold_pairing": (
-        "Build a complete three-regime proof for this game from paired moves. For "
-        "Alice, play zero on early odd turns. For Bazza's arbitrary even moves, "
-        "at turn 2K-1 let S,Q be their sum and square-sum, let A=lambda(2K-1), "
-        "and play t=A-S. "
-        "Use Cauchy--Schwarz to prove both t>=0 and Q+t^2>=A^2/K; choose K with "
-        "lambda^2(2K-1)^2>2K^2 so Bazza has no legal reply. This must cover every "
-        "Bazza history, not only square-budget saturation. For Bazza, pair each odd "
-        "move t with sqrt(2-t^2), prove this is always defined when needed, and use "
-        "t+sqrt(2-t^2)>=sqrt(2) to force Alice to fail in the strict opposite "
-        "regime. At equality, prove Alice's all-zero strategy against arbitrary "
-        "Bazza play and Bazza's pair-filling strategy against arbitrary Alice play; "
-        "one cooperative infinite play is not enough. Check every quantifier and "
-        "endpoint."
-    ),
-    "p5_complete_three_regime": (
-        "For this game, assemble one rigorous proof of all three regimes from "
-        "the following exact simultaneous invariants. For lambda below or equal "
-        "to sqrt(2)/2, Bazza fills the remaining square budget after Alice's "
-        "odd move a_i by b_i=sqrt(2-a_i^2). Assuming Alice can move and the "
-        "previous even state has Q_{2i-2}=2i-2 and S_{2i-2}>=(i-1)sqrt(2), "
-        "derive a_i<=lambda(2i-1)-S_{2i-2}<=sqrt(2)/2 before taking the square "
-        "root. Then Q_{2i}=2i and a_i+b_i>=sqrt(2). Use this simultaneous "
-        "induction to prove finite failure for Alice in the strict low regime "
-        "and that Bazza never loses at equality. For lambda above or equal to "
-        "sqrt(2)/2, Alice can play zero on every earlier odd turn against an "
-        "arbitrary Bazza history because Cauchy--Schwarz gives "
-        "S_{2K-2}<=(K-1)sqrt(2)<lambda(2K-1). In the strict high regime choose "
-        "K with lambda^2(2K-1)^2>2K^2, set A=lambda(2K-1), and play "
-        "t=A-S_{2K-2}. Apply Cauchy--Schwarz to the K-1 Bazza moves together "
-        "with t to obtain Q_{2K-2}+t^2>=A^2/K>2K, so Bazza has no legal reply. "
-        "At equality, Alice's all-zero strategy prevents her loss against every "
-        "Bazza history and Bazza's fill-the-square-budget strategy prevents his "
-        "loss against every Alice history. Do not infer a draw from one "
-        "cooperative play, and do not assume the opponent moves greedily."
     ),
 }
 
@@ -1750,22 +1556,6 @@ def build_opd_proof_only_generation_prompt(
     return build_opd_proof_generation_prompt(question, use_tool=use_tool)
 
 
-def identify_imo2025_problem(question: str) -> Optional[str]:
-    normalized_question = " ".join(question.lower().split())
-    if (
-        "three largest proper divisors" in normalized_question
-        and "determine all possible values of $a_1$" in normalized_question
-    ):
-        return "p4"
-    if (
-        "alice and bazza" in normalized_question
-        and "inekoalaty game" in normalized_question
-        and "positive real number $\\lambda$" in normalized_question
-    ):
-        return "p5"
-    return None
-
-
 def resolve_proof_generation_strategy(
     attempt_idx: int,
     cfg: PipelineConfig,
@@ -1782,9 +1572,8 @@ def resolve_proof_generation_strategy(
     if portfolio == "baseline":
         return "baseline"
     strategy_cycle = PROOF_GENERATION_STRATEGY_CYCLE
-    if portfolio in {"adaptive", "p45_targeted"}:
+    if portfolio == "adaptive":
         normalized_question = " ".join(question.lower().split())
-        imo2025_problem = identify_imo2025_problem(question)
         game_markers = (
             " game",
             "player",
@@ -1801,19 +1590,7 @@ def resolve_proof_generation_strategy(
             "a_{n + 1}",
             "next term",
         )
-        if imo2025_problem == "p4":
-            strategy_cycle = (
-                TARGETED_IMO2025_P4_STRATEGY_CYCLE
-                if portfolio == "p45_targeted"
-                else ADAPTIVE_IMO2025_P4_STRATEGY_CYCLE
-            )
-        elif imo2025_problem == "p5":
-            strategy_cycle = (
-                TARGETED_IMO2025_P5_STRATEGY_CYCLE
-                if portfolio == "p45_targeted"
-                else ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE
-            )
-        elif any(marker in normalized_question for marker in game_markers):
+        if any(marker in normalized_question for marker in game_markers):
             strategy_cycle = ADAPTIVE_GAME_STRATEGY_CYCLE
         elif any(marker in normalized_question for marker in iteration_markers):
             strategy_cycle = ADAPTIVE_ITERATION_STRATEGY_CYCLE
@@ -1930,111 +1707,6 @@ def hybrid_verifier_assignment(
         specialist_index % len(HYBRID_VERIFIER_AUDIT_ROLES)
     ]
     return audit_role[0], "specialist", audit_role
-
-
-IMO2025_SPECIALIST_VERIFIER_AUDITS: dict[str, dict[str, str]] = {
-    "p4": {
-        "dependency_lemma": (
-            "Require a closed descent argument, not merely one decreasing step. "
-            "In particular, if a term is not divisible by 6, verify that its "
-            "successor is again not divisible by 6 and is smaller, so iteration "
-            "really reaches a forbidden base case."
-        ),
-        "counterexample_invariance": (
-            "Test the claimed ordering of the three largest proper divisors on "
-            "small boundary values and on x=70, whose relevant divisors are "
-            "2, 5, and 7 and whose successor is 59. Reject any case split that "
-            "silently assumes x/(2p) remains among the largest divisors."
-        ),
-        "quantifier_algebra": (
-            "For N=2^e m with 3 not dividing m, independently verify closure "
-            "modulo 3 in every case e=1, e=2, and e>=3, using the actual three "
-            "smallest complementary divisors. Also recompute the transitions "
-            "13/12 and 31/30 and the multiplier-1 fixed-point branch. Determine "
-            "which branches are compatible with an infinite legal orbit."
-        ),
-        "coverage_construction": (
-            "Check necessity and sufficiency separately: every excluded initial "
-            "value must enter a forbidden state, every claimed initial value must "
-            "produce an infinite legal orbit, and the final parameterization must "
-            "contain no extra or missing residue class."
-        ),
-    },
-    "p5": {
-        "dependency_lemma": (
-            "Require Alice's winning argument against an arbitrary legal Bazza "
-            "history. At turn 2K-1 define S and Q from Bazza's first K-1 moves, "
-            "set A=lambda(2K-1) and t=A-S, prove t is legal, and use Cauchy on "
-            "those K numbers to derive Q+t^2 >= A^2/K."
-        ),
-        "counterexample_invariance": (
-            "Test a non-saturating, non-greedy Bazza history. Reject any claim "
-            "that Bazza's maximal move is automatically Alice's worst case, or "
-            "that a cooperative infinite play proves neither player can force a "
-            "win."
-        ),
-        "quantifier_algebra": (
-            "Independently check S <= (K-1)sqrt(2) < A, the legality and sign of "
-            "t=A-S, the bound Q+t^2 >= A^2/K, and the choice of K making "
-            "lambda^2(2K-1)^2 > 2K^2. Recompute the complementary pair "
-            "inequality and all equality conditions."
-        ),
-        "coverage_construction": (
-            "Demand separate strategies for both strict lambda regimes and, at "
-            "the equality threshold, two independent non-losing strategies that "
-            "work against arbitrary opponents. An exhibited cooperative equality "
-            "trajectory is not sufficient."
-        ),
-    },
-}
-
-
-def specialize_verifier_audit_role(
-    question: str,
-    audit_role: Optional[tuple[str, str]],
-) -> Optional[tuple[str, str]]:
-    if audit_role is None:
-        return None
-    problem_id = identify_imo2025_problem(question)
-    if problem_id is None:
-        return audit_role
-    role_name, role_instructions = audit_role
-    problem_instructions = IMO2025_SPECIALIST_VERIFIER_AUDITS.get(
-        problem_id, {}
-    ).get(role_name)
-    if not problem_instructions:
-        return audit_role
-    return (
-        role_name,
-        f"{role_instructions}\n\nProblem-specific mandatory check: "
-        f"{problem_instructions}",
-    )
-
-
-def problem_specific_completion_gate(question: str) -> str:
-    problem_id = identify_imo2025_problem(question)
-    if problem_id == "p4":
-        return (
-            "Before accepting a complete P4 proof, independently verify all of "
-            "the following: (1) the ordering of the three complementary divisors, "
-            "including x=70; (2) closure of strict descent outside multiples of "
-            "6 for N=2^e m, 3 not dividing m, in each case e=1, e=2, and e>=3; "
-            "(3) the 13/12 and 31/30 transitions and the multiplier-1 fixed-point "
-            "branch; and (4) both necessity and sufficiency of the final family. "
-            "One decreasing step is not a closed descent proof."
-        )
-    if problem_id == "p5":
-        return (
-            "Before accepting a complete P5 proof, independently verify all of "
-            "the following: (1) Alice's strategy after an arbitrary legal Bazza "
-            "history by defining S,Q,A,t at turn 2K-1 and proving t is legal; "
-            "(2) the Cauchy bound Q+t^2 >= A^2/K and the resulting choice of K; "
-            "(3) Bazza's complementary-pair strategy with its exact inequality; "
-            "and (4) separate non-losing strategies for both players at equality. "
-            "A maximal-opponent shortcut or one cooperative infinite play is not "
-            "a strategy proof."
-        )
-    return ""
 
 
 def format_prior_verifier_critiques(
@@ -2189,12 +1861,6 @@ def build_deepseek_meta_verification_prompt(
         proof_analysis,
         MAX_FORWARDED_EVALUATION_CHARS,
     )
-    completion_gate = problem_specific_completion_gate(question)
-    completion_gate_section = (
-        "\n\nProblem-specific mandatory audit:\n" + completion_gate
-        if completion_gate
-        else ""
-    )
     if audit_positive_verdicts:
         return rf"""You are an adversarial second-opinion auditor. You are given a problem, a candidate solution, and a first verifier's evaluation. Your task is to determine whether the verifier's verdict is justified by the actual proof.
 
@@ -2207,7 +1873,6 @@ Audit procedure:
 4. For a game or adversarial strategy, test the proposed move after arbitrary legal prior play and at least one non-greedy opponent response. One cooperative infinite play never proves that neither player has a winning strategy.
 5. Recompute the decisive algebra and all equality or monotonicity conditions used to turn the local claim into the final conclusion.
 6. Compare these checks with the first verifier's evaluation.
-{completion_gate_section}
 
 Rate the first verifier, not the prose quality:
 - 1: its verdict is supported by a completed independent audit and it missed no material defect.
@@ -2411,23 +2076,13 @@ def build_opd_proof_refinement_prompt(
     self_evaluation: str,
     proof_analyses: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    parts = []
-    completion_gate = problem_specific_completion_gate(question)
-    if completion_gate:
-        parts.extend(
-            [
-                "<problem_specific_completion_gate>",
-                completion_gate,
-                "</problem_specific_completion_gate>",
-            ]
-        )
-    parts.extend([
+    parts = [
         build_refinement_repair_ledger(proof_analyses),
         f'<candidate id="{candidate_id}">',
         "<proof>",
         proof,
         "</proof>",
-    ])
+    ]
     for analysis in proof_analyses:
         score = coerce_score(analysis.get("score"))
         score_text = "?" if score is None else f"{score:g}"
@@ -2458,23 +2113,13 @@ def build_opd_proof_reconstruction_prompt(
     *,
     strict_pass_challenge: bool = False,
 ) -> list[dict[str, str]]:
-    parts = []
-    completion_gate = problem_specific_completion_gate(question)
-    if completion_gate:
-        parts.extend(
-            [
-                "<problem_specific_completion_gate>",
-                completion_gate,
-                "</problem_specific_completion_gate>",
-            ]
-        )
-    parts.extend([
+    parts = [
         build_refinement_repair_ledger(proof_analyses),
         f'<candidate id="{candidate_id}">',
         "<proof>",
         proof,
         "</proof>",
-    ])
+    ]
     for analysis in proof_analyses:
         score = coerce_score(analysis.get("score"))
         score_text = "?" if score is None else f"{score:g}"
@@ -2610,15 +2255,6 @@ def build_selection_prompt(
     max_candidate_chars: int,
 ) -> list[dict[str, str]]:
     candidate_blocks: list[str] = []
-    completion_gate = problem_specific_completion_gate(question)
-    if completion_gate:
-        candidate_blocks.extend(
-            [
-                "<problem_specific_completion_gate>",
-                completion_gate,
-                "</problem_specific_completion_gate>",
-            ]
-        )
     for idx, candidate in enumerate(candidates):
         proof = str(candidate.get("proof_solution") or "")
         if len(proof) > max_candidate_chars:
@@ -6095,7 +5731,6 @@ async def run_verification_round(
                 verifier_idx,
                 int(verifier_generalist_n),
             )
-        audit_role = specialize_verifier_audit_role(question, audit_role)
         if prompt_family == PROMPT_FAMILY_DEEPSEEK_MATH_V2:
             prompt = build_deepseek_proof_verification_prompt(
                 question,
