@@ -113,15 +113,15 @@ PROOF_GENERATION_STRATEGY_CYCLE = (
 ADAPTIVE_GAME_STRATEGY_CYCLE = (
     "baseline",
     "baseline",
-    "baseline",
     "adversarial_quantifiers",
     "adversarial_quantifiers",
     "adversarial_quantifiers",
     "joint_state_inequality",
     "joint_state_inequality",
+    "joint_state_inequality",
     "proof_obligation_ledger",
     "proof_obligation_ledger",
-    "counterexample_audit",
+    "game_regime_completeness",
     "independent_reformulation",
 )
 ADAPTIVE_ITERATION_STRATEGY_CYCLE = (
@@ -171,6 +171,14 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
         "Cauchy--Schwarz, or another proved extremal argument when appropriate. "
         "Do not assume that an opponent saturates a budget unless that dominance "
         "claim is proved with the full future state included."
+    ),
+    "game_regime_completeness": (
+        "If a parameterized game has several strict regimes and a boundary, "
+        "treat each regime as a separate proof obligation. For every claimed "
+        "winning strategy, prove legality and finite termination against every "
+        "legal opposing history. At a claimed draw boundary, one cooperative "
+        "infinite play is insufficient: give each player a strategy that prevents "
+        "the other player from winning against every legal reply."
     ),
     "state_invariant": (
         "For an iterated map or recurrence, a one-step increase or decrease is not "

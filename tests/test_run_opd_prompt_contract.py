@@ -708,9 +708,11 @@ class RunOpdPromptContractTests(unittest.TestCase):
         ]
 
         self.assertEqual(strategies, list(run.ADAPTIVE_GAME_STRATEGY_CYCLE))
-        self.assertEqual(strategies.count("baseline"), 3)
+        self.assertEqual(strategies.count("baseline"), 2)
         self.assertEqual(strategies.count("adversarial_quantifiers"), 3)
-        self.assertEqual(strategies.count("joint_state_inequality"), 2)
+        self.assertEqual(strategies.count("joint_state_inequality"), 3)
+        self.assertEqual(strategies.count("proof_obligation_ledger"), 2)
+        self.assertEqual(strategies.count("game_regime_completeness"), 1)
 
     def test_adaptive_iteration_portfolio_targets_transition_closure(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
@@ -769,6 +771,18 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("every state variable", user_prompt)
         self.assertIn("history-independent worst-case inequality", user_prompt)
         self.assertIn("opponent saturates a budget", user_prompt)
+
+    def test_game_regime_strategy_requires_universal_boundary_play(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Classify the winner for every value of the game parameter.",
+            planning_strategy="game_regime_completeness",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("each regime as a separate proof obligation", user_prompt)
+        self.assertIn("against every legal opposing history", user_prompt)
+        self.assertIn("one cooperative infinite play is insufficient", user_prompt)
+        self.assertIn("prevents the other player from winning", user_prompt)
 
     def test_state_invariant_strategy_requires_transition_closure(self):
         messages = run.build_opd_proof_generation_prompt(

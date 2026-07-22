@@ -14,7 +14,7 @@ The adaptive 12-candidate cycle is repeated three times:
 | Problem | Allocation per cycle |
 | --- | --- |
 | P4 iterated sequence | 3 baseline, 3 exhaustive transitions, 2 state invariants, 2 proof-obligation ledgers, 1 counterexample audit, 1 independent reformulation |
-| P5 adversarial game | 3 baseline, 3 adversarial-quantifier audits, 2 joint-state inequalities, 2 proof-obligation ledgers, 1 counterexample audit, 1 independent reformulation |
+| P5 adversarial game | 2 baseline, 3 adversarial-quantifier audits, 3 joint-state inequalities, 2 proof-obligation ledgers, 1 regime/boundary completeness audit, 1 independent reformulation |
 
 Run `launch_nii_pair.sh` on physical nodes 2 and 3 after the current four-round
 baseline releases those GPUs. Export every structurally complete, non-cutoff
