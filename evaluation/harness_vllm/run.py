@@ -1815,7 +1815,8 @@ IMO2025_SPECIALIST_VERIFIER_AUDITS: dict[str, dict[str, str]] = {
             "For N=2^e m with 3 not dividing m, independently verify closure "
             "modulo 3 in every case e=1, e=2, and e>=3, using the actual three "
             "smallest complementary divisors. Also recompute the transitions "
-            "13 to 12, 31 to 30, and 1 to its terminal obstruction."
+            "13/12 and 31/30 and the multiplier-1 fixed-point branch. Determine "
+            "which branches are compatible with an infinite legal orbit."
         ),
         "coverage_construction": (
             "Check necessity and sufficiency separately: every excluded initial "
@@ -1883,9 +1884,9 @@ def problem_specific_completion_gate(question: str) -> str:
             "the following: (1) the ordering of the three complementary divisors, "
             "including x=70; (2) closure of strict descent outside multiples of "
             "6 for N=2^e m, 3 not dividing m, in each case e=1, e=2, and e>=3; "
-            "(3) the 13/12 and 31/30 transition cases; and (4) both necessity and "
-            "sufficiency of the final family. One decreasing step is not a closed "
-            "descent proof."
+            "(3) the 13/12 and 31/30 transitions and the multiplier-1 fixed-point "
+            "branch; and (4) both necessity and sufficiency of the final family. "
+            "One decreasing step is not a closed descent proof."
         )
     if problem_id == "p5":
         return (

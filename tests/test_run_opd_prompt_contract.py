@@ -460,6 +460,11 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("again not divisible by 6", specialized["dependency_lemma"])
         self.assertIn("x=70", specialized["counterexample_invariance"])
         self.assertIn("e=1, e=2, and e>=3", specialized["quantifier_algebra"])
+        self.assertIn(
+            "multiplier-1 fixed-point branch",
+            specialized["quantifier_algebra"],
+        )
+        self.assertNotIn("terminal obstruction", specialized["quantifier_algebra"])
         self.assertIn("necessity and sufficiency", specialized["coverage_construction"])
 
     def test_imo2025_p5_specialists_target_arbitrary_history(self):
@@ -1795,6 +1800,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
             p4_messages[1]["content"],
         )
         self.assertIn("x=70", p4_messages[1]["content"])
+        self.assertIn(
+            "multiplier-1 fixed-point branch",
+            p4_messages[1]["content"],
+        )
         self.assertIn(
             "<problem_specific_completion_gate>",
             p5_messages[1]["content"],
