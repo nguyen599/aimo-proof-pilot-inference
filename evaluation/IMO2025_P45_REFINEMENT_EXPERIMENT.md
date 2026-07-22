@@ -201,6 +201,12 @@ to `0.0` and `-0.3125`, respectively, so both improved proofs would be rolled
 back. Retention now compares the already meta-aware `final_score` directly;
 the small survived-shadow-challenge tiebreak remains. Meta challenges still
 drive critique selection, score weighting, hard caps, and later refinement.
+An exact internal-score tie now keeps the earlier verified proof instead of
+silently preferring the latest rewrite. A later round replaces it only after a
+strictly higher aggregate, while an equal-score proof that survives an explicit
+strict-pass challenge still wins the existing tiebreak. This is the conservative
+choice when internal grading cannot distinguish two versions but reconstruction
+may have removed a valid lemma.
 
 ## Selector boundary audit
 

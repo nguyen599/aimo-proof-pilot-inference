@@ -3421,6 +3421,16 @@ def candidate_retention_score(aggregation: dict[str, Any]) -> float:
     return value
 
 
+def should_replace_retained_candidate(
+    candidate_aggregation: dict[str, Any],
+    retained_aggregation: dict[str, Any],
+) -> bool:
+    """Replace a verified proof only when its retention evidence improves."""
+    return candidate_retention_score(candidate_aggregation) > candidate_retention_score(
+        retained_aggregation
+    )
+
+
 def response_usage_to_dict(usage: Any) -> dict[str, Any]:
     if usage is None:
         return {}
@@ -6326,9 +6336,10 @@ async def run_single_attempt(
                 "strict_pass_challenge_survived": True,
             }
         pending_strict_pass_challenge = False
-        if best_round_idx < 0 or candidate_retention_score(
-            final_aggregation
-        ) >= candidate_retention_score(best_aggregation):
+        if best_round_idx < 0 or should_replace_retained_candidate(
+            final_aggregation,
+            best_aggregation,
+        ):
             best_proof = proof
             best_generation_parsed = latest_generation_parsed
             best_aggregation = dict(final_aggregation)

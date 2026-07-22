@@ -716,6 +716,29 @@ class RunOpdPromptContractTests(unittest.TestCase):
             run.candidate_retention_score(baseline),
         )
 
+    def test_retention_keeps_earlier_proof_on_exact_internal_tie(self):
+        earlier = {"final_score": 0.5}
+        rewritten = {"final_score": 0.5}
+        improved = {"final_score": 0.75}
+
+        self.assertFalse(
+            run.should_replace_retained_candidate(rewritten, earlier)
+        )
+        self.assertTrue(
+            run.should_replace_retained_candidate(improved, earlier)
+        )
+
+    def test_retention_allows_equal_score_after_strict_pass_challenge(self):
+        earlier = {"final_score": 1.0}
+        challenged = {
+            "final_score": 1.0,
+            "strict_pass_challenge_survived": True,
+        }
+
+        self.assertTrue(
+            run.should_replace_retained_candidate(challenged, earlier)
+        )
+
     def test_selector_pool_includes_threshold_boundary(self):
         candidates = [
             {"attempt_idx": 0, "final_score": 0.49, "proof_solution": "low"},
