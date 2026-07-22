@@ -7590,7 +7590,25 @@ def candidate_selection_pool(
     )
     if candidate_limit:
         historical_limit = min(historical_limit, max(0, candidate_limit - 1))
-    selected_history = historical_candidates[:historical_limit]
+    selected_history: list[dict[str, Any]] = []
+    selected_history_ids: set[int] = set()
+    selected_parent_attempts: set[int] = set()
+    for historical in historical_candidates:
+        parent_attempt = int(historical.get("selector_parent_attempt_idx") or 0)
+        if parent_attempt in selected_parent_attempts:
+            continue
+        selected_history.append(historical)
+        selected_history_ids.add(id(historical))
+        selected_parent_attempts.add(parent_attempt)
+        if len(selected_history) >= historical_limit:
+            break
+    if len(selected_history) < historical_limit:
+        for historical in historical_candidates:
+            if id(historical) in selected_history_ids:
+                continue
+            selected_history.append(historical)
+            if len(selected_history) >= historical_limit:
+                break
 
     current_limit = candidate_limit - len(selected_history) if candidate_limit else 0
     if current_limit and len(current_pool) > current_limit:

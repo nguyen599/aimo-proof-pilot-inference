@@ -960,6 +960,60 @@ class RunOpdPromptContractTests(unittest.TestCase):
             [0, 1, 2],
         )
 
+    def test_selector_history_prefers_distinct_parent_candidates(self):
+        candidates = [
+            {
+                "attempt_idx": 0,
+                "final_score": 0.9,
+                "proof_solution": "current zero",
+                "verified_versions": [
+                    {
+                        "final_score": 0.95,
+                        "proof_solution": "zero round one",
+                        "selected_verification_round": 1,
+                    },
+                    {
+                        "final_score": 0.9,
+                        "proof_solution": "zero round two",
+                        "selected_verification_round": 2,
+                    },
+                ],
+            },
+            {
+                "attempt_idx": 1,
+                "final_score": 0.8,
+                "proof_solution": "current one",
+                "verified_versions": [
+                    {
+                        "final_score": 0.85,
+                        "proof_solution": "one round one",
+                        "selected_verification_round": 1,
+                    }
+                ],
+            },
+        ]
+        cfg = SimpleNamespace(
+            selector_min_final_score=0.5,
+            selector_candidate_limit=4,
+            selector_historical_candidate_limit=2,
+        )
+
+        selection_pool, _ = run.candidate_selection_pool(candidates, cfg)
+
+        historical = [
+            candidate
+            for candidate in selection_pool
+            if candidate.get("selector_is_historical")
+        ]
+        self.assertEqual(
+            [candidate["selector_parent_attempt_idx"] for candidate in historical],
+            [0, 1],
+        )
+        self.assertEqual(
+            [candidate["proof_solution"] for candidate in historical],
+            ["zero round one", "one round one"],
+        )
+
     def test_validated_critique_preserves_requested_fix(self):
         result = run.aggregate_proof_label(
             [
