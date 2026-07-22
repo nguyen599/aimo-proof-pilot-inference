@@ -107,6 +107,12 @@ If neither P4 nor P5 contains a correct proof, selection cannot solve the
 failure. Improve generation width/checkpoint/sampling before spending on four
 rounds.
 
+The reproducible one-node launcher is
+`scripts/launch_nii_imo2026_p45_gate_a.sh`. Its defaults reserve GPUs 4-7,
+use TP2/DP2, run 64 baseline candidates for each of P4 and P5 concurrently,
+and disable handoff, verification, refinement, and LLM selection. Set a unique
+`AIMO_RUN_ID` before invoking it.
+
 ### Gate B: four-round topology
 
 After Gate A establishes pool quality, compare:
