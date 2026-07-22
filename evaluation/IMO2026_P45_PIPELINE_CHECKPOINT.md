@@ -79,6 +79,9 @@ An opt-in compatibility score source is now available:
 consistently for candidate admission, ranking, the saturation test, the score
 window, historical versions, and score fallbacks. Exact score ties preserve
 the existing verifier rank. The default `final_score` behavior is unchanged.
+`export_pipeline_candidates.py` preserves compact numeric verifier summaries,
+and `replay_pipeline_selector.py` accepts the same score-source option, so a
+stored-pool replay does not need to regenerate or reverify proofs.
 
 The previous same-pool replay is **not** evidence against the teammate method.
 That replay forced a wide top-ten tournament and used our capped meta-aware

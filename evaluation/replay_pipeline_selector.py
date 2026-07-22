@@ -145,6 +145,10 @@ def load_candidate_export(candidate_dir: Path) -> list[ReplayProblem]:
             "selected_verification_round": manifest.get(
                 "selected_verification_round"
             ),
+            "verifier_score_summaries": manifest.get(
+                "verifier_score_summaries",
+                [],
+            ),
         }
         if not candidate["proof_solution"]:
             raise ValueError(f"empty final proof for {candidate_id!r}")
@@ -221,6 +225,7 @@ def write_replay_outputs(
             "source_candidate_id": result["selected_candidate_id"],
             "source_attempt_idx": result["selected_attempt_idx"],
             "selector_mode": selector_config.selector_mode,
+            "selector_score_source": selector_config.selector_score_source,
         }
         for result in results
     ]
@@ -240,6 +245,7 @@ def write_replay_outputs(
         "schema_version": 1,
         "candidate_dir": str(candidate_dir.resolve()),
         "selector_mode": selector_config.selector_mode,
+        "selector_score_source": selector_config.selector_score_source,
         "problem_count": len(results),
         "selected_candidates": {
             result["problem_id"]: result["selected_candidate_id"]
@@ -253,6 +259,7 @@ def write_replay_outputs(
             for key in (
                 "selector_max_candidate_chars",
                 "selector_thinking_budget_tokens",
+                "selector_score_source",
                 "selection_temperature",
                 "selector_tournament_group_size",
                 "selector_tournament_rounds",
@@ -274,6 +281,11 @@ def write_replay_outputs(
 def build_selector_config(args: argparse.Namespace) -> SimpleNamespace:
     return SimpleNamespace(
         selector_mode=args.selector_mode,
+        selector_score_source=getattr(
+            args,
+            "selector_score_source",
+            "final_score",
+        ),
         selector_max_candidate_chars=max(1_000, args.selector_max_candidate_chars),
         selector_thinking_budget_tokens=max(
             0, args.selector_thinking_budget_tokens
@@ -307,6 +319,11 @@ def parse_args() -> argparse.Namespace:
         "--selector-mode",
         choices=("score", "llm", "llm_tournament", "llm_stratified_tournament"),
         default="llm_stratified_tournament",
+    )
+    parser.add_argument(
+        "--selector-score-source",
+        choices=("final_score", "raw_verifier_mean"),
+        default="final_score",
     )
     parser.add_argument("--selector-max-candidate-chars", type=int, default=32_000)
     parser.add_argument("--selector-max-new-tokens", type=int, default=58_100)

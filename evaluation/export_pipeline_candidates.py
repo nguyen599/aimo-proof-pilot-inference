@@ -285,6 +285,21 @@ def candidate_manifest_row(
         "all_verifiers_passed": bool(candidate.get("all_verifiers_passed", False)),
         "selected_verification_round": candidate.get("selected_verification_round"),
         "rollback_from_round": candidate.get("rollback_from_round"),
+        "verifier_score_summaries": [
+            {
+                key: summary.get(key)
+                for key in (
+                    "verifier_index",
+                    "verifier_role",
+                    "verifier_group",
+                    "verifier_score",
+                    "meta_factor",
+                    "weighted_score",
+                )
+            }
+            for summary in candidate.get("verifier_score_summaries") or []
+            if isinstance(summary, dict)
+        ],
         "budget_restart_count": int(candidate.get("budget_restart_count") or 0),
         "refine_budget_restart_count": int(
             candidate.get("refine_budget_restart_count") or 0

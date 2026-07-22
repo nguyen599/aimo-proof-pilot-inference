@@ -45,6 +45,17 @@ def make_candidate(attempt_idx: int, **overrides: object) -> dict[str, object]:
         "all_verifiers_passed": False,
         "selected_verification_round": 1,
         "rollback_from_round": None,
+        "verifier_score_summaries": [
+            {
+                "verifier_index": 0,
+                "verifier_role": "generalist",
+                "verifier_group": "generalist",
+                "verifier_score": 1.0,
+                "meta_factor": 0.5,
+                "weighted_score": 0.5,
+                "evaluation": "must not be exported",
+            }
+        ],
         "budget_restart_count": 0,
         "refine_budget_restart_count": 0,
     }
@@ -163,6 +174,14 @@ class ExportPipelineCandidatesTests(unittest.TestCase):
         self.assertEqual(by_attempt[0]["verifier_call_count"], 2)
         self.assertEqual(by_attempt[0]["refinement_count"], 1)
         self.assertEqual(by_attempt[0]["pre_cap_score"], 0.875)
+        self.assertEqual(
+            by_attempt[0]["verifier_score_summaries"][0]["verifier_score"],
+            1.0,
+        )
+        self.assertNotIn(
+            "evaluation",
+            by_attempt[0]["verifier_score_summaries"][0],
+        )
 
         rubrics = [
             json.loads(line)

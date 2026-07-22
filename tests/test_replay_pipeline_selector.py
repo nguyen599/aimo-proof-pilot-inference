@@ -55,6 +55,10 @@ def make_export(root: Path) -> Path:
                 "final_status": "weighted_score_pass",
                 "selected_by_pipeline": attempt == 0,
                 "planning_strategy": "baseline",
+                "verifier_score_summaries": [
+                    {"verifier_index": 0, "verifier_score": 1.0 - attempt / 10},
+                    {"verifier_index": 1, "verifier_score": 1.0},
+                ],
             }
         )
         rubrics.append(
@@ -95,6 +99,7 @@ class TargetScheduler:
 def selector_config() -> SimpleNamespace:
     return SimpleNamespace(
         selector_mode="llm_stratified_tournament",
+        selector_score_source="raw_verifier_mean",
         selector_max_candidate_chars=10_000,
         selector_thinking_budget_tokens=56_000,
         selector_thinking_budget_force_text=(
@@ -122,6 +127,9 @@ def test_loads_final_candidates_and_preserves_uncapped_score(tmp_path: Path) -> 
         3,
     ]
     assert problems[0].candidates[3]["pre_cap_score"] == 0.95
+    assert problems[0].candidates[3]["verifier_score_summaries"][0][
+        "verifier_score"
+    ] == 0.7
 
 
 def test_replays_tournament_and_writes_grader_records(tmp_path: Path) -> None:
@@ -148,6 +156,7 @@ def test_replays_tournament_and_writes_grader_records(tmp_path: Path) -> None:
         selector_config=config,
     )
     assert summary["changed_from_original"] == 1
+    assert summary["selector_score_source"] == "raw_verifier_mean"
     record = json.loads((output_dir / "records.jsonl").read_text().splitlines()[0])
     assert record["problem_id"] == "4"
     assert record["source_candidate_id"] == "p4-c03-final"
@@ -157,6 +166,7 @@ def test_replays_tournament_and_writes_grader_records(tmp_path: Path) -> None:
 def test_build_selector_config_clamps_count_fields() -> None:
     args = argparse.Namespace(
         selector_mode="llm_stratified_tournament",
+        selector_score_source="raw_verifier_mean",
         selector_max_candidate_chars=1,
         selector_thinking_budget_tokens=56_000,
         selection_temperature=0.3,
@@ -170,6 +180,7 @@ def test_build_selector_config_clamps_count_fields() -> None:
     )
     config = build_selector_config(args)
     assert config.selector_max_candidate_chars == 1_000
+    assert config.selector_score_source == "raw_verifier_mean"
     assert config.selector_thinking_budget_tokens == 56_000
     assert config.selector_tournament_group_size == 2
     assert config.selector_tournament_rounds == 1
