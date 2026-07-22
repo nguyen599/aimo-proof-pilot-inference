@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_REPO="${AIMO_SOURCE_REPO:-/tmp/aimo-proof-pilot-inference-runtime/repo}"
+physical_rank="${GLOBAL_RANK:-${NODE_RANK:-}}"
+
+case "$physical_rank" in
+    2) logical_rank=0 ;;
+    3) logical_rank=1 ;;
+    *)
+        echo "Expected physical NII rank 2 or 3, got ${physical_rank:-unset}" >&2
+        exit 2
+        ;;
+esac
+
+export AIMO_RUN_ID="${AIMO_RUN_ID:-imo2025-p45-r4-adaptive-retention-selector-p36-2node-20260722}"
+export AIMO_SOURCE_REF="${AIMO_SOURCE_REF:-main}"
+export AIMO_NII_NODE_RANK="$logical_rank"
+export AIMO_WORLD_SIZE=2
+export MASTER_PORT="${MASTER_PORT:-29761}"
+export AIMO_INPUT_PATH="${AIMO_INPUT_PATH:-${SCRIPT_DIR}/../imo2025-p45-adaptive-round0-p36-sft750-20260722/input.jsonl}"
+export AIMO_MAX_CONCURRENT_PROBLEMS=2
+export AIMO_REQUESTS_PER_GPU=32
+export AIMO_MAX_NUM_SEQS_PER_DP=32
+export AIMO_PIPELINES_PER_PROBLEM=36
+export AIMO_PROOF_GENERATION_STRATEGY_PORTFOLIO=adaptive
+export AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING=0
+export AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING=0
+export AIMO_VERIFY_N=8
+export AIMO_VERIFIER_GENERALIST_N=4
+export AIMO_REFINE_REVIEW_N=4
+export AIMO_MIN_VALID_LOW=2
+export AIMO_REFINE_ROUNDS=4
+export AIMO_REFINEMENT_STRATEGY=mixed
+export AIMO_STRICT_PASS_CHALLENGE_ROUNDS=1
+export AIMO_SELECTOR_MODE=llm
+export AIMO_SELECTOR_CANDIDATE_LIMIT=8
+export AIMO_THINKING_BUDGET_HANDOFF_ENABLED=true
+export AIMO_PROOF_GENERATION_ONLY=false
+
+exec "${SOURCE_REPO}/scripts/launch_nii_imo2025_all.sh"

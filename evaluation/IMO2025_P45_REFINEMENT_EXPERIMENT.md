@@ -190,3 +190,19 @@ to `0.0` and `-0.3125`, respectively, so both improved proofs would be rolled
 back. Retention now compares the already meta-aware `final_score` directly;
 the small survived-shadow-challenge tiebreak remains. Meta challenges still
 drive critique selection, score weighting, hard caps, and later refinement.
+
+## Selector boundary audit
+
+The same round-zero candidate audit showed that the selector's strict
+`final_score > 0.5` boundary was too aggressive. For P4, two of the three
+externally best proofs (`5/7`) had internal score exactly `0.5`; P5 also had a
+best-scoring proof at that boundary. If any other proof later rose above the
+threshold, those boundary proofs would disappear from the LLM comparison.
+
+The selector pool now includes `final_score == 0.5`. An opt-in
+`--selector-candidate-limit` ranks the eligible pool by internal score, keeps
+the requested top K, and restores original attempt order before constructing
+selector IDs. On the measured round-zero data, top eight retained the maximum
+external grade for both P4 and P5 while reducing the comparison from 26 and 20
+graded candidates to eight. Use `--selector-candidate-limit 8` in the P4/P5
+four-round treatment; zero preserves the prior unlimited-pool behavior.

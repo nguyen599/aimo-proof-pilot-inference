@@ -582,6 +582,9 @@ class CFG:
     selection_temperature = 1.0
     selector_mode = "llm"  # llm, score
     selector_min_final_score = 0.5
+    selector_candidate_limit = int(
+        os.environ.get("AIMO_SELECTOR_CANDIDATE_LIMIT", "0")
+    )
 
     vllm_extra_args = default_vllm_extra_args()
     stream_interval = 100
@@ -797,6 +800,7 @@ class PipelineConfig:
     selection_temperature: float
     selector_mode: str
     selector_min_final_score: float
+    selector_candidate_limit: int
     proof_generation_strategy_portfolio: str = "baseline"
 
 
@@ -7259,11 +7263,24 @@ def candidate_selection_pool(
     eligible_candidates = [
         candidate
         for candidate in candidates
-        if score_sort_value(candidate) > cfg.selector_min_final_score
+        if score_sort_value(candidate) >= cfg.selector_min_final_score
     ]
-    if eligible_candidates:
-        return eligible_candidates, True
-    return candidates, False
+    threshold_passed = bool(eligible_candidates)
+    selection_pool = eligible_candidates or candidates
+    candidate_limit = max(0, int(cfg.selector_candidate_limit))
+    if candidate_limit and len(selection_pool) > candidate_limit:
+        ranked_indices = sorted(
+            range(len(selection_pool)),
+            key=lambda idx: (
+                score_sort_value(selection_pool[idx]),
+                len(str(selection_pool[idx].get("proof_solution") or "")),
+            ),
+            reverse=True,
+        )[:candidate_limit]
+        selection_pool = [
+            selection_pool[idx] for idx in sorted(ranked_indices)
+        ]
+    return selection_pool, threshold_passed
 
 
 def load_simple_input(input_csv: Path) -> tuple[pd.DataFrame, str, Optional[str]]:
@@ -7371,6 +7388,7 @@ class ProofRuntime:
         selection_temperature: float,
         selector_mode: str,
         selector_min_final_score: float,
+        selector_candidate_limit: int,
         vllm_extra_args: str,
         stream_interval: int,
         host: str,
@@ -7620,6 +7638,7 @@ class ProofRuntime:
             selection_temperature=selection_temperature,
             selector_mode=normalized_selector_mode,
             selector_min_final_score=float(selector_min_final_score),
+            selector_candidate_limit=max(0, int(selector_candidate_limit)),
             proof_generation_strategy_portfolio=(
                 normalized_proof_generation_strategy_portfolio
             ),
@@ -8268,6 +8287,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--problem-timeout-seconds", type=int)
     pipeline.add_argument("--selection-reserve-seconds", type=int)
     pipeline.add_argument("--selector-mode", choices=("llm", "score"))
+    pipeline.add_argument("--selector-candidate-limit", type=int)
     pipeline.add_argument("--temperature", type=float)
     pipeline.add_argument("--top-p", type=float)
     pipeline.add_argument("--top-k", type=int)
@@ -8387,6 +8407,7 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "problem_timeout_seconds": "problem_timeout_seconds",
         "selection_reserve_seconds": "selection_reserve_seconds",
         "selector_mode": "selector_mode",
+        "selector_candidate_limit": "selector_candidate_limit",
         "temperature": "temperature",
         "top_p": "top_p",
         "top_k": "top_k",
@@ -8606,6 +8627,7 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.strict_pass_challenge_rounds
             ),
             "selector_mode": str(cfg.selector_mode),
+            "selector_candidate_limit": int(cfg.selector_candidate_limit),
             "temperature": float(cfg.temperature),
             "top_p": float(cfg.top_p),
             "top_k": int(cfg.top_k),
@@ -8856,6 +8878,7 @@ def run(cfg: type[CFG] = CFG) -> None:
             selection_temperature=cfg.selection_temperature,
             selector_mode=cfg.selector_mode,
             selector_min_final_score=cfg.selector_min_final_score,
+            selector_candidate_limit=cfg.selector_candidate_limit,
             vllm_extra_args=cfg.vllm_extra_args,
             stream_interval=cfg.stream_interval,
             host=cfg.host,

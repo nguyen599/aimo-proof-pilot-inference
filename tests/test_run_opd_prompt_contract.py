@@ -54,6 +54,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             verify_candidate_limit_while_generating=2,
             verify_request_limit_while_generating=8,
             refine_rounds=1,
+            selector_candidate_limit=0,
             proof_generation_strategy_portfolio="baseline",
         )
         args = run.build_cli_parser().parse_args(
@@ -76,6 +77,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "16",
                 "--refine-rounds",
                 "1",
+                "--selector-candidate-limit",
+                "8",
                 "--proof-generation-strategy-portfolio",
                 "diverse",
                 "--thinking-budget-refine-final-temperature",
@@ -113,6 +116,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.verify_candidate_limit_while_generating, 4)
         self.assertEqual(cfg.verify_request_limit_while_generating, 16)
         self.assertEqual(cfg.refine_rounds, 1)
+        self.assertEqual(cfg.selector_candidate_limit, 8)
         self.assertEqual(cfg.proof_generation_strategy_portfolio, "diverse")
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
         self.assertEqual(
@@ -659,6 +663,51 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertGreater(
             run.candidate_retention_score(survived_challenge),
             run.candidate_retention_score(baseline),
+        )
+
+    def test_selector_pool_includes_threshold_boundary(self):
+        candidates = [
+            {"attempt_idx": 0, "final_score": 0.49, "proof_solution": "low"},
+            {"attempt_idx": 1, "final_score": 0.5, "proof_solution": "boundary"},
+            {"attempt_idx": 2, "final_score": 0.75, "proof_solution": "high"},
+        ]
+        cfg = SimpleNamespace(
+            selector_min_final_score=0.5,
+            selector_candidate_limit=0,
+        )
+
+        selection_pool, threshold_passed = run.candidate_selection_pool(
+            candidates,
+            cfg,
+        )
+
+        self.assertTrue(threshold_passed)
+        self.assertEqual(
+            [candidate["attempt_idx"] for candidate in selection_pool],
+            [1, 2],
+        )
+
+    def test_selector_pool_caps_by_score_and_preserves_attempt_order(self):
+        candidates = [
+            {"attempt_idx": 0, "final_score": 0.8, "proof_solution": "a"},
+            {"attempt_idx": 1, "final_score": 0.6, "proof_solution": "bbbb"},
+            {"attempt_idx": 2, "final_score": 0.7, "proof_solution": "cc"},
+            {"attempt_idx": 3, "final_score": 0.9, "proof_solution": "d"},
+        ]
+        cfg = SimpleNamespace(
+            selector_min_final_score=0.5,
+            selector_candidate_limit=2,
+        )
+
+        selection_pool, threshold_passed = run.candidate_selection_pool(
+            candidates,
+            cfg,
+        )
+
+        self.assertTrue(threshold_passed)
+        self.assertEqual(
+            [candidate["attempt_idx"] for candidate in selection_pool],
+            [0, 3],
         )
 
     def test_validated_critique_preserves_requested_fix(self):
