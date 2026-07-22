@@ -3,7 +3,11 @@
 ## Evidence
 
 The teammate `feature/tournament-selector` branch and the merged
-`AIMO-Proof-Pilot` main branch report three relevant results on IMO 2026:
+`AIMO-Proof-Pilot` main branch report three relevant results on IMO 2026. The
+complete four-round grading table is in
+`imo-inference/evaluation/GRADING_FINDINGS.md`; the separately documented 2x
+checkpoint run in `imo-inference/evaluation/EXPERIMENTS.md` stopped early and
+must not be treated as a complete A/B:
 
 - the OPD step-225 and deploy checkpoints are statistically tied in the graded
   four-round setting (`18.19` versus `18.16` total);
@@ -74,6 +78,11 @@ The teammate result does **not** establish that its checkpoint is better for our
 IMO 2025 P4/P5 workload. Its checkpoint comparison used different problems, and
 the reported deploy/step-225 difference was within grader noise. Search width,
 checkpoint, and selection must remain separate factors.
+
+The interrupted 2x A/B is weaker evidence still: deploy and step-225 tied on
+the shared completed P1/P2 subset, while only step-225 completed P3 and that
+answer was wrong. The README recommendation to use step-225 therefore does not
+replace the same-input checkpoint gate below.
 
 Multi-parent refinement is also deferred from the first treatment. Adding it at
 the same time would change candidate ancestry, verifier inputs, request volume,
