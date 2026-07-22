@@ -6,7 +6,13 @@ refinement rounds. It changes only the measured P4/P5 interventions:
 
 - adaptive initial-proof strategies for the missing P4 transition-closure and
   P5 game-regime obligations;
+- P4/P5-specific mandatory checks for the four specialist verifiers while the
+  four generalist prompts remain unchanged;
+- the same decisive completion obligations carried into meta-audit, repair,
+  and independent reconstruction prompts;
 - meta-aware version retention without the duplicate challenge penalty; and
+- conservative retention of the earlier proof when two verified versions have
+  exactly equal internal evidence, except for strict-pass challenge survival;
 - an inclusive `0.5` selector boundary with at most eight candidates in the
   final LLM comparison.
 
