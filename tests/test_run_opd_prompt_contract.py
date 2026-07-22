@@ -931,6 +931,22 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("psi(70)=35+14+10=59", user_prompt)
         self.assertIn("x/(2p) outranks x/q", user_prompt)
         self.assertIn("odd multiples of 3", user_prompt)
+        self.assertIn("x=2^e m", user_prompt)
+        self.assertIn("e=1", user_prompt)
+        self.assertIn("e=2", user_prompt)
+        self.assertIn("e>=3", user_prompt)
+        self.assertIn("psi(x) is never divisible by 6", user_prompt)
+
+    def test_p4_orbit_strategy_requires_closed_nonmultiple_of_six_descent(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Determine all possible initial terms.",
+            planning_strategy="p4_orbit_normal_form",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("split e=1, e=2, and e>=3", user_prompt)
+        self.assertIn("psi(x) is still outside 6Z", user_prompt)
+        self.assertIn("not merely smaller", user_prompt)
 
     def test_p5_threshold_strategy_requires_arbitrary_play_and_boundary(self):
         messages = run.build_opd_proof_generation_prompt(

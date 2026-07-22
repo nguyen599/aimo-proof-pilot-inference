@@ -99,7 +99,12 @@ The P4 treatment follows the complete proof architecture: establish
 divisibility using backward implications and a closed descent argument,
 classify all transitions on multiples of six, eliminate the parity-breaking
 branch, and prove the growth branch occurs only finitely often before deriving
-and checking the initial-value parameterization. The P5 treatment pairs moves:
+and checking the initial-value parameterization. Its backward-divisibility and
+orbit-normal-form slots now spell out the missing closure proof for
+`N=2^e m`, `3` not dividing `m`: split `e=1`, `e=2`, and `e>=3`, then use
+parity or the three reciprocal denominators modulo `3` to prove that the image
+remains outside the multiples of six as well as decreases. All three externally
+graded `5/7` P4 proofs omitted exactly this invariant. The P5 treatment pairs moves:
 Cauchy--Schwarz controls arbitrary even moves for Alice, while Bazza fills each
 pair's remaining square budget and tracks the resulting linear slack. The
 Alice-specific slots now state the sharp spike calculation explicitly. If
