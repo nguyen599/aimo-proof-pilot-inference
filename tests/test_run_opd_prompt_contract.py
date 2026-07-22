@@ -70,6 +70,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("--selector-tournament-max-candidates", launcher)
         self.assertIn("--selector-tournament-threshold", launcher)
         self.assertIn("--selector-tournament-force-wide-pool", launcher)
+        self.assertIn("--selector-score-source", launcher)
         self.assertIn("--selector-max-new-tokens", launcher)
         self.assertIn("--selector-thinking-budget-tokens", launcher)
         self.assertIn("--selector-score-window", launcher)

@@ -29,6 +29,7 @@ PROOF_GENERATION_ONLY="${AIMO_PROOF_GENERATION_ONLY:-false}"
 PROOF_GENERATION_STRATEGY_PORTFOLIO="${AIMO_PROOF_GENERATION_STRATEGY_PORTFOLIO:-baseline}"
 THINKING_BUDGET_HANDOFF_ENABLED="${AIMO_THINKING_BUDGET_HANDOFF_ENABLED:-true}"
 SELECTOR_MODE="${AIMO_SELECTOR_MODE:-llm}"
+SELECTOR_SCORE_SOURCE="${AIMO_SELECTOR_SCORE_SOURCE:-final_score}"
 SELECTOR_MAX_NEW_TOKENS="${AIMO_SELECTOR_MAX_NEW_TOKENS:-50000}"
 SELECTOR_THINKING_BUDGET_TOKENS="${AIMO_SELECTOR_THINKING_BUDGET_TOKENS:-0}"
 SELECTOR_CANDIDATE_LIMIT="${AIMO_SELECTOR_CANDIDATE_LIMIT:-0}"
@@ -102,6 +103,11 @@ if [ "$SELECTOR_MODE" != "llm" ] && \
    [ "$SELECTOR_MODE" != "llm_stratified_tournament" ] && \
    [ "$SELECTOR_MODE" != "score" ]; then
     echo "SELECTOR_MODE must be llm, llm_tournament, llm_stratified_tournament, or score, got $SELECTOR_MODE" >&2
+    exit 2
+fi
+if [ "$SELECTOR_SCORE_SOURCE" != "final_score" ] && \
+   [ "$SELECTOR_SCORE_SOURCE" != "raw_verifier_mean" ]; then
+    echo "SELECTOR_SCORE_SOURCE must be final_score or raw_verifier_mean, got $SELECTOR_SCORE_SOURCE" >&2
     exit 2
 fi
 case "$PROOF_GENERATION_STRATEGY_PORTFOLIO" in
@@ -392,6 +398,7 @@ args=(
     --refinement-strategy "$REFINEMENT_STRATEGY"
     --strict-pass-challenge-rounds "$STRICT_PASS_CHALLENGE_ROUNDS"
     --selector-mode "$SELECTOR_MODE"
+    --selector-score-source "$SELECTOR_SCORE_SOURCE"
     --selector-max-new-tokens "$SELECTOR_MAX_NEW_TOKENS"
     --selector-thinking-budget-tokens "$SELECTOR_THINKING_BUDGET_TOKENS"
     --selector-candidate-limit "$SELECTOR_CANDIDATE_LIMIT"
@@ -441,7 +448,7 @@ echo "source_commit=$AIMO_SOURCE_COMMIT"
 echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
 echo "vllm_capacity=gpus:${GPUS} tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((NUM_GPUS * REQUESTS_PER_GPU))"
-echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_max_new_tokens:${SELECTOR_MAX_NEW_TOKENS} selector_thinking_budget_tokens:${SELECTOR_THINKING_BUDGET_TOKENS} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_tournament_rounds:${SELECTOR_TOURNAMENT_ROUNDS} selector_tournament_max_candidates:${SELECTOR_TOURNAMENT_MAX_CANDIDATES} selector_tournament_threshold:${SELECTOR_TOURNAMENT_THRESHOLD} selector_tournament_force_wide_pool:${SELECTOR_TOURNAMENT_FORCE_WIDE_POOL} selector_score_window:${SELECTOR_SCORE_WINDOW} selector_vote_count:${SELECTOR_VOTE_COUNT} selector_temperature:${SELECTION_TEMPERATURE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
+echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_score_source:${SELECTOR_SCORE_SOURCE} selector_max_new_tokens:${SELECTOR_MAX_NEW_TOKENS} selector_thinking_budget_tokens:${SELECTOR_THINKING_BUDGET_TOKENS} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_tournament_rounds:${SELECTOR_TOURNAMENT_ROUNDS} selector_tournament_max_candidates:${SELECTOR_TOURNAMENT_MAX_CANDIDATES} selector_tournament_threshold:${SELECTOR_TOURNAMENT_THRESHOLD} selector_tournament_force_wide_pool:${SELECTOR_TOURNAMENT_FORCE_WIDE_POOL} selector_score_window:${SELECTOR_SCORE_WINDOW} selector_vote_count:${SELECTOR_VOTE_COUNT} selector_temperature:${SELECTION_TEMPERATURE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
 echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"
 echo "command_file=$rank_command"
