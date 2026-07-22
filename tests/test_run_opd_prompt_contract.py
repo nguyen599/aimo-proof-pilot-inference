@@ -941,7 +941,32 @@ class RunOpdPromptContractTests(unittest.TestCase):
 
         self.assertIn("arbitrary even moves", user_prompt)
         self.assertIn("sqrt(2-t^2)", user_prompt)
-        self.assertIn("non-losing strategy for each player", user_prompt)
+        self.assertIn("Q+t^2>=A^2/K", user_prompt)
+        self.assertIn("lambda^2(2K-1)^2>2K^2", user_prompt)
+        self.assertIn("Alice's all-zero strategy", user_prompt)
+        self.assertIn("Bazza's pair-filling strategy", user_prompt)
+
+    def test_p5_alice_strategy_states_history_independent_spike_bound(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Classify the winner in the game.",
+            planning_strategy="p5_alice_cauchy_spike",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("S<=(K-1)sqrt(2)<A", user_prompt)
+        self.assertIn("Q+t^2>=A^2/K", user_prompt)
+        self.assertIn("lambda^2(2K-1)^2>2K^2", user_prompt)
+
+    def test_p5_bazza_strategy_requires_two_universal_equality_defenses(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Classify the winner in the game.",
+            planning_strategy="p5_bazza_pairing",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("Alice's all-zero", user_prompt)
+        self.assertIn("Bazza's pair-filling", user_prompt)
+        self.assertIn("one cooperative play", user_prompt)
 
     def test_invalid_proof_strategy_portfolio_is_rejected(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="unknown")

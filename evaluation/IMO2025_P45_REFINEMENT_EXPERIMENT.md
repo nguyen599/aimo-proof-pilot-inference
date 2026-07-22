@@ -101,10 +101,16 @@ classify all transitions on multiples of six, eliminate the parity-breaking
 branch, and prove the growth branch occurs only finitely often before deriving
 and checking the initial-value parameterization. The P5 treatment pairs moves:
 Cauchy--Schwarz controls arbitrary even moves for Alice, while Bazza fills each
-pair's remaining square budget and tracks the resulting linear slack. It also
-requires both non-losing strategies at equality. These are private planning
-instructions; the trained XML output contract is unchanged. `baseline` and
-`diverse` retain their previous behavior.
+pair's remaining square budget and tracks the resulting linear slack. The
+Alice-specific slots now state the sharp spike calculation explicitly. If
+`S,Q` are the sum and square-sum of Bazza's first `K-1` moves and
+`A=lambda(2K-1)`, Alice plays `t=A-S`; Cauchy--Schwarz gives
+`Q+t^2 >= A^2/K`, which exceeds `2K` for a sufficiently large `K` exactly
+when `lambda>sqrt(2)/2`. This closes the arbitrary-history gap responsible for
+the best round-zero P5 proofs stopping at `3/7`. The treatment also requires
+separate universal non-losing strategies at equality. These are private
+planning instructions; the trained XML output contract is unchanged.
+`baseline` and `diverse` retain their previous behavior.
 
 The next controlled comparison should use:
 
