@@ -21,25 +21,9 @@ if [ ! -f "$SOURCE_INPUT" ]; then
 fi
 
 mkdir -p "$INPUT_DIR"
-"$VENV/bin/python" - "$SOURCE_INPUT" "$P45_INPUT" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1])
-destination = Path(sys.argv[2])
-rows = [json.loads(line) for line in source.read_text().splitlines() if line.strip()]
-selected = [row for row in rows if str(row.get("problem_idx")) in {"4", "5"}]
-if [str(row.get("problem_idx")) for row in selected] != ["4", "5"]:
-    raise SystemExit("IMO 2026 input must contain exactly problems 4 and 5 in order")
-temporary = destination.with_suffix(f"{destination.suffix}.tmp.{os.getpid()}")
-temporary.write_text(
-    "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in selected),
-    encoding="utf-8",
-)
-temporary.replace(destination)
-PY
+"$VENV/bin/python" "$SOURCE_REPO/evaluation/prepare_imo2026_p45.py" \
+    --input "$SOURCE_INPUT" \
+    --jsonl-output "$P45_INPUT"
 
 export AIMO_NII_NODE_RANK=0
 export AIMO_WORLD_SIZE=1

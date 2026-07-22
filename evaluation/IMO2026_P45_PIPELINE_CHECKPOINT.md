@@ -111,7 +111,10 @@ The reproducible one-node launcher is
 `scripts/launch_nii_imo2026_p45_gate_a.sh`. Its defaults reserve GPUs 4-7,
 use TP2/DP2, run 64 baseline candidates for each of P4 and P5 concurrently,
 and disable handoff, verification, refinement, and LLM selection. Set a unique
-`AIMO_RUN_ID` before invoking it.
+`AIMO_RUN_ID` before invoking it. `prepare_imo2026_p45.py` now writes a
+sanitized runtime input containing only `problem_idx` and `problem`; reference
+solutions, grading schemes, points, and other source metadata never enter the
+generation runtime.
 
 ### Gate B: four-round topology
 
@@ -132,6 +135,26 @@ number of verifier calls, and the same external grader. Report, per round:
 
 This separates generation, verifier/refinement retention, and selector loss.
 
+An end-to-end teammate-pipeline treatment launcher is available at
+`scripts/launch_nii_imo2026_p45_teammate_treatment.sh`. It pins teammate commit
+`95a35c66eda41184b846a8489314b9e8f8f43b32`, points it at our SFT-750 target,
+and defaults to:
+
+- 64 proofs and eight verifier calls per proof in each round;
+- a cumulative top-16 parent pool;
+- four stratified parents and up to three random non-ideal reviews per refine
+  call;
+- exactly four rounds (the schema-valid early-stop threshold of `1.0` cannot
+  be exceeded by the verifier score);
+- the raw-verifier-mean saturation-gated 64-ballot tournament; and
+- sanitized P4/P5 CSV input with no answer-bearing columns.
+
+This native treatment uses the teammate's patched SGLang BF16+DFlash serving
+stack, while Gate A and our current control use vLLM with online FP8 target
+weights. Its final score therefore measures the complete teammate pipeline,
+not a refinement-only causal effect. A later strict A/B must replay the same
+stored initial pool through both refinement/selector implementations.
+
 ## Next code step
 
 The teammate-compatible selector score source is implemented and covered by
@@ -150,6 +173,9 @@ The checkpointed implementation is split into focused commits:
 - `ed2c637`: forward the selector score source through the shared NII launcher;
   and
 - `abf0cfc`: add the clean IMO 2026 P4/P5 Gate A launcher.
+
+The follow-up treatment work adds answer-free input preparation plus the
+pinned teammate-pipeline launcher and its schema-tested config builder.
 
 The selector changes passed the focused runtime, replay, and distributed-config
 tests. Existing `final_score` behavior remains the default; teammate-compatible
