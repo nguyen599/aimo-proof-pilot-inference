@@ -8675,6 +8675,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--selector-mode", choices=("llm", "score"))
     pipeline.add_argument("--selector-candidate-limit", type=int)
     pipeline.add_argument("--selector-historical-candidate-limit", type=int)
+    pipeline.add_argument("--selector-min-final-score", type=float)
     pipeline.add_argument("--temperature", type=float)
     pipeline.add_argument("--top-p", type=float)
     pipeline.add_argument("--top-k", type=int)
@@ -8798,6 +8799,7 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "selector_historical_candidate_limit": (
             "selector_historical_candidate_limit"
         ),
+        "selector_min_final_score": "selector_min_final_score",
         "temperature": "temperature",
         "top_p": "top_p",
         "top_k": "top_k",

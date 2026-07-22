@@ -44,6 +44,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
     def test_nii_launcher_accepts_adaptive_proof_portfolio(self):
         launcher = (REPO / "scripts" / "launch_nii_imo2025_all.sh").read_text()
         self.assertIn("baseline|diverse|adaptive", launcher)
+        self.assertIn("--selector-historical-candidate-limit", launcher)
+        self.assertIn("--selector-min-final-score", launcher)
 
     def test_cli_overrides_cfg_and_distributed_environment(self):
         cfg = SimpleNamespace(
@@ -82,6 +84,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "8",
                 "--selector-historical-candidate-limit",
                 "2",
+                "--selector-min-final-score",
+                "0.25",
                 "--proof-generation-strategy-portfolio",
                 "diverse",
                 "--thinking-budget-refine-final-temperature",
@@ -121,6 +125,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.refine_rounds, 1)
         self.assertEqual(cfg.selector_candidate_limit, 8)
         self.assertEqual(cfg.selector_historical_candidate_limit, 2)
+        self.assertEqual(cfg.selector_min_final_score, 0.25)
         self.assertEqual(cfg.proof_generation_strategy_portfolio, "diverse")
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
         self.assertEqual(
