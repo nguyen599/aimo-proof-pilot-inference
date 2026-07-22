@@ -755,6 +755,32 @@ class RunOpdPromptContractTests(unittest.TestCase):
             run.should_replace_retained_candidate(improved, earlier)
         )
 
+    def test_aggregation_preserves_score_before_validated_low_cap(self):
+        verifier_results = [
+            {
+                "verifier_index": idx,
+                "verifier_group": "generalist" if idx < 2 else "specialist",
+                "score": score,
+                "evaluation": "review",
+            }
+            for idx, score in enumerate((1.0, 0.5, 1.0, 0.5))
+        ]
+        meta_results = {
+            1: [{"score": 1.0}],
+            3: [{"score": 1.0}],
+        }
+
+        aggregation = run.aggregate_proof_label(
+            verifier_results,
+            meta_results,
+            min_valid_low=2,
+            meta_n=1,
+        )
+
+        self.assertEqual(aggregation["pre_cap_score"], 0.55)
+        self.assertEqual(aggregation["final_score"], 0.5)
+        self.assertTrue(aggregation["validated_low_score_cap_applied"])
+
     def test_retention_allows_equal_score_after_strict_pass_challenge(self):
         earlier = {"final_score": 1.0}
         challenged = {
@@ -810,6 +836,35 @@ class RunOpdPromptContractTests(unittest.TestCase):
             [candidate["attempt_idx"] for candidate in selection_pool],
             [0, 3],
         )
+
+    def test_selector_pool_uses_pre_cap_score_to_break_safety_score_ties(self):
+        candidates = [
+            {
+                "attempt_idx": 0,
+                "final_score": 0.5,
+                "pre_cap_score": 0.6,
+                "proof_solution": "a much longer capped proof",
+            },
+            {
+                "attempt_idx": 1,
+                "final_score": 0.5,
+                "pre_cap_score": 0.9,
+                "proof_solution": "short",
+            },
+        ]
+        cfg = SimpleNamespace(
+            selector_min_final_score=0.5,
+            selector_candidate_limit=1,
+        )
+
+        selection_pool, threshold_passed = run.candidate_selection_pool(
+            candidates,
+            cfg,
+        )
+
+        self.assertTrue(threshold_passed)
+        self.assertEqual(selection_pool[0]["attempt_idx"], 1)
+        self.assertEqual(run.fallback_candidate_index(candidates), 1)
 
     def test_selector_pool_reserves_slots_for_historical_versions(self):
         candidates = [
@@ -887,6 +942,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             {"self_evaluation": "sound", "self_score": 1.0},
             {
                 "final_score": 0.75,
+                "pre_cap_score": 0.875,
                 "final_status": "weighted_score_pass",
                 "verifier_score_summaries": [
                     {
@@ -910,6 +966,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot["selected_verification_round"], 1)
+        self.assertEqual(snapshot["pre_cap_score"], 0.875)
         self.assertEqual(snapshot["meta_valid_count"], 1)
         self.assertEqual(
             snapshot["verifier_score_summaries"][0]["weighted_score"],

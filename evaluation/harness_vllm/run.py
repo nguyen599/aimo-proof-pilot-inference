@@ -3416,6 +3416,7 @@ def aggregate_proof_label(
             sum(weighted_scores) / len(weighted_scores) if weighted_scores else None
         )
         aggregation_mode = "flat_verifier_mean"
+    pre_cap_score = final_score
     validated_fatal_critiques = [
         critique
         for critique in validated_critiques
@@ -3454,6 +3455,7 @@ def aggregate_proof_label(
 
     return {
         "final_score": final_score,
+        "pre_cap_score": pre_cap_score,
         "final_status": final_status,
         "validated_critiques": validated_critiques,
         "validated_fatal_critiques": validated_fatal_critiques,
@@ -3525,6 +3527,9 @@ def snapshot_verified_candidate_version(
         "self_evaluation": parsed.get("self_evaluation"),
         "self_score": parsed.get("self_score"),
         "final_score": aggregation.get("final_score"),
+        "pre_cap_score": aggregation.get(
+            "pre_cap_score", aggregation.get("final_score")
+        ),
         "final_status": aggregation.get("final_status"),
         "verifier_score_summaries": compact_verifier_summaries,
         "verifier_group_scores": aggregation.get("verifier_group_scores", {}),
@@ -4897,6 +4902,25 @@ def score_sort_value(candidate: dict[str, Any]) -> float:
         return float(score)
     except (TypeError, ValueError):
         return -1.0
+
+
+def pre_cap_score_sort_value(candidate: dict[str, Any]) -> float:
+    score = candidate.get("pre_cap_score", candidate.get("final_score"))
+    if score is None:
+        return -1.0
+    try:
+        return float(score)
+    except (TypeError, ValueError):
+        return -1.0
+
+
+def selector_sort_key(candidate: dict[str, Any]) -> tuple[float, float, int]:
+    """Keep safety score primary while resolving cap-induced ties."""
+    return (
+        score_sort_value(candidate),
+        pre_cap_score_sort_value(candidate),
+        len(str(candidate.get("proof_solution") or "")),
+    )
 
 
 def should_run_meta_verification(verifier: dict[str, Any], cfg: PipelineConfig) -> bool:
@@ -6728,6 +6752,9 @@ async def run_single_attempt(
             "verifier_score_summaries", []
         ),
         "final_score": final_aggregation.get("final_score"),
+        "pre_cap_score": final_aggregation.get(
+            "pre_cap_score", final_aggregation.get("final_score")
+        ),
         "final_status": final_aggregation.get("final_status"),
         "low_scores_seen": final_aggregation.get("low_scores_seen"),
         "strict_pass": final_aggregation.get("strict_pass", False),
@@ -7506,10 +7533,7 @@ def run_async(
 def fallback_candidate_index(candidates: list[dict[str, Any]]) -> int:
     return max(
         range(len(candidates)),
-        key=lambda idx: (
-            score_sort_value(candidates[idx]),
-            len(str(candidates[idx].get("proof_solution") or "")),
-        ),
+        key=lambda idx: selector_sort_key(candidates[idx]),
     )
 
 
@@ -7555,10 +7579,7 @@ def candidate_selection_pool(
         if candidate_limit and len(selection_pool) > candidate_limit:
             ranked_indices = sorted(
                 range(len(selection_pool)),
-                key=lambda idx: (
-                    score_sort_value(selection_pool[idx]),
-                    len(str(selection_pool[idx].get("proof_solution") or "")),
-                ),
+                key=lambda idx: selector_sort_key(selection_pool[idx]),
                 reverse=True,
             )[:candidate_limit]
             selection_pool = [
@@ -7590,8 +7611,7 @@ def candidate_selection_pool(
 
     historical_candidates.sort(
         key=lambda candidate: (
-            score_sort_value(candidate),
-            len(str(candidate.get("proof_solution") or "")),
+            *selector_sort_key(candidate),
             -int(candidate.get("attempt_idx") or 0),
             -int(candidate.get("selector_version_round") or 0),
         ),
@@ -7623,10 +7643,7 @@ def candidate_selection_pool(
     if current_limit and len(current_pool) > current_limit:
         ranked_indices = sorted(
             range(len(current_pool)),
-            key=lambda idx: (
-                score_sort_value(current_pool[idx]),
-                len(str(current_pool[idx].get("proof_solution") or "")),
-            ),
+            key=lambda idx: selector_sort_key(current_pool[idx]),
             reverse=True,
         )[:current_limit]
         current_pool = [
