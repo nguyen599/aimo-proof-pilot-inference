@@ -141,6 +141,27 @@ independent-lineage pipeline remains available as the control. Before spending
 on a four-round run, replay both selector score sources on an identical stored
 candidate pool and run Gate A on clean 64-proof P4/P5 pools.
 
+## Reproducibility map
+
+The checkpointed implementation is split into focused commits:
+
+- `bf5b70e`: add the opt-in raw-verifier-mean selector score source;
+- `7ab62a7`: preserve verifier score summaries for lossless offline replay;
+- `ed2c637`: forward the selector score source through the shared NII launcher;
+  and
+- `abf0cfc`: add the clean IMO 2026 P4/P5 Gate A launcher.
+
+The selector changes passed the focused runtime, replay, and distributed-config
+tests. Existing `final_score` behavior remains the default; teammate-compatible
+semantics require explicitly selecting `raw_verifier_mean`.
+
+For NII control-panel work, never run a broad shared-filesystem traversal such
+as `find /tmp ...` in the foreground. It can occupy the node's serialized relay
+queue and delay every later command. Long scans and inference launches must be
+backgrounded with dedicated log, PID, and status files. Before cleanup, inspect
+the exact PID and command line and target only the intended run; do not stop the
+entrypoint, relay daemon, or another user's vLLM workers.
+
 ## NII snapshot
 
 At the 2026-07-22 check, only the assigned Nguyen relay node was considered for
@@ -154,3 +175,6 @@ filesystem included:
 - `/tmp/models/dflash-32b-draft-v2test-phaseL`.
 
 Node state is transient and must be rechecked immediately before launch.
+The last relay session may also have had a foreground `/tmp` scan still ahead
+of later commands in its queue. Check command history before submitting Gate A;
+do not assume a delayed command was lost and submit duplicate launches.
