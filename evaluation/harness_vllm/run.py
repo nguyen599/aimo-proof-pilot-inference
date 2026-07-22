@@ -229,7 +229,10 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
         "exhaustive smallest-divisor and parity cases that divisibility of psi(x) "
         "by 2, and then by 6, forces the corresponding divisibility of x. Combine "
         "those implications with a genuinely closed strict-descent argument for "
-        "odd states and for even states not divisible by 3. A single inequality "
+        "odd states, including odd multiples of 3, and for even states not "
+        "divisible by 3. Explicitly test x=70: its three smallest nontrivial "
+        "divisors are 2, 5, and 7, so psi(70)=35+14+10=59; do not assume that "
+        "x/(2p) outranks x/q for the next odd prime divisor q. A single inequality "
         "psi(x)<x is not enough unless the same state class is proved to persist. "
         "Complete both necessity and sufficiency of the final classification."
     ),
@@ -245,7 +248,8 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
     "p4_orbit_normal_form": (
         "For this specific divisor iteration, seek a complete orbit normal form. "
         "Prove every term is divisible by 6 using backward divisibility plus closed "
-        "descent. On multiples of 6, derive and eliminate every transition except "
+        "descent that covers odd multiples of 3 and survives the x=70 divisor-order "
+        "test. On multiples of 6, derive and eliminate every transition except "
         "the 13/12 step and the fixed step; prove there are only finitely many "
         "13/12 steps. Work backward from the eventual fixed term to obtain an "
         "explicit parameterization of every initial value, and then verify that "

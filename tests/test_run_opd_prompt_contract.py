@@ -916,8 +916,21 @@ class RunOpdPromptContractTests(unittest.TestCase):
         user_prompt = messages[-1]["content"]
 
         self.assertIn("backward divisibility", user_prompt)
+        self.assertIn("x=70", user_prompt)
+        self.assertIn("odd multiples of 3", user_prompt)
         self.assertIn("only finitely many", user_prompt)
         self.assertIn("verify that each parameterized value", user_prompt)
+
+    def test_p4_backward_strategy_rejects_false_divisor_ordering(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Determine all possible initial terms.",
+            planning_strategy="p4_backward_divisibility",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("psi(70)=35+14+10=59", user_prompt)
+        self.assertIn("x/(2p) outranks x/q", user_prompt)
+        self.assertIn("odd multiples of 3", user_prompt)
 
     def test_p5_threshold_strategy_requires_arbitrary_play_and_boundary(self):
         messages = run.build_opd_proof_generation_prompt(

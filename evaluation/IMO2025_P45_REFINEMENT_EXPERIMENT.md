@@ -206,3 +206,11 @@ selector IDs. On the measured round-zero data, top eight retained the maximum
 external grade for both P4 and P5 while reducing the comparison from 26 and 20
 graded candidates to eight. Use `--selector-candidate-limit 8` in the P4/P5
 four-round treatment; zero preserves the prior unlimited-pool behavior.
+
+During the live four-round baseline, the P4 verifier found a recurrent concrete
+failure in the necessity argument: candidates assumed an incorrect ordering of
+the largest proper divisors when `v_2(N)=1`. For `N=70`, the three smallest
+nontrivial divisors are `2,5,7`, hence the next term is `35+14+10=59`, not the
+value obtained by automatically using `N/(2p)`. Other candidates omitted odd
+multiples of three from their descent lemma. The adaptive P4 backward and orbit
+prompts now require both checks before accepting a closed descent argument.
