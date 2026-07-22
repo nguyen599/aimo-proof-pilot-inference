@@ -166,24 +166,53 @@ candidate pool and run Gate A on clean 64-proof P4/P5 pools.
 
 ## Current execution status
 
-The code and launchers are ready, but **Gate A has not been launched yet**.
-There is therefore no new P4/P5 pool-quality result in this checkpoint. Do not
-start the four-round treatment until Gate A has produced 64 round-zero proofs
-for each problem and external grading has confirmed whether either pool contains
-a correct proof.
+Gate A is live on NII. Do not launch a duplicate job or start Gate B while it is
+running.
 
-The shared NII source checkout was still at `f0b094f` during the last preflight,
-while the required clean-treatment code is on `main` at `54eaee6`. This matters
-before entering the common launcher: `launch_nii_imo2026_p45_gate_a.sh` invokes
-`prepare_imo2026_p45.py` directly from the shared checkout. Update that checkout
-to current `origin/main` and verify `HEAD=54eaee6` (or newer) before launch.
+```text
+run_id=imo2026-p45-gatea-p64-sft750-clean-20260722T165802Z
+node=node3-hnode755
+gpus=4,5,6,7
+outer_pid=37948
+run_root=/tmp/aimo-proof-pilot-inference-launch/imo2026-p45-gatea-p64-sft750-clean-20260722T165802Z
+source_commit=8845196f32a59114eadb495b4fad20f3ebe0e389
+```
 
-After the Gate A wrapper enters `launch_nii_imo2025_all.sh`, source handling is
-run-local and reproducible: rank 0 fetches `AIMO_SOURCE_REF`, resolves
-`FETCH_HEAD`, and checks that exact commit out detached in the run-specific code
-directory. A stale shared checkout therefore cannot silently change the harness
-used by an already-started run, but it can prevent the P4/P5 wrapper and
-sanitizer from starting in the first place.
+The run uses the sanitized P4/P5 input, TP2/DP2, 32 sequences per DP replica
+(64 aggregate), request admission 128, 64 candidates per problem, and two
+concurrent problems. It is proof-generation-only: handoff, verification,
+refinement, and selection are disabled. The target model uses online FP8, the
+KV cache uses FP8, and DFlash is enabled. The visible generation ceiling is
+126,000 tokens per request.
+
+At the latest checkpoint poll, the outer process was alive, `/health` was up,
+and all four assigned H200s were active. The correct local-mode call directory
+contained 56 P4 files, no completed output markers, and no P5 files yet. Active
+P4 calls were around 20,000 tokens, with observed rates roughly 55-90 tokens/s.
+This is not a failure: the initial P4 tasks occupied the generation executor and
+P5 is queued. Let the run progress rather than restarting it. A future fairness
+improvement should interleave initial tasks across problems, but changing it is
+not part of this measurement.
+
+The harness selected local mode because `WORLD_SIZE=1`. Therefore, monitor the
+LLM calls here:
+
+```text
+<run_root>/repo/outputs/imo_2025_logs/llm_calls/{4,5}/cand_*_proof_gen_r0.txt
+```
+
+Do not use the empty distributed path under
+`/tmp/aimo-proof-pilot-inference-distributed/.../rank_0000/llm_calls` for this
+run. A call is complete only when its file contains `===== OUTPUT`. Gate A is
+ready for grading only after there are 128 completed calls, split 64 for P4 and
+64 for P5.
+
+The run checkout is intentionally pinned to `8845196`. New reporting support is
+on `main` at `6314e7e`; use the newer checkout after generation rather than
+changing the active run. `report_round0_proof_quality.py` now accepts the native
+IMO 2026 JSONL schema while retaining only the problem and grading scheme, and
+supports `--contest-label "IMO 2026"`. It discards reference solutions and
+other source metadata.
 
 ## Reproducibility map
 
@@ -194,9 +223,12 @@ The checkpointed implementation is split into focused commits:
 - `ed2c637`: forward the selector score source through the shared NII launcher;
 - `abf0cfc`: add the clean IMO 2026 P4/P5 Gate A launcher;
 - `795bf88`: expand this experiment checkpoint with teammate findings and the
-  fair-comparison design; and
+  fair-comparison design;
 - `54eaee6`: add answer-free P4/P5 input preparation, the pinned teammate
-  treatment launcher, its schema-tested config builder, and focused tests.
+  treatment launcher, its schema-tested config builder, and focused tests;
+- `8845196`: checkpoint the clean P4/P5 experiment and NII resume state; and
+- `6314e7e`: generalize the round-zero report for native IMO 2026 JSONL input
+  and contest labeling.
 
 The follow-up treatment work adds answer-free input preparation plus the
 pinned teammate-pipeline launcher and its schema-tested config builder.
@@ -214,11 +246,9 @@ entrypoint, relay daemon, or another user's vLLM workers.
 
 ## NII snapshot
 
-At the 2026-07-22 check, only the assigned Nguyen relay node was considered for
-new work: `node3-hnode755`. GPUs 4-7 were free. GPUs 0-3 still held orphaned
-vLLM workers from an earlier Nguyen-owned run, so no cleanup or launch should
-touch them without a fresh PID/command audit. Model paths visible on the shared
-filesystem included:
+At the 2026-07-22 launch, the Nguyen relay assigned `node3-hnode755`. Gate A now
+owns GPUs 4-7. GPUs 0-3 still hold unrelated vLLM workers and must not be
+touched. Relevant model paths visible on the shared filesystem are:
 
 - `/tmp/models/olmo3-opd-sft-750-vllm`;
 - `/tmp/chankhavu/models/opd-32b-bf16-step-225`; and
@@ -235,27 +265,38 @@ is delayed.
 
 The teammate treatment additionally requires
 `/tmp/chankhavu/venvs/infervenv/.runtime/activate-env.sh` and
-`/tmp/chankhavu/venvs/infervenv/bin/python`. Those exact paths were not yet
-verified in the last preflight, so check them before Gate B. The launcher pins
-the teammate implementation to
+`/tmp/chankhavu/venvs/infervenv/bin/python`. Both exact paths were verified in
+the launch preflight. Recheck them before Gate B because node state is
+transient. The launcher pins the teammate implementation to
 `95a35c66eda41184b846a8489314b9e8f8f43b32` and validates the checked-out commit
 before starting.
 
 ## Resume checklist
 
-1. Query the relay for the current Nguyen node mapping; do not assume
-   `node3-hnode755` is still assigned or online.
-2. Audit exact command lines and GPU ownership. Use only the assigned free GPUs;
-   do not stop entrypoint, relay, or unrelated vLLM processes.
-3. Update the shared source checkout to `origin/main` and verify commit
-   `54eaee6` or newer.
-4. Launch Gate A in the background with a unique `AIMO_RUN_ID`, PID file, log,
-   and status file. The clean default is GPUs 4-7, TP2/DP2, two concurrent
-   problems, and 64 proofs per problem.
-5. Wait for all 128 round-zero proof attempts, then externally grade every
-   structurally complete non-cutoff proof twice. Record eligibility, mean,
-   best-of-64, score distribution, and `7/7` count separately for P4 and P5.
-6. Proceed to the four-round teammate treatment only if Gate A demonstrates a
-   usable initial pool. Before that launch, verify the teammate runtime paths
-   above and keep the native SGLang/BF16 versus vLLM/online-FP8 serving-stack
-   confound explicit in the result.
+1. Query the relay for the current Nguyen node mapping and inspect the exact
+   Gate A PID before taking any action. Do not stop entrypoint, relay, workers
+   on GPUs 0-3, or another user's processes.
+2. Poll `<run_root>/submit.status`, `/health`, and the local-mode LLM-call
+   directory. Do not infer failure merely because P5 remains queued or the
+   distributed call directory is empty.
+3. Wait for exactly 64 completed P4 files and 64 completed P5 files. Preserve
+   the raw call files and logs before any cleanup.
+4. From code at `6314e7e` or newer, run `report_round0_proof_quality.py prepare`
+   with:
+
+   ```text
+   --rubrics-file imo-2026.jsonl --problem-ids 4 5
+   --expected-candidates 64 --strategy-portfolio baseline
+   --contest-label "IMO 2026"
+   ```
+
+5. Externally grade every eligible proof exactly twice with
+   `openai/gpt-5.6-sol`. Use the PINference base URL and `PRIME_API_KEY` from the
+   environment; never write the key into a config, relay command, log, or Git.
+   Use concurrency 8, high reasoning, 65,536 completion tokens, six retries,
+   and reject missing or errored attempts.
+6. Finalize the report and record eligible rate, mean, best-of-64, score
+   distribution, and `7/7` count separately for P4 and P5.
+7. Proceed to the four-round teammate treatment only if Gate A demonstrates a
+   usable initial pool. Keep the native SGLang/BF16 versus vLLM/online-FP8
+   serving-stack confound explicit in the result.
