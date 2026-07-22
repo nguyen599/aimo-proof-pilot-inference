@@ -3495,14 +3495,48 @@ def snapshot_verified_candidate_version(
     round_idx: int,
 ) -> dict[str, Any]:
     """Keep the compact fields needed to reconsider a verified proof later."""
+    compact_verifier_summaries = [
+        {
+            key: summary.get(key)
+            for key in (
+                "verifier_index",
+                "verifier_role",
+                "verifier_group",
+                "verifier_score",
+                "meta_scores",
+                "meta_factor",
+                "meta_source",
+                "weighted_score",
+            )
+        }
+        for summary in aggregation.get("verifier_score_summaries") or []
+    ]
     return {
         "proof_solution": proof,
         "self_evaluation": parsed.get("self_evaluation"),
         "self_score": parsed.get("self_score"),
         "final_score": aggregation.get("final_score"),
         "final_status": aggregation.get("final_status"),
+        "verifier_score_summaries": compact_verifier_summaries,
+        "verifier_group_scores": aggregation.get("verifier_group_scores", {}),
+        "aggregation_mode": aggregation.get("aggregation_mode"),
+        "low_scores_seen": aggregation.get("low_scores_seen", 0),
         "strict_pass": aggregation.get("strict_pass", False),
         "all_verifiers_passed": aggregation.get("all_verifiers_passed", False),
+        "meta_valid_count": aggregation.get("meta_valid_count", 0),
+        "meta_checked_count": aggregation.get("meta_checked_count", 0),
+        "meta_summary_by_verifier": aggregation.get(
+            "meta_summary_by_verifier", {}
+        ),
+        "validated_low_score_cap_applied": aggregation.get(
+            "validated_low_score_cap_applied", False
+        ),
+        "fatal_score_cap_applied": aggregation.get(
+            "fatal_score_cap_applied", False
+        ),
+        "strict_pass_challenge_survived": aggregation.get(
+            "strict_pass_challenge_survived", False
+        ),
         "selected_verification_round": round_idx,
     }
 

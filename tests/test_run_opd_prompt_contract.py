@@ -818,6 +818,14 @@ class RunOpdPromptContractTests(unittest.TestCase):
                         "final_score": 0.8,
                         "proof_solution": "earlier zero",
                         "selected_verification_round": 1,
+                        "verifier_score_summaries": [
+                            {
+                                "verifier_index": 0,
+                                "verifier_score": 1.0,
+                                "meta_factor": 1.0,
+                                "weighted_score": 1.0,
+                            }
+                        ],
                     }
                 ],
             },
@@ -862,7 +870,50 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertTrue(historical["selector_is_historical"])
         self.assertEqual(historical["selector_parent_attempt_idx"], 0)
         self.assertEqual(historical["selector_version_round"], 1)
+        self.assertEqual(
+            historical["verifier_score_summaries"][0]["verifier_score"],
+            1.0,
+        )
         self.assertNotIn("verified_versions", historical)
+
+    def test_verified_version_snapshot_keeps_compact_round_evidence(self):
+        snapshot = run.snapshot_verified_candidate_version(
+            "proof at round one",
+            {"self_evaluation": "sound", "self_score": 1.0},
+            {
+                "final_score": 0.75,
+                "final_status": "weighted_score_pass",
+                "verifier_score_summaries": [
+                    {
+                        "verifier_index": 2,
+                        "verifier_role": "dependency_lemma",
+                        "verifier_group": "specialist",
+                        "verifier_score": 1.0,
+                        "meta_scores": [0.5],
+                        "meta_factor": 0.5,
+                        "meta_source": "parsed_meta",
+                        "weighted_score": 0.5,
+                        "evaluation": "large critique text is intentionally omitted",
+                    }
+                ],
+                "verifier_group_scores": {"specialist": 0.5},
+                "aggregation_mode": "balanced_verifier_groups",
+                "meta_valid_count": 1,
+                "meta_checked_count": 1,
+            },
+            1,
+        )
+
+        self.assertEqual(snapshot["selected_verification_round"], 1)
+        self.assertEqual(snapshot["meta_valid_count"], 1)
+        self.assertEqual(
+            snapshot["verifier_score_summaries"][0]["weighted_score"],
+            0.5,
+        )
+        self.assertNotIn(
+            "evaluation",
+            snapshot["verifier_score_summaries"][0],
+        )
 
     def test_selector_history_is_disabled_by_default(self):
         candidate = {
