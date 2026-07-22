@@ -495,6 +495,24 @@ class RunOpdPromptContractTests(unittest.TestCase):
             "positive components about the solution", prompt
         )
 
+    def test_imo2025_meta_receives_problem_specific_completion_gate(self):
+        p5_question = (
+            "Alice and Bazza play the inekoalaty game depending on a positive "
+            "real number $\\lambda$. Determine both players' winning regimes."
+        )
+
+        prompt = run.build_deepseek_meta_verification_prompt(
+            p5_question,
+            "Candidate proof.",
+            "The proof is complete.",
+            audit_positive_verdicts=True,
+        )
+
+        self.assertIn("Problem-specific mandatory audit", prompt)
+        self.assertIn("arbitrary legal Bazza history", prompt)
+        self.assertIn("Q+t^2 >= A^2/K", prompt)
+        self.assertIn("cooperative infinite play", prompt)
+
     def test_verifier_reaudits_prior_validated_critiques(self):
         messages = run.build_opd_proof_verification_prompt(
             "Problem.",
@@ -1269,6 +1287,61 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("Minor gap.", user)
         self.assertIn("Fill it.", user)
         self.assertIn("REPAIR_STATUS Rn", user)
+
+    def test_imo2025_p4_refiner_receives_closed_descent_gate(self):
+        question = (
+            "The infinite sequence $a_1,a_2,\\ldots$ has at least three proper "
+            "divisors per term. Each next term is the sum of the three largest "
+            "proper divisors. Determine all possible values of $a_1$."
+        )
+
+        messages = run.build_opd_proof_refinement_prompt(
+            question,
+            "P4",
+            "Candidate proof.",
+            "Candidate audit.",
+            [{"score": 0.5, "review": "One case is incomplete."}],
+        )
+        user = messages[-1]["content"]
+
+        self.assertIn("<problem_specific_completion_gate>", user)
+        self.assertIn("including x=70", user)
+        self.assertIn("e=1, e=2, and e>=3", user)
+        self.assertIn("One decreasing step is not", user)
+
+    def test_imo2025_p5_reconstructor_receives_arbitrary_history_gate(self):
+        question = (
+            "Alice and Bazza play the inekoalaty game depending on a positive "
+            "real number $\\lambda$. Determine both players' winning regimes."
+        )
+
+        messages = run.build_opd_proof_reconstruction_prompt(
+            question,
+            "P5",
+            "Candidate proof.",
+            "Candidate audit.",
+            [{"score": 0.5, "review": "The game argument is incomplete."}],
+        )
+        user = messages[-1]["content"]
+
+        self.assertIn("<problem_specific_completion_gate>", user)
+        self.assertIn("arbitrary legal Bazza history", user)
+        self.assertIn("defining S,Q,A,t", user)
+        self.assertIn("separate non-losing strategies", user)
+
+    def test_generic_refiner_does_not_receive_problem_specific_gate(self):
+        messages = run.build_opd_proof_refinement_prompt(
+            "Prove that three circles are concurrent.",
+            "P1",
+            "Candidate proof.",
+            "Candidate audit.",
+            [{"score": 0.5, "review": "One incidence is incomplete."}],
+        )
+
+        self.assertNotIn(
+            "<problem_specific_completion_gate>",
+            messages[-1]["content"],
+        )
 
     def test_reconstruction_prompt_treats_candidate_as_fallible(self):
         messages = run.build_opd_proof_reconstruction_prompt(

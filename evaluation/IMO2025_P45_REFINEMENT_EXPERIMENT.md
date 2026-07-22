@@ -246,3 +246,8 @@ strategy against an arbitrary Bazza history using the `S,Q,A,t` Cauchy spike,
 reject maximal-move and cooperative-play shortcuts, and require separate
 non-losing strategies at equality. Generic problems and all generalist prompts
 retain their previous text.
+
+The same problem-specific completion gate is included in P4/P5 meta-audits and
+repair/reconstruction prompts. This prevents critique truncation or top-four
+critique selection from dropping the decisive obligation before refinement.
+Generic tasks do not receive this block.

@@ -1867,6 +1867,32 @@ def specialize_verifier_audit_role(
     )
 
 
+def problem_specific_completion_gate(question: str) -> str:
+    problem_id = identify_imo2025_problem(question)
+    if problem_id == "p4":
+        return (
+            "Before accepting a complete P4 proof, independently verify all of "
+            "the following: (1) the ordering of the three complementary divisors, "
+            "including x=70; (2) closure of strict descent outside multiples of "
+            "6 for N=2^e m, 3 not dividing m, in each case e=1, e=2, and e>=3; "
+            "(3) the 13/12 and 31/30 transition cases; and (4) both necessity and "
+            "sufficiency of the final family. One decreasing step is not a closed "
+            "descent proof."
+        )
+    if problem_id == "p5":
+        return (
+            "Before accepting a complete P5 proof, independently verify all of "
+            "the following: (1) Alice's strategy after an arbitrary legal Bazza "
+            "history by defining S,Q,A,t at turn 2K-1 and proving t is legal; "
+            "(2) the Cauchy bound Q+t^2 >= A^2/K and the resulting choice of K; "
+            "(3) Bazza's complementary-pair strategy with its exact inequality; "
+            "and (4) separate non-losing strategies for both players at equality. "
+            "A maximal-opponent shortcut or one cooperative infinite play is not "
+            "a strategy proof."
+        )
+    return ""
+
+
 def format_prior_verifier_critiques(
     prior_critiques: Optional[list[dict[str, Any]]],
 ) -> str:
@@ -2019,6 +2045,12 @@ def build_deepseek_meta_verification_prompt(
         proof_analysis,
         MAX_FORWARDED_EVALUATION_CHARS,
     )
+    completion_gate = problem_specific_completion_gate(question)
+    completion_gate_section = (
+        "\n\nProblem-specific mandatory audit:\n" + completion_gate
+        if completion_gate
+        else ""
+    )
     if audit_positive_verdicts:
         return rf"""You are an adversarial second-opinion auditor. You are given a problem, a candidate solution, and a first verifier's evaluation. Your task is to determine whether the verifier's verdict is justified by the actual proof.
 
@@ -2031,6 +2063,7 @@ Audit procedure:
 4. For a game or adversarial strategy, test the proposed move after arbitrary legal prior play and at least one non-greedy opponent response. One cooperative infinite play never proves that neither player has a winning strategy.
 5. Recompute the decisive algebra and all equality or monotonicity conditions used to turn the local claim into the final conclusion.
 6. Compare these checks with the first verifier's evaluation.
+{completion_gate_section}
 
 Rate the first verifier, not the prose quality:
 - 1: its verdict is supported by a completed independent audit and it missed no material defect.
@@ -2234,13 +2267,23 @@ def build_opd_proof_refinement_prompt(
     self_evaluation: str,
     proof_analyses: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    parts = [
+    parts = []
+    completion_gate = problem_specific_completion_gate(question)
+    if completion_gate:
+        parts.extend(
+            [
+                "<problem_specific_completion_gate>",
+                completion_gate,
+                "</problem_specific_completion_gate>",
+            ]
+        )
+    parts.extend([
         build_refinement_repair_ledger(proof_analyses),
         f'<candidate id="{candidate_id}">',
         "<proof>",
         proof,
         "</proof>",
-    ]
+    ])
     for analysis in proof_analyses:
         score = coerce_score(analysis.get("score"))
         score_text = "?" if score is None else f"{score:g}"
@@ -2271,13 +2314,23 @@ def build_opd_proof_reconstruction_prompt(
     *,
     strict_pass_challenge: bool = False,
 ) -> list[dict[str, str]]:
-    parts = [
+    parts = []
+    completion_gate = problem_specific_completion_gate(question)
+    if completion_gate:
+        parts.extend(
+            [
+                "<problem_specific_completion_gate>",
+                completion_gate,
+                "</problem_specific_completion_gate>",
+            ]
+        )
+    parts.extend([
         build_refinement_repair_ledger(proof_analyses),
         f'<candidate id="{candidate_id}">',
         "<proof>",
         proof,
         "</proof>",
-    ]
+    ])
     for analysis in proof_analyses:
         score = coerce_score(analysis.get("score"))
         score_text = "?" if score is None else f"{score:g}"
