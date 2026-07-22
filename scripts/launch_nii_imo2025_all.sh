@@ -221,7 +221,7 @@ trap on_exit EXIT
 echo "[$(date -u +%FT%TZ)] launch rank=${node_rank}/${world_size} physical_rank=${physical_rank:-unknown} host=$(hostname)"
 
 if [ "$node_rank" -eq 0 ]; then
-    if [ ! -d "$SOURCE_REPO/.git" ]; then
+    if ! git -C "$SOURCE_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         echo "Missing source checkout: $SOURCE_REPO" >&2
         exit 3
     fi
