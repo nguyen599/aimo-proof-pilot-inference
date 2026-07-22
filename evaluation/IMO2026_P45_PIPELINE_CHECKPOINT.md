@@ -51,9 +51,9 @@ The teammate tiered selector uses **raw mean verifier score**:
 
 ## Current harness comparison
 
-`evaluation/harness_vllm/run.py` already implements the same balanced bracket
-schedule under `llm_stratified_tournament`, including null ballots and
-rank-based tie-breaking. It is not yet an exact teammate treatment:
+`evaluation/harness_vllm/run.py` implements the same balanced bracket schedule
+under `llm_stratified_tournament`, including null ballots and rank-based
+tie-breaking. The default remains our existing treatment:
 
 - it ranks and gates candidates using `final_score`, which is meta-weighted and
   can be capped at `0.5` after validated critiques;
@@ -61,6 +61,24 @@ rank-based tie-breaking. It is not yet an exact teammate treatment:
   scores; and
 - `candidate_selection_pool` may remove candidates using
   `selector_min_final_score` before the tournament sees them.
+
+An opt-in compatibility score source is now available:
+
+```text
+--selector-mode llm_stratified_tournament
+--selector-score-source raw_verifier_mean
+--selector-tournament-group-size 4
+--selector-tournament-rounds 64
+--selector-tournament-max-candidates 10
+--selector-tournament-threshold 0.95
+--selector-score-window 0.2
+```
+
+`raw_verifier_mean` computes the unweighted mean from
+`verifier_score_summaries[*].verifier_score`. The selected score source is used
+consistently for candidate admission, ranking, the saturation test, the score
+window, historical versions, and score fallbacks. Exact score ties preserve
+the existing verifier rank. The default `final_score` behavior is unchanged.
 
 The previous same-pool replay is **not** evidence against the teammate method.
 That replay forced a wide top-ten tournament and used our capped meta-aware
@@ -107,12 +125,12 @@ This separates generation, verifier/refinement retention, and selector loss.
 
 ## Next code step
 
-Add an explicit teammate-compatible selector score source that computes the raw
-mean from `verifier_score_summaries`, and make candidate admission use that same
-score in this mode. Do not reinterpret the teammate `0.95` threshold on our
-meta-aware `final_score`. Then add the cumulative multi-parent refinement mode
-behind an opt-in argument so the existing independent-lineage pipeline remains
-available as the control.
+The teammate-compatible selector score source is implemented and covered by
+focused tests. The remaining topology difference is cumulative multi-parent
+refinement. Add that mode behind an opt-in argument so the existing
+independent-lineage pipeline remains available as the control. Before spending
+on a four-round run, replay both selector score sources on an identical stored
+candidate pool and run Gate A on clean 64-proof P4/P5 pools.
 
 ## NII snapshot
 

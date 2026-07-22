@@ -907,6 +907,77 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(selection_pool[0]["attempt_idx"], 1)
         self.assertEqual(run.fallback_candidate_index(candidates), 1)
 
+    def test_raw_verifier_mean_selector_ignores_meta_cap(self):
+        candidates = [
+            {
+                "attempt_idx": 0,
+                "final_score": 0.5,
+                "pre_cap_score": 0.55,
+                "proof_solution": "raw verifier favorite",
+                "verifier_score_summaries": [
+                    {"verifier_score": 1.0},
+                    {"verifier_score": 1.0},
+                ],
+            },
+            {
+                "attempt_idx": 1,
+                "final_score": 0.9,
+                "proof_solution": "meta weighted favorite",
+                "verifier_score_summaries": [
+                    {"verifier_score": 0.5},
+                    {"verifier_score": 1.0},
+                ],
+            },
+        ]
+
+        self.assertEqual(run.fallback_candidate_index(candidates), 1)
+        self.assertEqual(
+            run.fallback_candidate_index(candidates, "raw_verifier_mean"),
+            0,
+        )
+        self.assertEqual(
+            run.selector_score_value(candidates[0], "raw_verifier_mean"),
+            1.0,
+        )
+
+    def test_selector_pool_can_admit_by_raw_verifier_mean(self):
+        candidates = [
+            {
+                "attempt_idx": 0,
+                "final_score": 0.5,
+                "proof_solution": "capped but verifier strong",
+                "verifier_score_summaries": [
+                    {"verifier_score": 1.0},
+                    {"verifier_score": 1.0},
+                ],
+            },
+            {
+                "attempt_idx": 1,
+                "final_score": 0.9,
+                "proof_solution": "weighted high but verifier mixed",
+                "verifier_score_summaries": [
+                    {"verifier_score": 0.5},
+                    {"verifier_score": 1.0},
+                ],
+            },
+        ]
+        cfg = SimpleNamespace(
+            selector_score_source="raw_verifier_mean",
+            selector_min_final_score=0.95,
+            selector_candidate_limit=0,
+        )
+
+        selection_pool, threshold_passed = run.candidate_selection_pool(
+            candidates,
+            cfg,
+        )
+
+        self.assertTrue(threshold_passed)
+        self.assertEqual(
+            [candidate["attempt_idx"] for candidate in selection_pool],
+            [0],
+        )
+
     def test_llm_tournament_covers_pool_and_returns_original_index(self):
         class FirstCandidateScheduler:
             def __init__(self):
@@ -1087,6 +1158,59 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertTrue(all(count == 4 for count in scheduler.candidate_counts))
         appearance_counts = list(output["appearances"].values())
         self.assertLessEqual(max(appearance_counts) - min(appearance_counts), 1)
+
+    def test_stratified_selector_saturates_on_raw_verifier_mean(self):
+        class FirstCandidateScheduler:
+            async def call(self, stage, prompt, **kwargs):
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": "<selected_id>R0</selected_id>",
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        candidates = [
+            {
+                "attempt_idx": idx,
+                "final_score": 0.5,
+                "pre_cap_score": 0.55,
+                "proof_solution": f"capped proof {idx}",
+                "verifier_score_summaries": [
+                    {"verifier_score": 1.0},
+                    {"verifier_score": 1.0 if idx < 5 else 0.9},
+                ],
+            }
+            for idx in range(6)
+        ]
+        cfg = SimpleNamespace(
+            selector_mode="llm_stratified_tournament",
+            selector_score_source="raw_verifier_mean",
+            selector_tournament_group_size=4,
+            selector_tournament_rounds=8,
+            selector_tournament_max_candidates=10,
+            selector_tournament_threshold=0.95,
+            selector_tournament_force_wide_pool=False,
+            selector_score_window=0.2,
+            selector_vote_count=5,
+            selector_max_candidate_chars=10_000,
+            selection_temperature=0.3,
+        )
+
+        _, output = run.asyncio.run(
+            run.select_best_candidate(
+                "problem",
+                candidates,
+                FirstCandidateScheduler(),
+                cfg,
+            )
+        )
+
+        self.assertEqual(output["stratified_mode"], "saturated_tournament")
+        self.assertEqual(output["selector_score_source"], "raw_verifier_mean")
+        self.assertEqual(output["pool_indices"], [0, 1, 2, 3, 4, 5])
 
     def test_stratified_selector_window_excludes_low_scored_candidates(self):
         class TargetScheduler:

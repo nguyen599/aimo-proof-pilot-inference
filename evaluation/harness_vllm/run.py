@@ -454,6 +454,10 @@ class CFG:
         os.environ.get("AIMO_SELECTION_TEMPERATURE", "1.0")
     )
     selector_mode = "llm"  # llm, llm_tournament, llm_stratified_tournament, score
+    selector_score_source = os.environ.get(
+        "AIMO_SELECTOR_SCORE_SOURCE",
+        "final_score",
+    )
     selector_min_final_score = 0.5
     selector_candidate_limit = int(
         os.environ.get("AIMO_SELECTOR_CANDIDATE_LIMIT", "0")
@@ -699,6 +703,7 @@ class PipelineConfig:
     selector_thinking_budget_force_text: str
     selection_temperature: float
     selector_mode: str
+    selector_score_source: str
     selector_min_final_score: float
     selector_candidate_limit: int
     selector_historical_candidate_limit: int
@@ -4603,6 +4608,29 @@ def score_sort_value(candidate: dict[str, Any]) -> float:
         return -1.0
 
 
+def raw_verifier_mean_sort_value(candidate: dict[str, Any]) -> float:
+    scores = [
+        score
+        for score in (
+            coerce_score(summary.get("verifier_score"))
+            for summary in candidate.get("verifier_score_summaries") or []
+        )
+        if score is not None
+    ]
+    if not scores:
+        return -1.0
+    return sum(scores) / len(scores)
+
+
+def selector_score_value(
+    candidate: dict[str, Any],
+    score_source: str = "final_score",
+) -> float:
+    if score_source == "raw_verifier_mean":
+        return raw_verifier_mean_sort_value(candidate)
+    return score_sort_value(candidate)
+
+
 def pre_cap_score_sort_value(candidate: dict[str, Any]) -> float:
     score = candidate.get("pre_cap_score", candidate.get("final_score"))
     if score is None:
@@ -4613,10 +4641,15 @@ def pre_cap_score_sort_value(candidate: dict[str, Any]) -> float:
         return -1.0
 
 
-def selector_sort_key(candidate: dict[str, Any]) -> tuple[float, float, int]:
-    """Keep safety score primary while resolving cap-induced ties."""
+def selector_sort_key(
+    candidate: dict[str, Any],
+    score_source: str = "final_score",
+) -> tuple[float, float, int]:
+    if score_source == "raw_verifier_mean":
+        # Stable sorting preserves the existing verifier rank for exact ties.
+        return (selector_score_value(candidate, score_source), 0.0, 0)
     return (
-        score_sort_value(candidate),
+        selector_score_value(candidate, score_source),
         pre_cap_score_sort_value(candidate),
         len(str(candidate.get("proof_solution") or "")),
     )
@@ -6698,9 +6731,12 @@ async def select_best_candidate(
 ) -> tuple[int, dict[str, Any]]:
     if not candidates:
         return 0, {"success": False, "error": "no candidates", "text": ""}
+    score_source = str(
+        getattr(cfg, "selector_score_source", "final_score")
+    )
 
     if cfg.selector_mode == "score":
-        selected_idx = fallback_candidate_index(candidates)
+        selected_idx = fallback_candidate_index(candidates, score_source)
         return selected_idx, selector_fallback_output(
             selected_idx,
             "selector_mode_score",
@@ -6735,7 +6771,7 @@ async def select_best_candidate(
         )
         selected = parse_selected_index(response.get("text", ""), len(group))
         if selected is None and fallback:
-            selected = fallback_candidate_index(group)
+            selected = fallback_candidate_index(group, score_source)
             response["fallback_reason"] = "selector_parse_failed"
         return selected, make_output(
             "selector", response, {"selected_index": selected}
@@ -6752,13 +6788,15 @@ async def select_best_candidate(
     if cfg.selector_mode == "llm_stratified_tournament":
         ranked = sorted(
             list(enumerate(candidates)),
-            key=lambda item: selector_sort_key(item[1]),
+            key=lambda item: selector_sort_key(item[1], score_source),
             reverse=True,
         )
         group_size = max(2, int(cfg.selector_tournament_group_size))
         threshold = float(cfg.selector_tournament_threshold)
         strong = [
-            item for item in ranked if score_sort_value(item[1]) >= threshold
+            item
+            for item in ranked
+            if selector_score_value(item[1], score_source) >= threshold
         ]
 
         def ballot_rng(kind: str, ballot_idx: int) -> random.Random:
@@ -6836,6 +6874,7 @@ async def select_best_candidate(
                 "latency_s": None,
                 "selected_index": selected_idx,
                 "selector_mode": "llm_stratified_tournament",
+                "selector_score_source": score_source,
                 "stratified_mode": kind,
                 "candidate_count": len(candidates),
                 "pool_indices": rank_order,
@@ -6897,10 +6936,12 @@ async def select_best_candidate(
                 kind="saturated_tournament",
             )
 
-        best_score = score_sort_value(ranked[0][1])
+        best_score = selector_score_value(ranked[0][1], score_source)
         score_floor = best_score * (1.0 - float(cfg.selector_score_window))
         pool = [
-            item for item in ranked if score_sort_value(item[1]) >= score_floor
+            item
+            for item in ranked
+            if selector_score_value(item[1], score_source) >= score_floor
         ][:group_size]
         if len(pool) < 2:
             selected_idx = pool[0][0] if pool else ranked[0][0]
@@ -6924,7 +6965,7 @@ async def select_best_candidate(
     while len(active) > 1:
         ranked = sorted(
             active,
-            key=lambda item: selector_sort_key(item[1]),
+            key=lambda item: selector_sort_key(item[1], score_source),
             reverse=True,
         )
         group_count = max(1, (len(ranked) + group_size - 1) // group_size)
@@ -6981,6 +7022,7 @@ async def select_best_candidate(
         "parsed": {"selected_index": selected_idx},
         "selected_index": selected_idx,
         "selector_mode": "llm_tournament",
+        "selector_score_source": score_source,
         "candidate_count": len(candidates),
         "tournament_group_size": group_size,
         "tournament_rounds": tournament_rounds,
@@ -7053,7 +7095,10 @@ async def process_problem(
                 progress=progress,
             )
         else:
-            selected_candidate_idx = fallback_candidate_index(selection_pool)
+            selected_candidate_idx = fallback_candidate_index(
+                selection_pool,
+                pipeline_cfg.selector_score_source,
+            )
             selector_output = selector_fallback_output(
                 selected_candidate_idx,
                 "no_candidates_above_selector_min_final_score",
@@ -7491,10 +7536,13 @@ def run_async(
         json.dump(summary, file_obj, ensure_ascii=False, indent=2, default=str)
 
 
-def fallback_candidate_index(candidates: list[dict[str, Any]]) -> int:
+def fallback_candidate_index(
+    candidates: list[dict[str, Any]],
+    score_source: str = "final_score",
+) -> int:
     return max(
         range(len(candidates)),
-        key=lambda idx: selector_sort_key(candidates[idx]),
+        key=lambda idx: selector_sort_key(candidates[idx], score_source),
     )
 
 
@@ -7523,10 +7571,14 @@ def candidate_selection_pool(
     candidates: list[dict[str, Any]],
     cfg: PipelineConfig,
 ) -> tuple[list[dict[str, Any]], bool]:
+    score_source = str(
+        getattr(cfg, "selector_score_source", "final_score")
+    )
     eligible_candidates = [
         candidate
         for candidate in candidates
-        if score_sort_value(candidate) >= cfg.selector_min_final_score
+        if selector_score_value(candidate, score_source)
+        >= cfg.selector_min_final_score
     ]
     threshold_passed = bool(eligible_candidates)
     selection_pool = eligible_candidates or candidates
@@ -7540,7 +7592,9 @@ def candidate_selection_pool(
         if candidate_limit and len(selection_pool) > candidate_limit:
             ranked_indices = sorted(
                 range(len(selection_pool)),
-                key=lambda idx: selector_sort_key(selection_pool[idx]),
+                key=lambda idx: selector_sort_key(
+                    selection_pool[idx], score_source
+                ),
                 reverse=True,
             )[:candidate_limit]
             selection_pool = [
@@ -7556,7 +7610,10 @@ def candidate_selection_pool(
             version_proof = str(version.get("proof_solution") or "").strip()
             if not version_proof or version_proof == current_proof:
                 continue
-            if score_sort_value(version) < cfg.selector_min_final_score:
+            if (
+                selector_score_value(version, score_source)
+                < cfg.selector_min_final_score
+            ):
                 continue
             historical = {
                 **candidate,
@@ -7572,7 +7629,7 @@ def candidate_selection_pool(
 
     historical_candidates.sort(
         key=lambda candidate: (
-            *selector_sort_key(candidate),
+            *selector_sort_key(candidate, score_source),
             -int(candidate.get("attempt_idx") or 0),
             -int(candidate.get("selector_version_round") or 0),
         ),
@@ -7604,7 +7661,7 @@ def candidate_selection_pool(
     if current_limit and len(current_pool) > current_limit:
         ranked_indices = sorted(
             range(len(current_pool)),
-            key=lambda idx: selector_sort_key(current_pool[idx]),
+            key=lambda idx: selector_sort_key(current_pool[idx], score_source),
             reverse=True,
         )[:current_limit]
         current_pool = [
@@ -7719,6 +7776,7 @@ class ProofRuntime:
         selector_max_candidate_chars: int,
         selection_temperature: float,
         selector_mode: str,
+        selector_score_source: str,
         selector_min_final_score: float,
         selector_candidate_limit: int,
         selector_historical_candidate_limit: int,
@@ -7831,6 +7889,15 @@ class ProofRuntime:
             raise ValueError(
                 "selector_mode must be one of 'llm', 'llm_tournament', "
                 "'llm_stratified_tournament', or 'score'"
+            )
+        normalized_selector_score_source = selector_score_source.strip().lower()
+        if normalized_selector_score_source not in {
+            "final_score",
+            "raw_verifier_mean",
+        }:
+            raise ValueError(
+                "selector_score_source must be 'final_score' or "
+                "'raw_verifier_mean'"
             )
         normalized_selector_tournament_threshold = float(
             selector_tournament_threshold
@@ -8004,6 +8071,7 @@ class ProofRuntime:
             ),
             selection_temperature=selection_temperature,
             selector_mode=normalized_selector_mode,
+            selector_score_source=normalized_selector_score_source,
             selector_min_final_score=float(selector_min_final_score),
             selector_candidate_limit=max(0, int(selector_candidate_limit)),
             selector_historical_candidate_limit=max(
@@ -8224,7 +8292,10 @@ class ProofRuntime:
                 candidates,
                 self.pipeline_config,
             )
-            selected_index = fallback_candidate_index(selection_pool)
+            selected_index = fallback_candidate_index(
+                selection_pool,
+                self.pipeline_config.selector_score_source,
+            )
             selector_output: dict[str, Any] = selector_fallback_output(
                 selected_index,
                 "time_budget",
@@ -8721,6 +8792,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "score",
         ),
     )
+    pipeline.add_argument(
+        "--selector-score-source",
+        choices=("final_score", "raw_verifier_mean"),
+        help=(
+            "Score used for selector admission, ranking, saturation, and "
+            "fallbacks. The raw_verifier_mean option reproduces the "
+            "teammate tournament's unweighted verifier ranking."
+        ),
+    )
     pipeline.add_argument("--selector-candidate-limit", type=int)
     pipeline.add_argument("--selector-historical-candidate-limit", type=int)
     pipeline.add_argument("--selector-tournament-group-size", type=int)
@@ -8856,6 +8936,7 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "problem_timeout_seconds": "problem_timeout_seconds",
         "selection_reserve_seconds": "selection_reserve_seconds",
         "selector_mode": "selector_mode",
+        "selector_score_source": "selector_score_source",
         "selector_candidate_limit": "selector_candidate_limit",
         "selector_historical_candidate_limit": (
             "selector_historical_candidate_limit"
@@ -9106,6 +9187,7 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.strict_pass_challenge_rounds
             ),
             "selector_mode": str(cfg.selector_mode),
+            "selector_score_source": str(cfg.selector_score_source),
             "selector_candidate_limit": int(cfg.selector_candidate_limit),
             "selector_historical_candidate_limit": int(
                 cfg.selector_historical_candidate_limit
@@ -9381,6 +9463,7 @@ def run(cfg: type[CFG] = CFG) -> None:
             selector_max_candidate_chars=cfg.selector_max_candidate_chars,
             selection_temperature=cfg.selection_temperature,
             selector_mode=cfg.selector_mode,
+            selector_score_source=cfg.selector_score_source,
             selector_min_final_score=cfg.selector_min_final_score,
             selector_candidate_limit=cfg.selector_candidate_limit,
             selector_historical_candidate_limit=(
