@@ -55,6 +55,9 @@ proofs before launch:
   strategy below the threshold, Alice's Cauchy spike against an arbitrary
   Bazza history above it, and separate non-losing strategies for both players
   at equality.
+- Selector clipping does not remove either known strong history: P4 candidate 2
+  round 2 is 10,879 characters and P5 candidate 35 round 3 is 7,164
+  characters, both below the 32,000-character per-candidate selector cap.
 
 This audit establishes that the portfolio prompts point toward known strong
 proof structures. It does not replace the round-zero external quality gate or
