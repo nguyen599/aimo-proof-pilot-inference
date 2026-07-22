@@ -14,7 +14,9 @@ refinement rounds. It changes only the measured P4/P5 interventions:
 - conservative retention of the earlier proof when two verified versions have
   exactly equal internal evidence, except for strict-pass challenge survival;
 - an inclusive `0.5` selector boundary with at most eight candidates in the
-  final LLM comparison.
+  final LLM comparison; two slots are reserved for strong earlier verified
+  proof versions, so an internally favored rewrite cannot erase its strongest
+  predecessor before final selection.
 
 Do not launch it while the baseline run
 `imo2025-p45-r4-mixed-challenge-p36-2node-20260721T212441Z` owns nodes 2 and 3.

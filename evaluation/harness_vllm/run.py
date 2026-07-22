@@ -611,6 +611,9 @@ class CFG:
     selector_candidate_limit = int(
         os.environ.get("AIMO_SELECTOR_CANDIDATE_LIMIT", "0")
     )
+    selector_historical_candidate_limit = int(
+        os.environ.get("AIMO_SELECTOR_HISTORICAL_CANDIDATE_LIMIT", "0")
+    )
 
     vllm_extra_args = default_vllm_extra_args()
     stream_interval = 100
@@ -827,6 +830,7 @@ class PipelineConfig:
     selector_mode: str
     selector_min_final_score: float
     selector_candidate_limit: int
+    selector_historical_candidate_limit: int
     proof_generation_strategy_portfolio: str = "baseline"
 
 
@@ -3482,6 +3486,25 @@ def should_replace_retained_candidate(
     return candidate_retention_score(candidate_aggregation) > candidate_retention_score(
         retained_aggregation
     )
+
+
+def snapshot_verified_candidate_version(
+    proof: str,
+    parsed: dict[str, Any],
+    aggregation: dict[str, Any],
+    round_idx: int,
+) -> dict[str, Any]:
+    """Keep the compact fields needed to reconsider a verified proof later."""
+    return {
+        "proof_solution": proof,
+        "self_evaluation": parsed.get("self_evaluation"),
+        "self_score": parsed.get("self_score"),
+        "final_score": aggregation.get("final_score"),
+        "final_status": aggregation.get("final_status"),
+        "strict_pass": aggregation.get("strict_pass", False),
+        "all_verifiers_passed": aggregation.get("all_verifiers_passed", False),
+        "selected_verification_round": round_idx,
+    }
 
 
 def response_usage_to_dict(usage: Any) -> dict[str, Any]:
@@ -6345,6 +6368,7 @@ async def run_single_attempt(
     best_aggregation = dict(final_aggregation)
     best_round_idx = -1
     latest_verified_round_idx = -1
+    verified_versions: list[dict[str, Any]] = []
     critique_history: list[dict[str, Any]] = []
     critique_history_keys: set[str] = set()
     strict_pass_challenges_used = 0
@@ -6393,6 +6417,14 @@ async def run_single_attempt(
                 "strict_pass_challenge_survived": True,
             }
         pending_strict_pass_challenge = False
+        verified_versions.append(
+            snapshot_verified_candidate_version(
+                proof,
+                latest_generation_parsed,
+                final_aggregation,
+                round_idx,
+            )
+        )
         if best_round_idx < 0 or should_replace_retained_candidate(
             final_aggregation,
             best_aggregation,
@@ -6664,6 +6696,7 @@ async def run_single_attempt(
         ),
         "selected_verification_round": best_round_idx,
         "rollback_from_round": rollback_from_round,
+        "verified_versions": verified_versions,
         "success": final_aggregation.get("final_status") != "needs_review",
     }
 
@@ -7001,6 +7034,25 @@ async def process_problem(
         final_score = selected.get("final_score")
         final_status = selected.get("final_status")
 
+    selected_verification_round = (
+        selected.get(
+            "selector_version_round",
+            selected.get("selected_verification_round"),
+        )
+        if selected is not None
+        else None
+    )
+    selected_historical_version = bool(
+        selected is not None and selected.get("selector_is_historical")
+    )
+    if selected is not None:
+        selector_output = {
+            **selector_output,
+            "selected_attempt_idx": selected.get("attempt_idx"),
+            "selected_verification_round": selected_verification_round,
+            "selected_historical_version": selected_historical_version,
+        }
+
     print_selected_solution_summary(
         problem_id=problem_id,
         selected_idx=selected_idx,
@@ -7019,6 +7071,8 @@ async def process_problem(
         "selected_pipeline": selected_idx,
         "final_score": final_score,
         "final_status": final_status,
+        "selected_verification_round": selected_verification_round,
+        "selected_historical_version": selected_historical_version,
         "candidates": candidates,
         "failed_attempts": failed_attempts,
         "selector_output": selector_output,
@@ -7449,19 +7503,75 @@ def candidate_selection_pool(
     threshold_passed = bool(eligible_candidates)
     selection_pool = eligible_candidates or candidates
     candidate_limit = max(0, int(cfg.selector_candidate_limit))
-    if candidate_limit and len(selection_pool) > candidate_limit:
+    historical_limit = max(
+        0,
+        int(getattr(cfg, "selector_historical_candidate_limit", 0)),
+    )
+
+    if not threshold_passed or historical_limit == 0:
+        if candidate_limit and len(selection_pool) > candidate_limit:
+            ranked_indices = sorted(
+                range(len(selection_pool)),
+                key=lambda idx: (
+                    score_sort_value(selection_pool[idx]),
+                    len(str(selection_pool[idx].get("proof_solution") or "")),
+                ),
+                reverse=True,
+            )[:candidate_limit]
+            selection_pool = [
+                selection_pool[idx] for idx in sorted(ranked_indices)
+            ]
+        return selection_pool, threshold_passed
+
+    current_pool = selection_pool
+    historical_candidates: list[dict[str, Any]] = []
+    for candidate in selection_pool:
+        current_proof = str(candidate.get("proof_solution") or "").strip()
+        for version in candidate.get("verified_versions") or []:
+            version_proof = str(version.get("proof_solution") or "").strip()
+            if not version_proof or version_proof == current_proof:
+                continue
+            if score_sort_value(version) < cfg.selector_min_final_score:
+                continue
+            historical = {
+                **candidate,
+                **version,
+                "selector_is_historical": True,
+                "selector_parent_attempt_idx": candidate.get("attempt_idx"),
+                "selector_version_round": version.get(
+                    "selected_verification_round"
+                ),
+            }
+            historical.pop("verified_versions", None)
+            historical_candidates.append(historical)
+
+    historical_candidates.sort(
+        key=lambda candidate: (
+            score_sort_value(candidate),
+            len(str(candidate.get("proof_solution") or "")),
+            -int(candidate.get("attempt_idx") or 0),
+            -int(candidate.get("selector_version_round") or 0),
+        ),
+        reverse=True,
+    )
+    if candidate_limit:
+        historical_limit = min(historical_limit, max(0, candidate_limit - 1))
+    selected_history = historical_candidates[:historical_limit]
+
+    current_limit = candidate_limit - len(selected_history) if candidate_limit else 0
+    if current_limit and len(current_pool) > current_limit:
         ranked_indices = sorted(
-            range(len(selection_pool)),
+            range(len(current_pool)),
             key=lambda idx: (
-                score_sort_value(selection_pool[idx]),
-                len(str(selection_pool[idx].get("proof_solution") or "")),
+                score_sort_value(current_pool[idx]),
+                len(str(current_pool[idx].get("proof_solution") or "")),
             ),
             reverse=True,
-        )[:candidate_limit]
-        selection_pool = [
-            selection_pool[idx] for idx in sorted(ranked_indices)
+        )[:current_limit]
+        current_pool = [
+            current_pool[idx] for idx in sorted(ranked_indices)
         ]
-    return selection_pool, threshold_passed
+    return current_pool + selected_history, threshold_passed
 
 
 def load_simple_input(input_csv: Path) -> tuple[pd.DataFrame, str, Optional[str]]:
@@ -7570,6 +7680,7 @@ class ProofRuntime:
         selector_mode: str,
         selector_min_final_score: float,
         selector_candidate_limit: int,
+        selector_historical_candidate_limit: int,
         vllm_extra_args: str,
         stream_interval: int,
         host: str,
@@ -7824,6 +7935,10 @@ class ProofRuntime:
             selector_mode=normalized_selector_mode,
             selector_min_final_score=float(selector_min_final_score),
             selector_candidate_limit=max(0, int(selector_candidate_limit)),
+            selector_historical_candidate_limit=max(
+                0,
+                int(selector_historical_candidate_limit),
+            ),
             proof_generation_strategy_portfolio=(
                 normalized_proof_generation_strategy_portfolio
             ),
@@ -8062,6 +8177,19 @@ class ProofRuntime:
 
             selected = selection_pool[selected_index]
             prediction = str(selected.get("proof_solution") or "").strip()
+            selected_verification_round = selected.get(
+                "selector_version_round",
+                selected.get("selected_verification_round"),
+            )
+            selected_historical_version = bool(
+                selected.get("selector_is_historical")
+            )
+            selector_output = {
+                **selector_output,
+                "selected_attempt_idx": selected.get("attempt_idx"),
+                "selected_verification_round": selected_verification_round,
+                "selected_historical_version": selected_historical_version,
+            }
             print_selected_solution_summary(
                 problem_id=problem_id,
                 selected_idx=selected.get("attempt_idx", selected_index),
@@ -8077,6 +8205,8 @@ class ProofRuntime:
                 "selected_pipeline": selected.get("attempt_idx", selected_index),
                 "final_score": selected.get("final_score"),
                 "final_status": selected.get("final_status"),
+                "selected_verification_round": selected_verification_round,
+                "selected_historical_version": selected_historical_version,
                 "candidate_count": len(candidates),
                 "elapsed_s": time.monotonic() - started,
                 "selector_output": selector_output,
@@ -8492,6 +8622,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--selection-reserve-seconds", type=int)
     pipeline.add_argument("--selector-mode", choices=("llm", "score"))
     pipeline.add_argument("--selector-candidate-limit", type=int)
+    pipeline.add_argument("--selector-historical-candidate-limit", type=int)
     pipeline.add_argument("--temperature", type=float)
     pipeline.add_argument("--top-p", type=float)
     pipeline.add_argument("--top-k", type=int)
@@ -8612,6 +8743,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "selection_reserve_seconds": "selection_reserve_seconds",
         "selector_mode": "selector_mode",
         "selector_candidate_limit": "selector_candidate_limit",
+        "selector_historical_candidate_limit": (
+            "selector_historical_candidate_limit"
+        ),
         "temperature": "temperature",
         "top_p": "top_p",
         "top_k": "top_k",
@@ -8832,6 +8966,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             ),
             "selector_mode": str(cfg.selector_mode),
             "selector_candidate_limit": int(cfg.selector_candidate_limit),
+            "selector_historical_candidate_limit": int(
+                cfg.selector_historical_candidate_limit
+            ),
             "temperature": float(cfg.temperature),
             "top_p": float(cfg.top_p),
             "top_k": int(cfg.top_k),
@@ -9083,6 +9220,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             selector_mode=cfg.selector_mode,
             selector_min_final_score=cfg.selector_min_final_score,
             selector_candidate_limit=cfg.selector_candidate_limit,
+            selector_historical_candidate_limit=(
+                cfg.selector_historical_candidate_limit
+            ),
             vllm_extra_args=cfg.vllm_extra_args,
             stream_interval=cfg.stream_interval,
             host=cfg.host,

@@ -55,6 +55,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             verify_request_limit_while_generating=8,
             refine_rounds=1,
             selector_candidate_limit=0,
+            selector_historical_candidate_limit=0,
             proof_generation_strategy_portfolio="baseline",
         )
         args = run.build_cli_parser().parse_args(
@@ -79,6 +80,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "1",
                 "--selector-candidate-limit",
                 "8",
+                "--selector-historical-candidate-limit",
+                "2",
                 "--proof-generation-strategy-portfolio",
                 "diverse",
                 "--thinking-budget-refine-final-temperature",
@@ -117,6 +120,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.verify_request_limit_while_generating, 16)
         self.assertEqual(cfg.refine_rounds, 1)
         self.assertEqual(cfg.selector_candidate_limit, 8)
+        self.assertEqual(cfg.selector_historical_candidate_limit, 2)
         self.assertEqual(cfg.proof_generation_strategy_portfolio, "diverse")
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
         self.assertEqual(
@@ -800,6 +804,109 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(
             [candidate["attempt_idx"] for candidate in selection_pool],
             [0, 3],
+        )
+
+    def test_selector_pool_reserves_slots_for_historical_versions(self):
+        candidates = [
+            {
+                "attempt_idx": 0,
+                "final_score": 0.9,
+                "proof_solution": "current zero",
+                "selected_verification_round": 2,
+                "verified_versions": [
+                    {
+                        "final_score": 0.8,
+                        "proof_solution": "earlier zero",
+                        "selected_verification_round": 1,
+                    }
+                ],
+            },
+            {
+                "attempt_idx": 1,
+                "final_score": 0.7,
+                "proof_solution": "current one",
+                "selected_verification_round": 2,
+                "verified_versions": [
+                    {
+                        "final_score": 0.6,
+                        "proof_solution": "earlier one",
+                        "selected_verification_round": 1,
+                    }
+                ],
+            },
+            {
+                "attempt_idx": 2,
+                "final_score": 0.6,
+                "proof_solution": "current two",
+                "selected_verification_round": 2,
+            },
+        ]
+        cfg = SimpleNamespace(
+            selector_min_final_score=0.5,
+            selector_candidate_limit=3,
+            selector_historical_candidate_limit=1,
+        )
+
+        selection_pool, threshold_passed = run.candidate_selection_pool(
+            candidates,
+            cfg,
+        )
+
+        self.assertTrue(threshold_passed)
+        self.assertEqual(len(selection_pool), 3)
+        self.assertEqual(
+            [candidate["proof_solution"] for candidate in selection_pool],
+            ["current zero", "current one", "earlier zero"],
+        )
+        historical = selection_pool[-1]
+        self.assertTrue(historical["selector_is_historical"])
+        self.assertEqual(historical["selector_parent_attempt_idx"], 0)
+        self.assertEqual(historical["selector_version_round"], 1)
+        self.assertNotIn("verified_versions", historical)
+
+    def test_selector_history_is_disabled_by_default(self):
+        candidate = {
+            "attempt_idx": 0,
+            "final_score": 0.9,
+            "proof_solution": "current",
+            "verified_versions": [
+                {
+                    "final_score": 0.8,
+                    "proof_solution": "earlier",
+                    "selected_verification_round": 0,
+                }
+            ],
+        }
+        cfg = SimpleNamespace(
+            selector_min_final_score=0.5,
+            selector_candidate_limit=0,
+        )
+
+        selection_pool, _ = run.candidate_selection_pool([candidate], cfg)
+
+        self.assertEqual(selection_pool, [candidate])
+
+    def test_selector_pool_backfills_missing_historical_slots(self):
+        candidates = [
+            {
+                "attempt_idx": idx,
+                "final_score": 0.9 - idx / 10,
+                "proof_solution": f"current {idx}",
+            }
+            for idx in range(4)
+        ]
+        cfg = SimpleNamespace(
+            selector_min_final_score=0.5,
+            selector_candidate_limit=3,
+            selector_historical_candidate_limit=2,
+        )
+
+        selection_pool, _ = run.candidate_selection_pool(candidates, cfg)
+
+        self.assertEqual(len(selection_pool), 3)
+        self.assertEqual(
+            [candidate["attempt_idx"] for candidate in selection_pool],
+            [0, 1, 2],
         )
 
     def test_validated_critique_preserves_requested_fix(self):
@@ -1558,6 +1665,10 @@ class MixedPromptRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["strict_pass_challenges_used"], 1)
         self.assertEqual(result["selected_verification_round"], 1)
         self.assertEqual(result["proof_solution"], "Independently reconstructed proof.")
+        self.assertEqual(
+            [version["proof_solution"] for version in result["verified_versions"]],
+            ["Original proof.", "Independently reconstructed proof."],
+        )
         self.assertTrue(result["proof_refine_output"][0]["strict_pass_challenge"])
         self.assertEqual(
             result["proof_refine_output"][0]["refinement_strategy"],
@@ -1637,6 +1748,10 @@ class MixedPromptRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["proof_solution"], "Original proof.")
         self.assertEqual(result["selected_verification_round"], 0)
         self.assertEqual(result["rollback_from_round"], 1)
+        self.assertEqual(
+            [version["proof_solution"] for version in result["verified_versions"]],
+            ["Original proof.", "Broken reconstruction."],
+        )
 
     async def test_refinement_preserves_prior_critique_audits(self):
         class FakeScheduler:
