@@ -275,6 +275,10 @@ def candidate_manifest_row(
         "generation_mode": candidate.get("generation_mode"),
         "generation_only": bool(candidate.get("generation_only", False)),
         "final_score": candidate.get("final_score"),
+        "pre_cap_score": candidate.get(
+            "pre_cap_score",
+            candidate.get("final_score"),
+        ),
         "final_status": candidate.get("final_status"),
         "self_score": candidate.get("self_score"),
         "strict_pass": bool(candidate.get("strict_pass", False)),

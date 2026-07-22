@@ -38,6 +38,7 @@ def make_candidate(attempt_idx: int, **overrides: object) -> dict[str, object]:
         "proof_refine_handoffs": [],
         "validated_critiques": [{}],
         "final_score": 0.75,
+        "pre_cap_score": 0.875,
         "final_status": "weighted_score_pass",
         "self_score": 1.0,
         "strict_pass": False,
@@ -161,6 +162,7 @@ class ExportPipelineCandidatesTests(unittest.TestCase):
         self.assertTrue(by_attempt[3]["selected_by_pipeline"])
         self.assertEqual(by_attempt[0]["verifier_call_count"], 2)
         self.assertEqual(by_attempt[0]["refinement_count"], 1)
+        self.assertEqual(by_attempt[0]["pre_cap_score"], 0.875)
 
         rubrics = [
             json.loads(line)

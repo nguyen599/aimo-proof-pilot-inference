@@ -96,3 +96,35 @@ additional initial diversity into stronger later proofs.
    four-parent refinement as a separate topology treatment.
 
 Legacy `llm`, `llm_tournament`, and `score` modes remain unchanged.
+
+## Same-pool selector replay
+
+Use `export_pipeline_candidates.py` once a distributed run is complete, then
+replay selector treatments without regenerating or reverifying any proof:
+
+```bash
+python evaluation/export_pipeline_candidates.py \
+  --run-dir /path/to/completed-run \
+  --rubrics-file imo-2025.parquet \
+  --output-dir /path/to/completed-run/selector-replay-input \
+  --problem-ids 4 5
+
+python evaluation/replay_pipeline_selector.py \
+  --candidate-dir /path/to/completed-run/selector-replay-input \
+  --output-dir /path/to/completed-run/selector-replay-wide \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model proof-model \
+  --tokenizer-path /path/to/model \
+  --selector-mode llm_stratified_tournament \
+  --selector-tournament-group-size 4 \
+  --selector-tournament-rounds 64 \
+  --selector-tournament-max-candidates 10 \
+  --selector-tournament-threshold 0.5 \
+  --selector-tournament-force-wide-pool
+```
+
+The replay writes grader-ready `records.jsonl` and `rubrics.jsonl`, complete
+ballot metadata in `selector_results.jsonl`, and raw selector calls under
+`llm_calls/`. Candidate export preserves both capped `final_score` and uncapped
+`pre_cap_score`; older exports without the latter remain compatible by falling
+back to `final_score`.
