@@ -3288,6 +3288,23 @@ def aggregate_proof_label(
     }
 
 
+def candidate_retention_score(aggregation: dict[str, Any]) -> float:
+    """Rank verified proof versions without counting meta evidence twice."""
+    score = aggregation.get("final_score")
+    if score is None:
+        return -1.0
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return -1.0
+    # aggregate_proof_label already folds meta scores and positive-verdict
+    # challenges into final_score. A second flat challenge penalty can make a
+    # demonstrably improved proof rank below the version it repaired.
+    if aggregation.get("strict_pass_challenge_survived"):
+        value += 0.001
+    return value
+
+
 def response_usage_to_dict(usage: Any) -> dict[str, Any]:
     if usage is None:
         return {}
@@ -6149,20 +6166,6 @@ async def run_single_attempt(
     strict_pass_challenges_used = 0
     pending_strict_pass_challenge = False
 
-    def aggregation_score_value(aggregation: dict[str, Any]) -> float:
-        score = aggregation.get("final_score")
-        if score is None:
-            return -1.0
-        try:
-            value = float(score)
-        except (TypeError, ValueError):
-            return -1.0
-        if aggregation.get("positive_meta_challenges"):
-            value -= 0.5
-        if aggregation.get("strict_pass_challenge_survived"):
-            value += 0.001
-        return value
-
     for round_idx in range(consumed_refine_rounds, cfg.refine_rounds + 1):
         if progress is not None:
             progress.log(
@@ -6206,9 +6209,9 @@ async def run_single_attempt(
                 "strict_pass_challenge_survived": True,
             }
         pending_strict_pass_challenge = False
-        if best_round_idx < 0 or aggregation_score_value(
+        if best_round_idx < 0 or candidate_retention_score(
             final_aggregation
-        ) >= aggregation_score_value(best_aggregation):
+        ) >= candidate_retention_score(best_aggregation):
             best_proof = proof
             best_generation_parsed = latest_generation_parsed
             best_aggregation = dict(final_aggregation)

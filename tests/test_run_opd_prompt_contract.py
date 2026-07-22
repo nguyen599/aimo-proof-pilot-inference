@@ -634,6 +634,33 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(result["final_status"], "validated_low_score")
         self.assertFalse(result["strict_pass"])
 
+    def test_retention_does_not_double_penalize_positive_meta_challenges(self):
+        baseline = {
+            "final_score": 0.25,
+            "positive_meta_challenges": [],
+        }
+        improved_refinement = {
+            "final_score": 0.5,
+            "positive_meta_challenges": [{"score": 0.0}],
+        }
+
+        self.assertGreater(
+            run.candidate_retention_score(improved_refinement),
+            run.candidate_retention_score(baseline),
+        )
+
+    def test_retention_preserves_strict_pass_challenge_tiebreak(self):
+        baseline = {"final_score": 1.0}
+        survived_challenge = {
+            "final_score": 1.0,
+            "strict_pass_challenge_survived": True,
+        }
+
+        self.assertGreater(
+            run.candidate_retention_score(survived_challenge),
+            run.candidate_retention_score(baseline),
+        )
+
     def test_validated_critique_preserves_requested_fix(self):
         result = run.aggregate_proof_label(
             [

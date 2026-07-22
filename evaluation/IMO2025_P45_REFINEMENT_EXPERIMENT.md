@@ -173,3 +173,20 @@ The paired report separates the initial candidate-pool ceiling from refinement
 gain or regression, strict-pass calibration, and selector ranking. It reports
 both a configurable credible-proof threshold (default `5/7`) and the stronger
 count of candidates receiving `7/7` from every independent grader call.
+
+## Retention calibration
+
+The expanded round-one audit exposed a separate retention error. Meta-audited
+verifier evidence is already incorporated into `final_score`: meta factors
+weight each verifier score, and validated challenges can cap the aggregate.
+The version-retention comparator nevertheless subtracted another flat `0.5`
+whenever any positive verifier verdict was challenged.
+
+That second penalty contradicted the external grades. P4 candidate 31 improved
+from `2/7` to `4/7` while its internal aggregate rose from `0.25` to `0.5`, and
+P5 candidate 11 improved from `2/7` to `3.5/7` while its aggregate rose from
+`0.125` to `0.1875`. The extra penalty changed those refined retention values
+to `0.0` and `-0.3125`, respectively, so both improved proofs would be rolled
+back. Retention now compares the already meta-aware `final_score` directly;
+the small survived-shadow-challenge tiebreak remains. Meta challenges still
+drive critique selection, score weighting, hard caps, and later refinement.
