@@ -45,6 +45,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         launcher = (REPO / "scripts" / "launch_nii_imo2025_all.sh").read_text()
         self.assertIn("baseline|diverse|adaptive", launcher)
         self.assertIn("--selector-historical-candidate-limit", launcher)
+        self.assertIn("--selector-tournament-group-size", launcher)
         self.assertIn("--selector-min-final-score", launcher)
 
     def test_cli_overrides_cfg_and_distributed_environment(self):
@@ -58,6 +59,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             refine_rounds=1,
             selector_candidate_limit=0,
             selector_historical_candidate_limit=0,
+            selector_tournament_group_size=8,
             proof_generation_strategy_portfolio="baseline",
         )
         args = run.build_cli_parser().parse_args(
@@ -84,6 +86,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "8",
                 "--selector-historical-candidate-limit",
                 "2",
+                "--selector-tournament-group-size",
+                "6",
                 "--selector-min-final-score",
                 "0.25",
                 "--proof-generation-strategy-portfolio",
@@ -125,6 +129,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.refine_rounds, 1)
         self.assertEqual(cfg.selector_candidate_limit, 8)
         self.assertEqual(cfg.selector_historical_candidate_limit, 2)
+        self.assertEqual(cfg.selector_tournament_group_size, 6)
         self.assertEqual(cfg.selector_min_final_score, 0.25)
         self.assertEqual(cfg.proof_generation_strategy_portfolio, "diverse")
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
@@ -865,6 +870,67 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertTrue(threshold_passed)
         self.assertEqual(selection_pool[0]["attempt_idx"], 1)
         self.assertEqual(run.fallback_candidate_index(candidates), 1)
+
+    def test_llm_tournament_covers_pool_and_returns_original_index(self):
+        class FirstCandidateScheduler:
+            def __init__(self):
+                self.calls = []
+
+            async def call(self, stage, prompt, **kwargs):
+                self.calls.append(
+                    {
+                        "stage": stage,
+                        "detail": kwargs.get("detail"),
+                        "candidate_count": prompt[-1]["content"].count(
+                            '<candidate id="R'
+                        ),
+                    }
+                )
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": "<selected_id>R0</selected_id>",
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        candidates = [
+            {
+                "attempt_idx": idx,
+                "final_score": idx / 20,
+                "proof_solution": f"proof {idx}",
+            }
+            for idx in range(17)
+        ]
+        cfg = SimpleNamespace(
+            selector_mode="llm_tournament",
+            selector_tournament_group_size=8,
+            selector_max_candidate_chars=10_000,
+            selection_temperature=0.2,
+        )
+        scheduler = FirstCandidateScheduler()
+
+        selected_idx, output = run.asyncio.run(
+            run.select_best_candidate(
+                "problem",
+                candidates,
+                scheduler,
+                cfg,
+            )
+        )
+
+        first_round_indices = sorted(
+            idx
+            for group in output["tournament_rounds"][0]["groups"]
+            for idx in group["candidate_indices"]
+        )
+        self.assertEqual(first_round_indices, list(range(17)))
+        self.assertTrue(all(call["candidate_count"] <= 8 for call in scheduler.calls))
+        self.assertEqual(len(scheduler.calls), 4)
+        self.assertEqual(selected_idx, 16)
+        self.assertEqual(output["selected_index"], 16)
 
     def test_selector_pool_reserves_slots_for_historical_versions(self):
         candidates = [

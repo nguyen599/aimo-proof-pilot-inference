@@ -606,13 +606,16 @@ class CFG:
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
     selection_reserve_seconds = DEFAULT_SELECTION_RESERVE_SECONDS
     selection_temperature = 1.0
-    selector_mode = "llm"  # llm, score
+    selector_mode = "llm"  # llm, llm_tournament, score
     selector_min_final_score = 0.5
     selector_candidate_limit = int(
         os.environ.get("AIMO_SELECTOR_CANDIDATE_LIMIT", "0")
     )
     selector_historical_candidate_limit = int(
         os.environ.get("AIMO_SELECTOR_HISTORICAL_CANDIDATE_LIMIT", "0")
+    )
+    selector_tournament_group_size = int(
+        os.environ.get("AIMO_SELECTOR_TOURNAMENT_GROUP_SIZE", "8")
     )
 
     vllm_extra_args = default_vllm_extra_args()
@@ -831,6 +834,7 @@ class PipelineConfig:
     selector_min_final_score: float
     selector_candidate_limit: int
     selector_historical_candidate_limit: int
+    selector_tournament_group_size: int
     proof_generation_strategy_portfolio: str = "baseline"
 
 
@@ -7005,25 +7009,104 @@ async def select_best_candidate(
             len(candidates),
         )
 
-    prompt = build_selection_prompt(
-        question,
-        candidates,
-        cfg.selector_max_candidate_chars,
-    )
-    response = await scheduler.call(
-        "selector",
-        prompt,
-        temperature=cfg.selection_temperature,
-        progress=progress,
-        detail=f"candidates={len(candidates)}",
-    )
-    selected_idx = parse_selected_index(response.get("text", ""), len(candidates))
-    if selected_idx is None:
-        selected_idx = fallback_candidate_index(candidates)
-        response["fallback_reason"] = "selector_parse_failed"
-    return selected_idx, make_output(
-        "selector", response, {"selected_index": selected_idx}
-    )
+    async def select_once(
+        group: list[dict[str, Any]],
+        *,
+        detail: str,
+    ) -> tuple[int, dict[str, Any]]:
+        prompt = build_selection_prompt(
+            question,
+            group,
+            cfg.selector_max_candidate_chars,
+        )
+        response = await scheduler.call(
+            "selector",
+            prompt,
+            temperature=cfg.selection_temperature,
+            progress=progress,
+            detail=detail,
+        )
+        selected = parse_selected_index(response.get("text", ""), len(group))
+        if selected is None:
+            selected = fallback_candidate_index(group)
+            response["fallback_reason"] = "selector_parse_failed"
+        return selected, make_output(
+            "selector", response, {"selected_index": selected}
+        )
+
+    if cfg.selector_mode == "llm":
+        return await select_once(
+            candidates,
+            detail=f"candidates={len(candidates)}",
+        )
+
+    group_size = max(2, int(cfg.selector_tournament_group_size))
+    active: list[tuple[int, dict[str, Any]]] = list(enumerate(candidates))
+    tournament_rounds: list[dict[str, Any]] = []
+    round_idx = 0
+    while len(active) > 1:
+        ranked = sorted(
+            active,
+            key=lambda item: selector_sort_key(item[1]),
+            reverse=True,
+        )
+        group_count = max(1, (len(ranked) + group_size - 1) // group_size)
+        groups: list[list[tuple[int, dict[str, Any]]]] = [
+            [] for _ in range(group_count)
+        ]
+        for rank_idx, item in enumerate(ranked):
+            block_idx, offset = divmod(rank_idx, group_count)
+            group_idx = (
+                offset if block_idx % 2 == 0 else group_count - 1 - offset
+            )
+            groups[group_idx].append(item)
+
+        calls = [
+            select_once(
+                [candidate for _, candidate in group],
+                detail=(
+                    f"tournament_round={round_idx} group={group_idx} "
+                    f"candidates={len(group)}"
+                ),
+            )
+            for group_idx, group in enumerate(groups)
+        ]
+        results = await asyncio.gather(*calls)
+        next_active: list[tuple[int, dict[str, Any]]] = []
+        round_groups: list[dict[str, Any]] = []
+        for group_idx, (group, result) in enumerate(zip(groups, results)):
+            local_idx, output = result
+            original_idx, candidate = group[local_idx]
+            next_active.append((original_idx, candidate))
+            round_groups.append(
+                {
+                    "group_index": group_idx,
+                    "candidate_indices": [idx for idx, _ in group],
+                    "selected_local_index": local_idx,
+                    "selected_index": original_idx,
+                    "output": output,
+                }
+            )
+        tournament_rounds.append(
+            {
+                "round_index": round_idx,
+                "groups": round_groups,
+            }
+        )
+        active = next_active
+        round_idx += 1
+
+    selected_idx = active[0][0]
+    final_output = tournament_rounds[-1]["groups"][0]["output"]
+    return selected_idx, {
+        **final_output,
+        "parsed": {"selected_index": selected_idx},
+        "selected_index": selected_idx,
+        "selector_mode": "llm_tournament",
+        "candidate_count": len(candidates),
+        "tournament_group_size": group_size,
+        "tournament_rounds": tournament_rounds,
+    }
 
 
 async def process_problem(
@@ -7759,6 +7842,7 @@ class ProofRuntime:
         selector_min_final_score: float,
         selector_candidate_limit: int,
         selector_historical_candidate_limit: int,
+        selector_tournament_group_size: int,
         vllm_extra_args: str,
         stream_interval: int,
         host: str,
@@ -7852,8 +7936,10 @@ class ProofRuntime:
         if normalized_meta_policy not in {"all-reviews", "low-only"}:
             raise ValueError("--meta_policy must be either 'all-reviews' or 'low-only'")
         normalized_selector_mode = selector_mode.strip().lower()
-        if normalized_selector_mode not in {"llm", "score"}:
-            raise ValueError("selector_mode must be either 'llm' or 'score'")
+        if normalized_selector_mode not in {"llm", "llm_tournament", "score"}:
+            raise ValueError(
+                "selector_mode must be one of 'llm', 'llm_tournament', or 'score'"
+            )
         normalized_refinement_strategy = refinement_strategy.strip().lower()
         if normalized_refinement_strategy not in REFINEMENT_STRATEGIES:
             raise ValueError(
@@ -8016,6 +8102,10 @@ class ProofRuntime:
             selector_historical_candidate_limit=max(
                 0,
                 int(selector_historical_candidate_limit),
+            ),
+            selector_tournament_group_size=max(
+                2,
+                int(selector_tournament_group_size),
             ),
             proof_generation_strategy_portfolio=(
                 normalized_proof_generation_strategy_portfolio
@@ -8698,9 +8788,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     pipeline.add_argument("--problem-timeout-seconds", type=int)
     pipeline.add_argument("--selection-reserve-seconds", type=int)
-    pipeline.add_argument("--selector-mode", choices=("llm", "score"))
+    pipeline.add_argument(
+        "--selector-mode",
+        choices=("llm", "llm_tournament", "score"),
+    )
     pipeline.add_argument("--selector-candidate-limit", type=int)
     pipeline.add_argument("--selector-historical-candidate-limit", type=int)
+    pipeline.add_argument("--selector-tournament-group-size", type=int)
     pipeline.add_argument("--selector-min-final-score", type=float)
     pipeline.add_argument("--temperature", type=float)
     pipeline.add_argument("--top-p", type=float)
@@ -8825,6 +8919,7 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "selector_historical_candidate_limit": (
             "selector_historical_candidate_limit"
         ),
+        "selector_tournament_group_size": "selector_tournament_group_size",
         "selector_min_final_score": "selector_min_final_score",
         "temperature": "temperature",
         "top_p": "top_p",
@@ -9048,6 +9143,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             "selector_candidate_limit": int(cfg.selector_candidate_limit),
             "selector_historical_candidate_limit": int(
                 cfg.selector_historical_candidate_limit
+            ),
+            "selector_tournament_group_size": int(
+                cfg.selector_tournament_group_size
             ),
             "temperature": float(cfg.temperature),
             "top_p": float(cfg.top_p),
@@ -9302,6 +9400,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             selector_candidate_limit=cfg.selector_candidate_limit,
             selector_historical_candidate_limit=(
                 cfg.selector_historical_candidate_limit
+            ),
+            selector_tournament_group_size=(
+                cfg.selector_tournament_group_size
             ),
             vllm_extra_args=cfg.vllm_extra_args,
             stream_interval=cfg.stream_interval,

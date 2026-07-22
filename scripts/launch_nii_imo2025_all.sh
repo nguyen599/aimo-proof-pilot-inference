@@ -28,6 +28,7 @@ THINKING_BUDGET_HANDOFF_ENABLED="${AIMO_THINKING_BUDGET_HANDOFF_ENABLED:-true}"
 SELECTOR_MODE="${AIMO_SELECTOR_MODE:-llm}"
 SELECTOR_CANDIDATE_LIMIT="${AIMO_SELECTOR_CANDIDATE_LIMIT:-0}"
 SELECTOR_HISTORICAL_CANDIDATE_LIMIT="${AIMO_SELECTOR_HISTORICAL_CANDIDATE_LIMIT:-0}"
+SELECTOR_TOURNAMENT_GROUP_SIZE="${AIMO_SELECTOR_TOURNAMENT_GROUP_SIZE:-8}"
 SELECTOR_MIN_FINAL_SCORE="${AIMO_SELECTOR_MIN_FINAL_SCORE:-0.5}"
 VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_REQUEST_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING:-0}"
@@ -70,8 +71,10 @@ for value_name in PROOF_GENERATION_ONLY THINKING_BUDGET_HANDOFF_ENABLED; do
         exit 2
     fi
 done
-if [ "$SELECTOR_MODE" != "llm" ] && [ "$SELECTOR_MODE" != "score" ]; then
-    echo "SELECTOR_MODE must be llm or score, got $SELECTOR_MODE" >&2
+if [ "$SELECTOR_MODE" != "llm" ] && \
+   [ "$SELECTOR_MODE" != "llm_tournament" ] && \
+   [ "$SELECTOR_MODE" != "score" ]; then
+    echo "SELECTOR_MODE must be llm, llm_tournament, or score, got $SELECTOR_MODE" >&2
     exit 2
 fi
 case "$PROOF_GENERATION_STRATEGY_PORTFOLIO" in
@@ -93,7 +96,8 @@ for value_name in \
     VERIFY_REQUEST_LIMIT_WHILE_GENERATING \
     VERIFIER_GENERALIST_N \
     SELECTOR_CANDIDATE_LIMIT \
-    SELECTOR_HISTORICAL_CANDIDATE_LIMIT
+    SELECTOR_HISTORICAL_CANDIDATE_LIMIT \
+    SELECTOR_TOURNAMENT_GROUP_SIZE
 do
     value="${!value_name}"
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -101,6 +105,11 @@ do
         exit 2
     fi
 done
+if [ "$SELECTOR_MODE" = "llm_tournament" ] && \
+   [ "$SELECTOR_TOURNAMENT_GROUP_SIZE" -lt 2 ]; then
+    echo "SELECTOR_TOURNAMENT_GROUP_SIZE must be at least 2 for llm_tournament" >&2
+    exit 2
+fi
 if ! [[ "$SELECTOR_MIN_FINAL_SCORE" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]]; then
     echo "SELECTOR_MIN_FINAL_SCORE must be between 0 and 1, got $SELECTOR_MIN_FINAL_SCORE" >&2
     exit 2
@@ -334,6 +343,7 @@ args=(
     --selector-mode "$SELECTOR_MODE"
     --selector-candidate-limit "$SELECTOR_CANDIDATE_LIMIT"
     --selector-historical-candidate-limit "$SELECTOR_HISTORICAL_CANDIDATE_LIMIT"
+    --selector-tournament-group-size "$SELECTOR_TOURNAMENT_GROUP_SIZE"
     --selector-min-final-score "$SELECTOR_MIN_FINAL_SCORE"
 )
 
@@ -366,7 +376,7 @@ echo "source_commit=$AIMO_SOURCE_COMMIT"
 echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
 echo "vllm_capacity=tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((8 * REQUESTS_PER_GPU))"
-echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
+echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
 echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"
 echo "command_file=$rank_command"

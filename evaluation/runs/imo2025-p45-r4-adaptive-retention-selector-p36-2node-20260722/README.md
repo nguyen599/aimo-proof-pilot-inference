@@ -13,12 +13,15 @@ refinement rounds. It changes only the measured P4/P5 interventions:
 - meta-aware version retention without the duplicate challenge penalty; and
 - conservative retention of the earlier proof when two verified versions have
   exactly equal internal evidence, except for strict-pass challenge survival;
-- a `0.0` selector floor with at most eight candidates in the final LLM
-  comparison; four slots are reserved for strong earlier verified proof
-  versions. The exact meta-aware baseline reconstruction assigned internal
+- a `0.0` selector floor and an LLM tournament over every current candidate
+  plus up to eight strong earlier verified proof versions. Each comparison is
+  capped at eight proofs; verifier-ranked seeding spreads the strongest
+  internal candidates across groups before a final winner comparison. The
+  exact meta-aware baseline reconstruction assigned internal
   scores `0.400` and `0.312` to P5 proofs graded `6.0` and `5.5` by GPT-5.6,
   so the former `0.5` floor removed the strongest known proof before the
-  selector could compare it; and
+  selector could compare it. The tournament also avoids making one noisy
+  deterministic top-eight ranking the sole admission gate; and
 - the final selector receives the same P4/P5 completion audit used by the
   verifier and refiner. It must therefore compare the actual closed-descent,
   transition, arbitrary-history, and equality-regime obligations instead of
