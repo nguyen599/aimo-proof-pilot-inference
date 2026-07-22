@@ -225,3 +225,18 @@ nontrivial divisors are `2,5,7`, hence the next term is `35+14+10=59`, not the
 value obtained by automatically using `N/(2p)`. Other candidates omitted odd
 multiples of three from their descent lemma. The adaptive P4 backward and orbit
 prompts now require both checks before accepting a closed descent argument.
+
+## Problem-specific specialist audits
+
+The four generalist verifiers remain unchanged. The four specialist roles now
+receive additional P4/P5 checks only when the problem fingerprint matches IMO
+2025 P4 or P5. This preserves four blind judgments while making the other four
+verifiers explicitly attack the gaps observed by the external grader.
+
+For P4, specialists must test the `N=70` divisor ordering, independently close
+the descent outside multiples of six for `v_2(N)=1`, `2`, and at least `3`, and
+check necessity and sufficiency separately. For P5, they must test Alice's
+strategy against an arbitrary Bazza history using the `S,Q,A,t` Cauchy spike,
+reject maximal-move and cooperative-play shortcuts, and require separate
+non-losing strategies at equality. Generic problems and all generalist prompts
+retain their previous text.

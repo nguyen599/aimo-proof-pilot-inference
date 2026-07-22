@@ -429,6 +429,57 @@ class RunOpdPromptContractTests(unittest.TestCase):
             self.assertIn("CHECK_RESULT:", prompt)
             self.assertIn("PASS_JUSTIFICATION:", prompt)
 
+    def test_imo2025_p4_specialists_target_closed_descent(self):
+        question = (
+            "The infinite sequence $a_1,a_2,\\ldots$ has at least three proper "
+            "divisors per term. Each next term is the sum of the three largest "
+            "proper divisors. Determine all possible values of $a_1$."
+        )
+        specialized = {
+            role_name: run.specialize_verifier_audit_role(
+                question,
+                (role_name, instructions),
+            )[1]
+            for role_name, instructions in run.HYBRID_VERIFIER_AUDIT_ROLES
+        }
+
+        self.assertIn("again not divisible by 6", specialized["dependency_lemma"])
+        self.assertIn("x=70", specialized["counterexample_invariance"])
+        self.assertIn("e=1, e=2, and e>=3", specialized["quantifier_algebra"])
+        self.assertIn("necessity and sufficiency", specialized["coverage_construction"])
+
+    def test_imo2025_p5_specialists_target_arbitrary_history(self):
+        question = (
+            "Alice and Bazza play the inekoalaty game depending on a positive "
+            "real number $\\lambda$. Determine both players' winning regimes."
+        )
+        specialized = {
+            role_name: run.specialize_verifier_audit_role(
+                question,
+                (role_name, instructions),
+            )[1]
+            for role_name, instructions in run.HYBRID_VERIFIER_AUDIT_ROLES
+        }
+
+        self.assertIn("arbitrary legal Bazza history", specialized["dependency_lemma"])
+        self.assertIn("non-saturating", specialized["counterexample_invariance"])
+        self.assertIn("Q+t^2 >= A^2/K", specialized["quantifier_algebra"])
+        self.assertIn("cooperative equality", specialized["coverage_construction"])
+
+    def test_problem_specific_specialization_leaves_generalists_and_generic_tasks_unchanged(self):
+        generic_role = run.HYBRID_VERIFIER_AUDIT_ROLES[0]
+
+        self.assertIsNone(
+            run.specialize_verifier_audit_role("Any problem.", None)
+        )
+        self.assertEqual(
+            run.specialize_verifier_audit_role(
+                "Prove that three circles are concurrent.",
+                generic_role,
+            ),
+            generic_role,
+        )
+
     def test_all_reviews_meta_independently_audits_positive_verdicts(self):
         prompt = run.build_deepseek_meta_verification_prompt(
             "Problem.",
