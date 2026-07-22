@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -46,7 +47,30 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("baseline|diverse|adaptive", launcher)
         self.assertIn("--selector-historical-candidate-limit", launcher)
         self.assertIn("--selector-tournament-group-size", launcher)
+        self.assertIn("--selector-tournament-rounds", launcher)
+        self.assertIn("--selector-tournament-max-candidates", launcher)
+        self.assertIn("--selector-tournament-threshold", launcher)
+        self.assertIn("--selector-score-window", launcher)
+        self.assertIn("--selector-vote-count", launcher)
+        self.assertIn("--selection-temperature", launcher)
         self.assertIn("--selector-min-final-score", launcher)
+
+    def test_checkpoint_ab_launcher_keeps_models_in_independent_runs(self):
+        launcher = (
+            REPO
+            / "evaluation"
+            / "runs"
+            / "imo2025-p45-adaptive-round0-p36-checkpoint-ab-20260722"
+            / "launch_nii_checkpoint_ab.sh"
+        ).read_text()
+
+        self.assertIn("2)", launcher)
+        self.assertIn("3)", launcher)
+        self.assertIn("olmo3-opd-sft-750-vllm", launcher)
+        self.assertIn("opd-32b-bf16-step-225", launcher)
+        self.assertIn("export AIMO_WORLD_SIZE=1", launcher)
+        self.assertIn("export AIMO_NII_NODE_RANK=0", launcher)
+        self.assertIn("export AIMO_PROOF_GENERATION_ONLY=true", launcher)
 
     def test_cli_overrides_cfg_and_distributed_environment(self):
         cfg = SimpleNamespace(
@@ -60,6 +84,12 @@ class RunOpdPromptContractTests(unittest.TestCase):
             selector_candidate_limit=0,
             selector_historical_candidate_limit=0,
             selector_tournament_group_size=8,
+            selector_tournament_rounds=64,
+            selector_tournament_max_candidates=10,
+            selector_tournament_threshold=0.95,
+            selector_score_window=0.2,
+            selector_vote_count=16,
+            selection_temperature=1.0,
             proof_generation_strategy_portfolio="baseline",
         )
         args = run.build_cli_parser().parse_args(
@@ -88,6 +118,18 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "2",
                 "--selector-tournament-group-size",
                 "6",
+                "--selector-tournament-rounds",
+                "24",
+                "--selector-tournament-max-candidates",
+                "12",
+                "--selector-tournament-threshold",
+                "0.9",
+                "--selector-score-window",
+                "0.15",
+                "--selector-vote-count",
+                "9",
+                "--selection-temperature",
+                "0.3",
                 "--selector-min-final-score",
                 "0.25",
                 "--proof-generation-strategy-portfolio",
@@ -130,6 +172,12 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.selector_candidate_limit, 8)
         self.assertEqual(cfg.selector_historical_candidate_limit, 2)
         self.assertEqual(cfg.selector_tournament_group_size, 6)
+        self.assertEqual(cfg.selector_tournament_rounds, 24)
+        self.assertEqual(cfg.selector_tournament_max_candidates, 12)
+        self.assertEqual(cfg.selector_tournament_threshold, 0.9)
+        self.assertEqual(cfg.selector_score_window, 0.15)
+        self.assertEqual(cfg.selector_vote_count, 9)
+        self.assertEqual(cfg.selection_temperature, 0.3)
         self.assertEqual(cfg.selector_min_final_score, 0.25)
         self.assertEqual(cfg.proof_generation_strategy_portfolio, "diverse")
         self.assertEqual(cfg.thinking_budget_refine_final_temperature, 0.6)
@@ -984,6 +1032,192 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(output["candidate_count"], 72)
         self.assertEqual(len(scheduler.candidate_counts), 12)
         self.assertTrue(all(count <= 8 for count in scheduler.candidate_counts))
+
+    def test_stratified_selector_balances_saturated_band_and_finds_target(self):
+        class TargetScheduler:
+            def __init__(self):
+                self.candidate_counts = []
+
+            async def call(self, stage, prompt, **kwargs):
+                content = prompt[-1]["content"]
+                self.candidate_counts.append(content.count('<candidate id="R'))
+                target_position = content.find("TARGET PROOF")
+                selected = 0
+                if target_position >= 0:
+                    id_position = content.rfind(
+                        '<candidate id="R',
+                        0,
+                        target_position,
+                    )
+                    selected = int(
+                        re.match(
+                            r'<candidate id="R(\d+)">',
+                            content[id_position:],
+                        ).group(1)
+                    )
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": f"<selected_id>R{selected}</selected_id>",
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        candidates = [
+            {
+                "attempt_idx": idx,
+                "final_score": 1.0,
+                "proof_solution": (
+                    "TARGET PROOF" if idx == 7 else f"ordinary proof {idx}"
+                ),
+            }
+            for idx in range(8)
+        ]
+        cfg = SimpleNamespace(
+            selector_mode="llm_stratified_tournament",
+            selector_tournament_group_size=4,
+            selector_tournament_rounds=16,
+            selector_tournament_max_candidates=8,
+            selector_tournament_threshold=0.95,
+            selector_score_window=0.2,
+            selector_vote_count=5,
+            selector_max_candidate_chars=10_000,
+            selection_temperature=0.3,
+        )
+        scheduler = TargetScheduler()
+
+        selected_idx, output = run.asyncio.run(
+            run.select_best_candidate(
+                "problem",
+                candidates,
+                scheduler,
+                cfg,
+            )
+        )
+
+        self.assertEqual(selected_idx, 7)
+        self.assertEqual(output["stratified_mode"], "saturated_tournament")
+        self.assertEqual(output["valid_ballots"], 16)
+        self.assertEqual(len(scheduler.candidate_counts), 16)
+        self.assertTrue(all(count == 4 for count in scheduler.candidate_counts))
+        appearance_counts = list(output["appearances"].values())
+        self.assertLessEqual(max(appearance_counts) - min(appearance_counts), 1)
+
+    def test_stratified_selector_window_excludes_low_scored_candidates(self):
+        class TargetScheduler:
+            def __init__(self):
+                self.prompts = []
+
+            async def call(self, stage, prompt, **kwargs):
+                content = prompt[-1]["content"]
+                self.prompts.append(content)
+                target_position = content.find("TARGET PROOF")
+                id_position = content.rfind(
+                    '<candidate id="R',
+                    0,
+                    target_position,
+                )
+                selected = int(
+                    re.match(
+                        r'<candidate id="R(\d+)">',
+                        content[id_position:],
+                    ).group(1)
+                )
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": f"<selected_id>R{selected}</selected_id>",
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        candidates = [
+            {"attempt_idx": 0, "final_score": 0.6, "proof_solution": "top"},
+            {
+                "attempt_idx": 1,
+                "final_score": 0.5,
+                "proof_solution": "TARGET PROOF",
+            },
+            {
+                "attempt_idx": 2,
+                "final_score": 0.45,
+                "proof_solution": "EXCLUDED PROOF",
+            },
+            {"attempt_idx": 3, "final_score": 0.1, "proof_solution": "low"},
+        ]
+        cfg = SimpleNamespace(
+            selector_mode="llm_stratified_tournament",
+            selector_tournament_group_size=4,
+            selector_tournament_rounds=16,
+            selector_tournament_max_candidates=10,
+            selector_tournament_threshold=0.95,
+            selector_score_window=0.2,
+            selector_vote_count=5,
+            selector_max_candidate_chars=10_000,
+            selection_temperature=0.3,
+        )
+        scheduler = TargetScheduler()
+
+        selected_idx, output = run.asyncio.run(
+            run.select_best_candidate(
+                "problem",
+                candidates,
+                scheduler,
+                cfg,
+            )
+        )
+
+        self.assertEqual(selected_idx, 1)
+        self.assertEqual(output["stratified_mode"], "windowed_vote")
+        self.assertAlmostEqual(output["score_floor"], 0.48)
+        self.assertEqual(output["ballot_count"], 5)
+        self.assertTrue(all("EXCLUDED PROOF" not in text for text in scheduler.prompts))
+
+    def test_stratified_selector_falls_back_when_all_ballots_are_invalid(self):
+        class InvalidScheduler:
+            async def call(self, stage, prompt, **kwargs):
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": "unparseable",
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        candidates = [
+            {"attempt_idx": 0, "final_score": 0.6, "proof_solution": "top"},
+            {"attempt_idx": 1, "final_score": 0.5, "proof_solution": "second"},
+        ]
+        cfg = SimpleNamespace(
+            selector_mode="llm_stratified_tournament",
+            selector_tournament_group_size=4,
+            selector_tournament_rounds=16,
+            selector_tournament_max_candidates=10,
+            selector_tournament_threshold=0.95,
+            selector_score_window=0.2,
+            selector_vote_count=5,
+            selector_max_candidate_chars=10_000,
+            selection_temperature=0.3,
+        )
+
+        selected_idx, output = run.asyncio.run(
+            run.select_best_candidate(
+                "problem",
+                candidates,
+                InvalidScheduler(),
+                cfg,
+            )
+        )
+
+        self.assertEqual(selected_idx, 0)
+        self.assertFalse(output["success"])
+        self.assertEqual(output["fallback_reason"], "no_valid_selector_ballots")
 
     def test_selector_pool_reserves_slots_for_historical_versions(self):
         candidates = [

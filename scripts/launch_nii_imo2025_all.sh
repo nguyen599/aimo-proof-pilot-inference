@@ -29,7 +29,13 @@ SELECTOR_MODE="${AIMO_SELECTOR_MODE:-llm}"
 SELECTOR_CANDIDATE_LIMIT="${AIMO_SELECTOR_CANDIDATE_LIMIT:-0}"
 SELECTOR_HISTORICAL_CANDIDATE_LIMIT="${AIMO_SELECTOR_HISTORICAL_CANDIDATE_LIMIT:-0}"
 SELECTOR_TOURNAMENT_GROUP_SIZE="${AIMO_SELECTOR_TOURNAMENT_GROUP_SIZE:-8}"
+SELECTOR_TOURNAMENT_ROUNDS="${AIMO_SELECTOR_TOURNAMENT_ROUNDS:-64}"
+SELECTOR_TOURNAMENT_MAX_CANDIDATES="${AIMO_SELECTOR_TOURNAMENT_MAX_CANDIDATES:-10}"
+SELECTOR_TOURNAMENT_THRESHOLD="${AIMO_SELECTOR_TOURNAMENT_THRESHOLD:-0.95}"
+SELECTOR_SCORE_WINDOW="${AIMO_SELECTOR_SCORE_WINDOW:-0.2}"
+SELECTOR_VOTE_COUNT="${AIMO_SELECTOR_VOTE_COUNT:-16}"
 SELECTOR_MIN_FINAL_SCORE="${AIMO_SELECTOR_MIN_FINAL_SCORE:-0.5}"
+SELECTION_TEMPERATURE="${AIMO_SELECTION_TEMPERATURE:-1.0}"
 VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_REQUEST_LIMIT_WHILE_GENERATING="${AIMO_VERIFY_REQUEST_LIMIT_WHILE_GENERATING:-0}"
 VERIFY_N="${AIMO_VERIFY_N:-8}"
@@ -73,8 +79,9 @@ for value_name in PROOF_GENERATION_ONLY THINKING_BUDGET_HANDOFF_ENABLED; do
 done
 if [ "$SELECTOR_MODE" != "llm" ] && \
    [ "$SELECTOR_MODE" != "llm_tournament" ] && \
+   [ "$SELECTOR_MODE" != "llm_stratified_tournament" ] && \
    [ "$SELECTOR_MODE" != "score" ]; then
-    echo "SELECTOR_MODE must be llm, llm_tournament, or score, got $SELECTOR_MODE" >&2
+    echo "SELECTOR_MODE must be llm, llm_tournament, llm_stratified_tournament, or score, got $SELECTOR_MODE" >&2
     exit 2
 fi
 case "$PROOF_GENERATION_STRATEGY_PORTFOLIO" in
@@ -97,7 +104,10 @@ for value_name in \
     VERIFIER_GENERALIST_N \
     SELECTOR_CANDIDATE_LIMIT \
     SELECTOR_HISTORICAL_CANDIDATE_LIMIT \
-    SELECTOR_TOURNAMENT_GROUP_SIZE
+    SELECTOR_TOURNAMENT_GROUP_SIZE \
+    SELECTOR_TOURNAMENT_ROUNDS \
+    SELECTOR_TOURNAMENT_MAX_CANDIDATES \
+    SELECTOR_VOTE_COUNT
 do
     value="${!value_name}"
     if ! [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -105,13 +115,26 @@ do
         exit 2
     fi
 done
-if [ "$SELECTOR_MODE" = "llm_tournament" ] && \
+if { [ "$SELECTOR_MODE" = "llm_tournament" ] || \
+     [ "$SELECTOR_MODE" = "llm_stratified_tournament" ]; } && \
    [ "$SELECTOR_TOURNAMENT_GROUP_SIZE" -lt 2 ]; then
-    echo "SELECTOR_TOURNAMENT_GROUP_SIZE must be at least 2 for llm_tournament" >&2
+    echo "SELECTOR_TOURNAMENT_GROUP_SIZE must be at least 2 for tournament selectors" >&2
     exit 2
 fi
 if ! [[ "$SELECTOR_MIN_FINAL_SCORE" =~ ^(0([.][0-9]+)?|1([.]0+)?)$ ]]; then
     echo "SELECTOR_MIN_FINAL_SCORE must be between 0 and 1, got $SELECTOR_MIN_FINAL_SCORE" >&2
+    exit 2
+fi
+if ! [[ "$SELECTOR_TOURNAMENT_THRESHOLD" =~ ^(0[.][0-9]*[1-9][0-9]*|1([.]0+)?)$ ]]; then
+    echo "SELECTOR_TOURNAMENT_THRESHOLD must be in (0, 1], got $SELECTOR_TOURNAMENT_THRESHOLD" >&2
+    exit 2
+fi
+if ! [[ "$SELECTOR_SCORE_WINDOW" =~ ^(0([.][0-9]+)?)$ ]]; then
+    echo "SELECTOR_SCORE_WINDOW must be in [0, 1), got $SELECTOR_SCORE_WINDOW" >&2
+    exit 2
+fi
+if ! [[ "$SELECTION_TEMPERATURE" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "SELECTION_TEMPERATURE must be nonnegative, got $SELECTION_TEMPERATURE" >&2
     exit 2
 fi
 if [ $((TP_SIZE * DP_SIZE)) -ne 8 ]; then
@@ -344,7 +367,13 @@ args=(
     --selector-candidate-limit "$SELECTOR_CANDIDATE_LIMIT"
     --selector-historical-candidate-limit "$SELECTOR_HISTORICAL_CANDIDATE_LIMIT"
     --selector-tournament-group-size "$SELECTOR_TOURNAMENT_GROUP_SIZE"
+    --selector-tournament-rounds "$SELECTOR_TOURNAMENT_ROUNDS"
+    --selector-tournament-max-candidates "$SELECTOR_TOURNAMENT_MAX_CANDIDATES"
+    --selector-tournament-threshold "$SELECTOR_TOURNAMENT_THRESHOLD"
+    --selector-score-window "$SELECTOR_SCORE_WINDOW"
+    --selector-vote-count "$SELECTOR_VOTE_COUNT"
     --selector-min-final-score "$SELECTOR_MIN_FINAL_SCORE"
+    --selection-temperature "$SELECTION_TEMPERATURE"
 )
 
 if [ "$PROOF_GENERATION_ONLY" = "true" ]; then
@@ -376,7 +405,7 @@ echo "source_commit=$AIMO_SOURCE_COMMIT"
 echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
 echo "vllm_capacity=tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((8 * REQUESTS_PER_GPU))"
-echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
+echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_tournament_rounds:${SELECTOR_TOURNAMENT_ROUNDS} selector_tournament_max_candidates:${SELECTOR_TOURNAMENT_MAX_CANDIDATES} selector_tournament_threshold:${SELECTOR_TOURNAMENT_THRESHOLD} selector_score_window:${SELECTOR_SCORE_WINDOW} selector_vote_count:${SELECTOR_VOTE_COUNT} selector_temperature:${SELECTION_TEMPERATURE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
 echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"
 echo "command_file=$rank_command"

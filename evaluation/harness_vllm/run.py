@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import shlex
 import shutil
@@ -605,8 +606,10 @@ class CFG:
     )
     problem_timeout_seconds = DEFAULT_PROBLEM_TIMEOUT_SECONDS
     selection_reserve_seconds = DEFAULT_SELECTION_RESERVE_SECONDS
-    selection_temperature = 1.0
-    selector_mode = "llm"  # llm, llm_tournament, score
+    selection_temperature = float(
+        os.environ.get("AIMO_SELECTION_TEMPERATURE", "1.0")
+    )
+    selector_mode = "llm"  # llm, llm_tournament, llm_stratified_tournament, score
     selector_min_final_score = 0.5
     selector_candidate_limit = int(
         os.environ.get("AIMO_SELECTOR_CANDIDATE_LIMIT", "0")
@@ -616,6 +619,21 @@ class CFG:
     )
     selector_tournament_group_size = int(
         os.environ.get("AIMO_SELECTOR_TOURNAMENT_GROUP_SIZE", "8")
+    )
+    selector_tournament_rounds = int(
+        os.environ.get("AIMO_SELECTOR_TOURNAMENT_ROUNDS", "64")
+    )
+    selector_tournament_max_candidates = int(
+        os.environ.get("AIMO_SELECTOR_TOURNAMENT_MAX_CANDIDATES", "10")
+    )
+    selector_tournament_threshold = float(
+        os.environ.get("AIMO_SELECTOR_TOURNAMENT_THRESHOLD", "0.95")
+    )
+    selector_score_window = float(
+        os.environ.get("AIMO_SELECTOR_SCORE_WINDOW", "0.2")
+    )
+    selector_vote_count = int(
+        os.environ.get("AIMO_SELECTOR_VOTE_COUNT", "16")
     )
 
     vllm_extra_args = default_vllm_extra_args()
@@ -835,6 +853,11 @@ class PipelineConfig:
     selector_candidate_limit: int
     selector_historical_candidate_limit: int
     selector_tournament_group_size: int
+    selector_tournament_rounds: int
+    selector_tournament_max_candidates: int
+    selector_tournament_threshold: float
+    selector_score_window: float
+    selector_vote_count: int
     proof_generation_strategy_portfolio: str = "baseline"
 
 
@@ -7014,7 +7037,8 @@ async def select_best_candidate(
         group: list[dict[str, Any]],
         *,
         detail: str,
-    ) -> tuple[int, dict[str, Any]]:
+        fallback: bool = True,
+    ) -> tuple[Optional[int], dict[str, Any]]:
         prompt = build_selection_prompt(
             question,
             group,
@@ -7028,7 +7052,7 @@ async def select_best_candidate(
             detail=detail,
         )
         selected = parse_selected_index(response.get("text", ""), len(group))
-        if selected is None:
+        if selected is None and fallback:
             selected = fallback_candidate_index(group)
             response["fallback_reason"] = "selector_parse_failed"
         return selected, make_output(
@@ -7036,9 +7060,163 @@ async def select_best_candidate(
         )
 
     if cfg.selector_mode == "llm":
-        return await select_once(
+        selected_idx, output = await select_once(
             candidates,
             detail=f"candidates={len(candidates)}",
+        )
+        assert selected_idx is not None
+        return selected_idx, output
+
+    if cfg.selector_mode == "llm_stratified_tournament":
+        ranked = sorted(
+            list(enumerate(candidates)),
+            key=lambda item: selector_sort_key(item[1]),
+            reverse=True,
+        )
+        group_size = max(2, int(cfg.selector_tournament_group_size))
+        threshold = float(cfg.selector_tournament_threshold)
+        strong = [
+            item for item in ranked if score_sort_value(item[1]) >= threshold
+        ]
+
+        def ballot_rng(kind: str, ballot_idx: int) -> random.Random:
+            payload = "\0".join(
+                [question, kind, str(ballot_idx), str(len(candidates))]
+            ).encode("utf-8")
+            seed = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+            return random.Random(seed)
+
+        async def run_ballot(
+            ballot_idx: int,
+            pool: list[tuple[int, dict[str, Any]]],
+            *,
+            kind: str,
+        ) -> dict[str, Any]:
+            shuffled = list(pool)
+            ballot_rng(kind, ballot_idx).shuffle(shuffled)
+            local_idx, output = await select_once(
+                [candidate for _, candidate in shuffled],
+                detail=(
+                    f"stratified_mode={kind} ballot={ballot_idx} "
+                    f"candidates={len(shuffled)}"
+                ),
+                fallback=False,
+            )
+            selected_index = (
+                shuffled[local_idx][0] if local_idx is not None else None
+            )
+            return {
+                "ballot_index": ballot_idx,
+                "candidate_indices": [idx for idx, _ in shuffled],
+                "selected_local_index": local_idx,
+                "selected_index": selected_index,
+                "output": output,
+            }
+
+        async def finish_ballots(
+            pool: list[tuple[int, dict[str, Any]]],
+            ballots: list[list[tuple[int, dict[str, Any]]]],
+            *,
+            kind: str,
+            appearances: Optional[dict[int, int]] = None,
+            score_floor: Optional[float] = None,
+        ) -> tuple[int, dict[str, Any]]:
+            results = await asyncio.gather(
+                *(
+                    run_ballot(ballot_idx, ballot, kind=kind)
+                    for ballot_idx, ballot in enumerate(ballots)
+                )
+            )
+            counts: dict[int, int] = {}
+            for result in results:
+                selected_index = result["selected_index"]
+                if selected_index is not None:
+                    counts[selected_index] = counts.get(selected_index, 0) + 1
+            rank_order = [idx for idx, _ in pool]
+            if counts:
+                selected_idx = max(
+                    rank_order,
+                    key=lambda idx: (counts.get(idx, 0), -rank_order.index(idx)),
+                )
+                fallback_reason = None
+            else:
+                selected_idx = rank_order[0]
+                fallback_reason = "no_valid_selector_ballots"
+            return selected_idx, {
+                "stage": "selector",
+                "success": bool(counts),
+                "error": None,
+                "text": "",
+                "parsed": {"selected_index": selected_idx},
+                "finish_reason": None,
+                "usage": {},
+                "server_url": None,
+                "latency_s": None,
+                "selected_index": selected_idx,
+                "selector_mode": "llm_stratified_tournament",
+                "stratified_mode": kind,
+                "candidate_count": len(candidates),
+                "pool_indices": rank_order,
+                "score_floor": score_floor,
+                "tournament_threshold": threshold,
+                "group_size": group_size,
+                "ballot_count": len(ballots),
+                "valid_ballots": sum(
+                    result["selected_index"] is not None for result in results
+                ),
+                "counts": counts,
+                "appearances": appearances,
+                "ballots": results,
+                "fallback_reason": fallback_reason,
+            }
+
+        if len(strong) > group_size:
+            max_candidates = max(
+                group_size,
+                int(cfg.selector_tournament_max_candidates),
+            )
+            pool = strong[:max_candidates]
+            rounds_n = max(1, int(cfg.selector_tournament_rounds))
+            appearances = {idx: 0 for idx, _ in pool}
+            brackets: list[list[tuple[int, dict[str, Any]]]] = []
+            schedule_rng = ballot_rng("schedule", 0)
+            for _ in range(rounds_n):
+                ordered = sorted(
+                    pool,
+                    key=lambda item: (
+                        appearances[item[0]],
+                        schedule_rng.random(),
+                    ),
+                )
+                bracket = ordered[: min(group_size, len(ordered))]
+                for idx, _ in bracket:
+                    appearances[idx] += 1
+                brackets.append(bracket)
+            return await finish_ballots(
+                pool,
+                brackets,
+                kind="saturated_tournament",
+                appearances=appearances,
+            )
+
+        best_score = score_sort_value(ranked[0][1])
+        score_floor = best_score * (1.0 - float(cfg.selector_score_window))
+        pool = [
+            item for item in ranked if score_sort_value(item[1]) >= score_floor
+        ][:group_size]
+        if len(pool) < 2:
+            selected_idx = pool[0][0] if pool else ranked[0][0]
+            return selected_idx, selector_fallback_output(
+                selected_idx,
+                "stratified_pool_has_one_candidate",
+                len(candidates),
+            )
+        ballots = [list(pool) for _ in range(max(1, int(cfg.selector_vote_count)))]
+        return await finish_ballots(
+            pool,
+            ballots,
+            kind="windowed_vote",
+            score_floor=score_floor,
         )
 
     group_size = max(2, int(cfg.selector_tournament_group_size))
@@ -7077,6 +7255,7 @@ async def select_best_candidate(
         round_groups: list[dict[str, Any]] = []
         for group_idx, (group, result) in enumerate(zip(groups, results)):
             local_idx, output = result
+            assert local_idx is not None
             original_idx, candidate = group[local_idx]
             next_active.append((original_idx, candidate))
             round_groups.append(
@@ -7844,6 +8023,11 @@ class ProofRuntime:
         selector_candidate_limit: int,
         selector_historical_candidate_limit: int,
         selector_tournament_group_size: int,
+        selector_tournament_rounds: int,
+        selector_tournament_max_candidates: int,
+        selector_tournament_threshold: float,
+        selector_score_window: float,
+        selector_vote_count: int,
         vllm_extra_args: str,
         stream_interval: int,
         host: str,
@@ -7937,10 +8121,24 @@ class ProofRuntime:
         if normalized_meta_policy not in {"all-reviews", "low-only"}:
             raise ValueError("--meta_policy must be either 'all-reviews' or 'low-only'")
         normalized_selector_mode = selector_mode.strip().lower()
-        if normalized_selector_mode not in {"llm", "llm_tournament", "score"}:
+        if normalized_selector_mode not in {
+            "llm",
+            "llm_tournament",
+            "llm_stratified_tournament",
+            "score",
+        }:
             raise ValueError(
-                "selector_mode must be one of 'llm', 'llm_tournament', or 'score'"
+                "selector_mode must be one of 'llm', 'llm_tournament', "
+                "'llm_stratified_tournament', or 'score'"
             )
+        normalized_selector_tournament_threshold = float(
+            selector_tournament_threshold
+        )
+        if not 0.0 < normalized_selector_tournament_threshold <= 1.0:
+            raise ValueError("selector_tournament_threshold must be in (0, 1]")
+        normalized_selector_score_window = float(selector_score_window)
+        if not 0.0 <= normalized_selector_score_window < 1.0:
+            raise ValueError("selector_score_window must be in [0, 1)")
         normalized_refinement_strategy = refinement_strategy.strip().lower()
         if normalized_refinement_strategy not in REFINEMENT_STRATEGIES:
             raise ValueError(
@@ -8108,6 +8306,19 @@ class ProofRuntime:
                 2,
                 int(selector_tournament_group_size),
             ),
+            selector_tournament_rounds=max(
+                1,
+                int(selector_tournament_rounds),
+            ),
+            selector_tournament_max_candidates=max(
+                2,
+                int(selector_tournament_max_candidates),
+            ),
+            selector_tournament_threshold=(
+                normalized_selector_tournament_threshold
+            ),
+            selector_score_window=normalized_selector_score_window,
+            selector_vote_count=max(1, int(selector_vote_count)),
             proof_generation_strategy_portfolio=(
                 normalized_proof_generation_strategy_portfolio
             ),
@@ -8791,12 +9002,23 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--selection-reserve-seconds", type=int)
     pipeline.add_argument(
         "--selector-mode",
-        choices=("llm", "llm_tournament", "score"),
+        choices=(
+            "llm",
+            "llm_tournament",
+            "llm_stratified_tournament",
+            "score",
+        ),
     )
     pipeline.add_argument("--selector-candidate-limit", type=int)
     pipeline.add_argument("--selector-historical-candidate-limit", type=int)
     pipeline.add_argument("--selector-tournament-group-size", type=int)
+    pipeline.add_argument("--selector-tournament-rounds", type=int)
+    pipeline.add_argument("--selector-tournament-max-candidates", type=int)
+    pipeline.add_argument("--selector-tournament-threshold", type=float)
+    pipeline.add_argument("--selector-score-window", type=float)
+    pipeline.add_argument("--selector-vote-count", type=int)
     pipeline.add_argument("--selector-min-final-score", type=float)
+    pipeline.add_argument("--selection-temperature", type=float)
     pipeline.add_argument("--temperature", type=float)
     pipeline.add_argument("--top-p", type=float)
     pipeline.add_argument("--top-k", type=int)
@@ -8921,7 +9143,15 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
             "selector_historical_candidate_limit"
         ),
         "selector_tournament_group_size": "selector_tournament_group_size",
+        "selector_tournament_rounds": "selector_tournament_rounds",
+        "selector_tournament_max_candidates": (
+            "selector_tournament_max_candidates"
+        ),
+        "selector_tournament_threshold": "selector_tournament_threshold",
+        "selector_score_window": "selector_score_window",
+        "selector_vote_count": "selector_vote_count",
         "selector_min_final_score": "selector_min_final_score",
+        "selection_temperature": "selection_temperature",
         "temperature": "temperature",
         "top_p": "top_p",
         "top_k": "top_k",
@@ -9148,6 +9378,16 @@ def run(cfg: type[CFG] = CFG) -> None:
             "selector_tournament_group_size": int(
                 cfg.selector_tournament_group_size
             ),
+            "selector_tournament_rounds": int(cfg.selector_tournament_rounds),
+            "selector_tournament_max_candidates": int(
+                cfg.selector_tournament_max_candidates
+            ),
+            "selector_tournament_threshold": float(
+                cfg.selector_tournament_threshold
+            ),
+            "selector_score_window": float(cfg.selector_score_window),
+            "selector_vote_count": int(cfg.selector_vote_count),
+            "selection_temperature": float(cfg.selection_temperature),
             "temperature": float(cfg.temperature),
             "top_p": float(cfg.top_p),
             "top_k": int(cfg.top_k),
@@ -9405,6 +9645,13 @@ def run(cfg: type[CFG] = CFG) -> None:
             selector_tournament_group_size=(
                 cfg.selector_tournament_group_size
             ),
+            selector_tournament_rounds=cfg.selector_tournament_rounds,
+            selector_tournament_max_candidates=(
+                cfg.selector_tournament_max_candidates
+            ),
+            selector_tournament_threshold=cfg.selector_tournament_threshold,
+            selector_score_window=cfg.selector_score_window,
+            selector_vote_count=cfg.selector_vote_count,
             vllm_extra_args=cfg.vllm_extra_args,
             stream_interval=cfg.stream_interval,
             host=cfg.host,

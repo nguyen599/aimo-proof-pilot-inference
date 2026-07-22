@@ -13,19 +13,24 @@ refinement rounds. It changes only the measured P4/P5 interventions:
 - meta-aware version retention without the duplicate challenge penalty; and
 - conservative retention of the earlier proof when two verified versions have
   exactly equal internal evidence, except for strict-pass challenge survival;
-- a `0.0` selector floor and an LLM tournament over every current candidate
-  plus up to 36 earlier verified proof versions, initially taking at most one
-  version per candidate. This prevents the noisy internal ranking from
-  excluding the known externally strongest P4 history. Each comparison is
-  capped at eight proofs; verifier-ranked seeding spreads the strongest
-  internal candidates across groups before a final winner comparison. With 72
-  entrants this requires at most 12 selector calls, compared with the thousands
-  of verifier/meta calls in the four-round search. The
+- a `0.0` selector floor and a saturation-aware stratified selector over every
+  current candidate plus up to 36 earlier verified proof versions, initially
+  taking at most one version per candidate. This prevents the noisy internal
+  ranking from excluding the known externally strongest P4 history. If more
+  than four candidates have internal score at least `0.95`, the selector runs
+  64 balanced, independently shuffled four-proof ballots over the best ten in
+  that saturated band. Otherwise it runs 16 shuffled ballots over at most four
+  proofs within 20% of the best internal score. Failed or malformed ballots are
+  null votes, and ties fall back toward the better internal rank. The selector
+  uses temperature `0.3`. These defaults match the tournament-selector branch
+  in the teammate pipeline while remaining an opt-in mode; the legacy one-shot
+  and elimination-tournament modes are unchanged. The
   exact meta-aware baseline reconstruction assigned internal
   scores `0.400` and `0.312` to P5 proofs graded `6.0` and `5.5` by GPT-5.6,
   so the former `0.5` floor removed the strongest known proof before the
-  selector could compare it. The tournament also avoids making one noisy
-  deterministic top-eight ranking the sole admission gate; and
+  selector could compare it. The stratified ballots also avoid making one
+  noisy comparison or deterministic top-four ranking the sole admission gate;
+  and
 - the final selector receives the same P4/P5 completion audit used by the
   verifier and refiner. It must therefore compare the actual closed-descent,
   transition, arbitrary-history, and equality-regime obligations instead of
@@ -62,3 +67,15 @@ proofs before launch:
 This audit establishes that the portfolio prompts point toward known strong
 proof structures. It does not replace the round-zero external quality gate or
 the final four-round comparison.
+
+## Teammate pipeline evidence
+
+The teammate `feature/tournament-selector` branch reports that its step-225 OPD
+checkpoint and deploy checkpoint are statistically tied on the graded IMO 2026
+run, while increasing proof width from 32 to 64 per round produced a perfect P5
+proof after one refinement round. It also found that the self-verifier became
+anti-correlated with external quality inside a saturated `0.95`-to-`1.0` band.
+That supports the selector design above, but it does not establish a checkpoint
+win on IMO 2025. Checkpoint, search width, and selector must therefore be tested
+as separate factors on the same P4/P5 inputs and graded with the same external
+grader before replacing this run's model or candidate count.
