@@ -27,6 +27,14 @@ each refinement receives that candidate's own retained proof and critique
 history. Porting multi-parent refinement therefore requires a round-level global
 pool and synchronization barrier; it is not a prompt-only change.
 
+That topology difference is not yet the measured bottleneck on our P4/P5 run.
+Our independent-lineage round-three snapshot already contained a GPT-5.6-graded
+`7/7` P5 proof, three additional `6/7` P5 proofs, and a retained `7/7` P4 proof
+from round two. The teammate's 64-wide run likewise found a `7/7` P5 proof, but
+this does not establish that its multi-parent ancestry was necessary. Both
+pipelines can create a correct proof; the unresolved end-to-end question is
+whether the final selector finds the correct proof in a verifier-saturated pool.
+
 The prior 64-wide SFT750 round-zero benchmark does not measure the adaptive
 P4/P5 planning portfolio. All 84 externally graded P4/P5 candidates in that run
 used the baseline trained prover prompt. It established baseline pool quality
@@ -65,7 +73,10 @@ checkpoint, and selection must remain separate factors.
 Multi-parent refinement is also deferred from the first treatment. Adding it at
 the same time would change candidate ancestry, verifier inputs, request volume,
 and completion timing, preventing attribution of any score change to the new
-selector or checkpoint.
+selector or checkpoint. It remains an opt-in follow-up only if the checkpoint
+and tournament-controlled run fails to put a correct proof in the pool, or if a
+36-versus-64 width comparison shows that independent lineages cannot convert
+additional initial diversity into stronger later proofs.
 
 ## Test plan
 
