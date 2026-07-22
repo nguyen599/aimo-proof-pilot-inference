@@ -50,6 +50,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("--selector-tournament-rounds", launcher)
         self.assertIn("--selector-tournament-max-candidates", launcher)
         self.assertIn("--selector-tournament-threshold", launcher)
+        self.assertIn("--selector-tournament-force-wide-pool", launcher)
         self.assertIn("--selector-score-window", launcher)
         self.assertIn("--selector-vote-count", launcher)
         self.assertIn("--selection-temperature", launcher)
@@ -87,6 +88,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
             selector_tournament_rounds=64,
             selector_tournament_max_candidates=10,
             selector_tournament_threshold=0.95,
+            selector_tournament_force_wide_pool=False,
             selector_score_window=0.2,
             selector_vote_count=16,
             selection_temperature=1.0,
@@ -124,6 +126,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "12",
                 "--selector-tournament-threshold",
                 "0.9",
+                "--selector-tournament-force-wide-pool",
                 "--selector-score-window",
                 "0.15",
                 "--selector-vote-count",
@@ -175,6 +178,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(cfg.selector_tournament_rounds, 24)
         self.assertEqual(cfg.selector_tournament_max_candidates, 12)
         self.assertEqual(cfg.selector_tournament_threshold, 0.9)
+        self.assertTrue(cfg.selector_tournament_force_wide_pool)
         self.assertEqual(cfg.selector_score_window, 0.15)
         self.assertEqual(cfg.selector_vote_count, 9)
         self.assertEqual(cfg.selection_temperature, 0.3)
@@ -1176,6 +1180,72 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertAlmostEqual(output["score_floor"], 0.48)
         self.assertEqual(output["ballot_count"], 5)
         self.assertTrue(all("EXCLUDED PROOF" not in text for text in scheduler.prompts))
+
+    def test_stratified_selector_forced_wide_pool_can_select_rank_seven(self):
+        class TargetScheduler:
+            async def call(self, stage, prompt, **kwargs):
+                content = prompt[-1]["content"]
+                target_position = content.find("TARGET PROOF")
+                selected = 0
+                if target_position >= 0:
+                    id_position = content.rfind(
+                        '<candidate id="R',
+                        0,
+                        target_position,
+                    )
+                    selected = int(
+                        re.match(
+                            r'<candidate id="R(\d+)">',
+                            content[id_position:],
+                        ).group(1)
+                    )
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": f"<selected_id>R{selected}</selected_id>",
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        candidates = [
+            {
+                "attempt_idx": idx,
+                "final_score": 1.0 - idx / 10,
+                "proof_solution": (
+                    "TARGET PROOF" if idx == 7 else f"ordinary proof {idx}"
+                ),
+            }
+            for idx in range(8)
+        ]
+        cfg = SimpleNamespace(
+            selector_mode="llm_stratified_tournament",
+            selector_tournament_group_size=4,
+            selector_tournament_rounds=16,
+            selector_tournament_max_candidates=8,
+            selector_tournament_threshold=0.95,
+            selector_tournament_force_wide_pool=True,
+            selector_score_window=0.2,
+            selector_vote_count=5,
+            selector_max_candidate_chars=10_000,
+            selection_temperature=0.3,
+        )
+
+        selected_idx, output = run.asyncio.run(
+            run.select_best_candidate(
+                "problem",
+                candidates,
+                TargetScheduler(),
+                cfg,
+            )
+        )
+
+        self.assertEqual(selected_idx, 7)
+        self.assertEqual(output["stratified_mode"], "forced_wide_tournament")
+        self.assertEqual(output["pool_indices"], list(range(8)))
+        appearance_counts = list(output["appearances"].values())
+        self.assertLessEqual(max(appearance_counts) - min(appearance_counts), 1)
 
     def test_stratified_selector_falls_back_when_all_ballots_are_invalid(self):
         class InvalidScheduler:

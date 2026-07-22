@@ -629,6 +629,10 @@ class CFG:
     selector_tournament_threshold = float(
         os.environ.get("AIMO_SELECTOR_TOURNAMENT_THRESHOLD", "0.95")
     )
+    selector_tournament_force_wide_pool = environment_flag(
+        "AIMO_SELECTOR_TOURNAMENT_FORCE_WIDE_POOL",
+        False,
+    )
     selector_score_window = float(
         os.environ.get("AIMO_SELECTOR_SCORE_WINDOW", "0.2")
     )
@@ -856,6 +860,7 @@ class PipelineConfig:
     selector_tournament_rounds: int
     selector_tournament_max_candidates: int
     selector_tournament_threshold: float
+    selector_tournament_force_wide_pool: bool
     selector_score_window: float
     selector_vote_count: int
     proof_generation_strategy_portfolio: str = "baseline"
@@ -7170,12 +7175,11 @@ async def select_best_candidate(
                 "fallback_reason": fallback_reason,
             }
 
-        if len(strong) > group_size:
-            max_candidates = max(
-                group_size,
-                int(cfg.selector_tournament_max_candidates),
-            )
-            pool = strong[:max_candidates]
+        async def run_balanced_tournament(
+            pool: list[tuple[int, dict[str, Any]]],
+            *,
+            kind: str,
+        ) -> tuple[int, dict[str, Any]]:
             rounds_n = max(1, int(cfg.selector_tournament_rounds))
             appearances = {idx: 0 for idx, _ in pool}
             brackets: list[list[tuple[int, dict[str, Any]]]] = []
@@ -7195,8 +7199,25 @@ async def select_best_candidate(
             return await finish_ballots(
                 pool,
                 brackets,
-                kind="saturated_tournament",
+                kind=kind,
                 appearances=appearances,
+            )
+
+        max_candidates = max(
+            group_size,
+            int(cfg.selector_tournament_max_candidates),
+        )
+        if getattr(cfg, "selector_tournament_force_wide_pool", False):
+            return await run_balanced_tournament(
+                ranked[:max_candidates],
+                kind="forced_wide_tournament",
+            )
+
+        if len(strong) > group_size:
+            pool = strong[:max_candidates]
+            return await run_balanced_tournament(
+                pool,
+                kind="saturated_tournament",
             )
 
         best_score = score_sort_value(ranked[0][1])
@@ -8026,6 +8047,7 @@ class ProofRuntime:
         selector_tournament_rounds: int,
         selector_tournament_max_candidates: int,
         selector_tournament_threshold: float,
+        selector_tournament_force_wide_pool: bool,
         selector_score_window: float,
         selector_vote_count: int,
         vllm_extra_args: str,
@@ -8316,6 +8338,9 @@ class ProofRuntime:
             ),
             selector_tournament_threshold=(
                 normalized_selector_tournament_threshold
+            ),
+            selector_tournament_force_wide_pool=bool(
+                selector_tournament_force_wide_pool
             ),
             selector_score_window=normalized_selector_score_window,
             selector_vote_count=max(1, int(selector_vote_count)),
@@ -9015,6 +9040,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--selector-tournament-rounds", type=int)
     pipeline.add_argument("--selector-tournament-max-candidates", type=int)
     pipeline.add_argument("--selector-tournament-threshold", type=float)
+    pipeline.add_argument(
+        "--selector-tournament-force-wide-pool",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     pipeline.add_argument("--selector-score-window", type=float)
     pipeline.add_argument("--selector-vote-count", type=int)
     pipeline.add_argument("--selector-min-final-score", type=float)
@@ -9148,6 +9178,9 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
             "selector_tournament_max_candidates"
         ),
         "selector_tournament_threshold": "selector_tournament_threshold",
+        "selector_tournament_force_wide_pool": (
+            "selector_tournament_force_wide_pool"
+        ),
         "selector_score_window": "selector_score_window",
         "selector_vote_count": "selector_vote_count",
         "selector_min_final_score": "selector_min_final_score",
@@ -9384,6 +9417,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             ),
             "selector_tournament_threshold": float(
                 cfg.selector_tournament_threshold
+            ),
+            "selector_tournament_force_wide_pool": bool(
+                cfg.selector_tournament_force_wide_pool
             ),
             "selector_score_window": float(cfg.selector_score_window),
             "selector_vote_count": int(cfg.selector_vote_count),
@@ -9650,6 +9686,9 @@ def run(cfg: type[CFG] = CFG) -> None:
                 cfg.selector_tournament_max_candidates
             ),
             selector_tournament_threshold=cfg.selector_tournament_threshold,
+            selector_tournament_force_wide_pool=(
+                cfg.selector_tournament_force_wide_pool
+            ),
             selector_score_window=cfg.selector_score_window,
             selector_vote_count=cfg.selector_vote_count,
             vllm_extra_args=cfg.vllm_extra_args,

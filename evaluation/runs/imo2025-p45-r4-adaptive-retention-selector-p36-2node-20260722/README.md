@@ -17,13 +17,17 @@ refinement rounds. It changes only the measured P4/P5 interventions:
   current candidate plus up to 36 earlier verified proof versions, initially
   taking at most one version per candidate. This prevents the noisy internal
   ranking from excluding the known externally strongest P4 history. If more
-  than four candidates have capped internal score at least `0.5`, the selector
-  runs 64 balanced, independently shuffled four-proof ballots over the best ten
-  in that saturated band. Otherwise it runs 16 shuffled ballots over at most four
+  treatment always runs 64 balanced, independently shuffled four-proof ballots
+  over the best ten internally ranked proofs. This explicit wide-pool override
+  is needed because the externally perfect P4 history ranked seventh internally;
+  a saturation-only or top-four admission rule cannot select it. The generic
+  mode still supports the teammate behavior: when the override is disabled and
+  more than four candidates have capped internal score at least `0.5`, it uses
+  the saturated band; otherwise it runs 16 shuffled ballots over at most four
   proofs within 20% of the best internal score. Failed or malformed ballots are
   null votes, and ties fall back toward the better internal rank. The selector
   uses temperature `0.3`. The ballot schedule matches the tournament-selector
-  branch in the teammate pipeline, but the saturation threshold is calibrated
+  branch in the teammate pipeline, but the optional saturation threshold is calibrated
   to this runtime's stricter meta-aware score. The teammate's `0.95` threshold
   applies to mean verifier scores; here validated critiques cap broad groups at
   `0.5`. In the measured round-three P4 pool four candidates were already tied

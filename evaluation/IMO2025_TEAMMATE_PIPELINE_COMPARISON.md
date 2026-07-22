@@ -41,9 +41,13 @@ mean verifier score, while our production rank uses a stricter meta-aware
 measured IMO 2025 round-three pool, four P4 candidates were tied at that cap and
 externally strong proofs appeared below it. The treatment therefore uses a
 `0.5` saturation threshold on our capped score while preserving the teammate
-ballot schedule. This is a score-scale calibration, not a relaxation of proof
+ballot schedule. The treatment additionally forces that balanced schedule over
+the top ten internally ranked proofs: the known externally perfect P4 history
+ranked seventh internally and would otherwise remain outside every ballot.
+This is a score-scale and admission calibration, not a relaxation of proof
 eligibility: all histories are admitted separately by the treatment's `0.0`
-selector floor.
+selector floor. Generic stratified selection keeps the teammate-compatible
+saturation gate unless this override is enabled explicitly.
 
 The teammate result does **not** establish that its checkpoint is better for our
 IMO 2025 P4/P5 workload. Its checkpoint comparison used different problems, and

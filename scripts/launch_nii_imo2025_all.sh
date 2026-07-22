@@ -32,6 +32,7 @@ SELECTOR_TOURNAMENT_GROUP_SIZE="${AIMO_SELECTOR_TOURNAMENT_GROUP_SIZE:-8}"
 SELECTOR_TOURNAMENT_ROUNDS="${AIMO_SELECTOR_TOURNAMENT_ROUNDS:-64}"
 SELECTOR_TOURNAMENT_MAX_CANDIDATES="${AIMO_SELECTOR_TOURNAMENT_MAX_CANDIDATES:-10}"
 SELECTOR_TOURNAMENT_THRESHOLD="${AIMO_SELECTOR_TOURNAMENT_THRESHOLD:-0.95}"
+SELECTOR_TOURNAMENT_FORCE_WIDE_POOL="${AIMO_SELECTOR_TOURNAMENT_FORCE_WIDE_POOL:-false}"
 SELECTOR_SCORE_WINDOW="${AIMO_SELECTOR_SCORE_WINDOW:-0.2}"
 SELECTOR_VOTE_COUNT="${AIMO_SELECTOR_VOTE_COUNT:-16}"
 SELECTOR_MIN_FINAL_SCORE="${AIMO_SELECTOR_MIN_FINAL_SCORE:-0.5}"
@@ -70,7 +71,11 @@ for value_name in REFINE_ROUNDS STRICT_PASS_CHALLENGE_ROUNDS; do
         exit 2
     fi
 done
-for value_name in PROOF_GENERATION_ONLY THINKING_BUDGET_HANDOFF_ENABLED; do
+for value_name in \
+    PROOF_GENERATION_ONLY \
+    THINKING_BUDGET_HANDOFF_ENABLED \
+    SELECTOR_TOURNAMENT_FORCE_WIDE_POOL
+do
     value="${!value_name}"
     if [ "$value" != "true" ] && [ "$value" != "false" ]; then
         echo "$value_name must be true or false, got $value" >&2
@@ -376,6 +381,12 @@ args=(
     --selection-temperature "$SELECTION_TEMPERATURE"
 )
 
+if [ "$SELECTOR_TOURNAMENT_FORCE_WIDE_POOL" = "true" ]; then
+    args+=(--selector-tournament-force-wide-pool)
+else
+    args+=(--no-selector-tournament-force-wide-pool)
+fi
+
 if [ "$PROOF_GENERATION_ONLY" = "true" ]; then
     args+=(--proof-generation-only)
 fi
@@ -405,7 +416,7 @@ echo "source_commit=$AIMO_SOURCE_COMMIT"
 echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
 echo "vllm_capacity=tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((8 * REQUESTS_PER_GPU))"
-echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_tournament_rounds:${SELECTOR_TOURNAMENT_ROUNDS} selector_tournament_max_candidates:${SELECTOR_TOURNAMENT_MAX_CANDIDATES} selector_tournament_threshold:${SELECTOR_TOURNAMENT_THRESHOLD} selector_score_window:${SELECTOR_SCORE_WINDOW} selector_vote_count:${SELECTOR_VOTE_COUNT} selector_temperature:${SELECTION_TEMPERATURE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
+echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_tournament_rounds:${SELECTOR_TOURNAMENT_ROUNDS} selector_tournament_max_candidates:${SELECTOR_TOURNAMENT_MAX_CANDIDATES} selector_tournament_threshold:${SELECTOR_TOURNAMENT_THRESHOLD} selector_tournament_force_wide_pool:${SELECTOR_TOURNAMENT_FORCE_WIDE_POOL} selector_score_window:${SELECTOR_SCORE_WINDOW} selector_vote_count:${SELECTOR_VOTE_COUNT} selector_temperature:${SELECTION_TEMPERATURE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
 echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"
 echo "command_file=$rank_command"
