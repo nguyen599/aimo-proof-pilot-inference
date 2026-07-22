@@ -167,7 +167,57 @@ class RoundZeroProofQualityTests(unittest.TestCase):
             1,
         )
 
-    def test_prepare_reports_adaptive_strategy_allocation(self) -> None:
+    def test_prepare_accepts_source_jsonl_and_labels_imo_2026(self) -> None:
+        source_rubrics = self.root / "imo-2026.jsonl"
+        source_rubrics.write_text(
+            json.dumps(
+                {
+                    "problem_idx": "4",
+                    "problem": "A clean problem statement.",
+                    "reference_solution": "Must not enter grader inputs.",
+                    "points": 7,
+                    "grading_scheme": [
+                        {
+                            "title": "Complete proof",
+                            "points": 7,
+                            "desc": "The proof is correct and complete.",
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        for candidate_index in range(2):
+            write_call(
+                self.run_dir
+                / "logs"
+                / "rank_0000"
+                / "llm_calls"
+                / "4"
+                / f"cand_{candidate_index}_proof_gen_r0.txt",
+                budget_reached=candidate_index == 1,
+            )
+
+        prepared = prepare(
+            self.run_dir,
+            source_rubrics,
+            ["4"],
+            expected_candidates=2,
+            contest_label="IMO 2026",
+        )
+
+        self.assertEqual(prepared["methodology"]["contest_label"], "IMO 2026")
+        grader_rubric = json.loads(
+            (self.run_dir / "grader_input" / "rubrics.jsonl")
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+        self.assertEqual(grader_rubric["Problem ID"], "p4-c00")
+        self.assertNotIn("reference_solution", grader_rubric)
+        self.assertNotIn("Must not enter", json.dumps(grader_rubric))
+
+    def test_prepare_reports_text_independent_adaptive_cycle(self) -> None:
         self.rubrics.write_text(
             json.dumps(
                 {
@@ -205,15 +255,14 @@ class RoundZeroProofQualityTests(unittest.TestCase):
             row["planning_strategy"]: row
             for row in prepared["problems"][0]["strategies"]
         }
-        self.assertEqual(strategies["baseline"]["total_candidates"], 3)
+        self.assertEqual(strategies["baseline"]["total_candidates"], 8)
+        self.assertEqual(
+            strategies["adversarial_quantifiers"]["total_candidates"],
+            1,
+        )
         self.assertEqual(
             strategies["exhaustive_transitions"]["total_candidates"],
-            3,
-        )
-        self.assertEqual(strategies["state_invariant"]["total_candidates"], 2)
-        self.assertEqual(
-            strategies["proof_obligation_ledger"]["total_candidates"],
-            2,
+            1,
         )
         self.assertEqual(strategies["counterexample_audit"]["total_candidates"], 1)
         self.assertEqual(

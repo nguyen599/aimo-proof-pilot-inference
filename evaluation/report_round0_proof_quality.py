@@ -20,12 +20,12 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from evaluation.harness_vllm.run import (
+from evaluation.harness_vllm.run import (  # noqa: E402
     PROOF_GENERATION_STRATEGY_PORTFOLIOS,
     parse_generation_response,
     resolve_proof_generation_strategy,
 )
-from evaluation.harness_vllm.thinking_handoff import (
+from evaluation.harness_vllm.thinking_handoff import (  # noqa: E402
     parse_saved_proof_generation_call,
 )
 
@@ -88,11 +88,38 @@ def load_rubrics(path: Path, problem_ids: list[str]) -> dict[str, dict[str, str]
             for row in source_rows
         ]
     elif path.suffix.lower() in {".json", ".jsonl"}:
-        rows = [
+        source_rows = [
             json.loads(line)
             for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
+        rows = []
+        for index, row in enumerate(source_rows, start=1):
+            if {"Problem ID", "Problem", "Grading scheme"} <= set(row):
+                rows.append(
+                    {
+                        "Problem ID": str(row["Problem ID"]),
+                        "Problem": str(row["Problem"]),
+                        "Grading scheme": str(row["Grading scheme"]),
+                    }
+                )
+                continue
+            required = {"problem_idx", "problem", "grading_scheme"}
+            missing = required - set(row)
+            if missing:
+                raise ValueError(
+                    f"rubric row {index} missing normalized or source fields: "
+                    f"{sorted(missing)}"
+                )
+            rows.append(
+                {
+                    "Problem ID": str(row["problem_idx"]),
+                    "Problem": str(row["problem"]),
+                    "Grading scheme": render_grading_scheme(
+                        row["grading_scheme"]
+                    ),
+                }
+            )
     else:
         raise ValueError(f"unsupported rubric file: {path}")
 
@@ -152,12 +179,16 @@ def prepare(
     problem_ids: list[str],
     expected_candidates: int,
     strategy_portfolio: str = "baseline",
+    contest_label: str = "IMO 2025",
 ) -> dict[str, Any]:
     if strategy_portfolio not in PROOF_GENERATION_STRATEGY_PORTFOLIOS:
         raise ValueError(
             "strategy portfolio must be one of "
             + ", ".join(PROOF_GENERATION_STRATEGY_PORTFOLIOS)
         )
+    contest_label = contest_label.strip()
+    if not contest_label:
+        raise ValueError("contest label must be nonempty")
     calls = discover_calls(run_dir, problem_ids, expected_candidates)
     rubrics = load_rubrics(rubrics_file, problem_ids)
     strategy_cfg = SimpleNamespace(
@@ -311,6 +342,7 @@ def prepare(
     summary = {
         "schema_version": 1,
         "methodology": {
+            "contest_label": contest_label,
             "round": 0,
             "expected_candidates_per_problem": expected_candidates,
             "proof_generation_strategy_portfolio": strategy_portfolio,
@@ -551,9 +583,13 @@ def finalize(run_dir: Path, grading_dir: Path) -> dict[str, Any]:
         "proof_generation_strategy_portfolio",
         "baseline",
     )
+    contest_label = generation_summary["methodology"].get(
+        "contest_label",
+        "IMO 2025",
+    )
     report = "\n".join(
         [
-            "# IMO 2025 round-0 proof-generation quality",
+            f"# {contest_label} round-0 proof-generation quality",
             "",
             f"Problems {problem_label} each have {expected_candidates} independent "
             f"round-0 proof calls using the `{strategy_portfolio}` planning portfolio. "
@@ -613,6 +649,7 @@ def main() -> None:
         choices=PROOF_GENERATION_STRATEGY_PORTFOLIOS,
         default="baseline",
     )
+    prepare_parser.add_argument("--contest-label", default="IMO 2025")
     finalize_parser = subparsers.add_parser("finalize")
     finalize_parser.add_argument("--run-dir", required=True, type=Path)
     finalize_parser.add_argument("--grading-dir", required=True, type=Path)
@@ -627,6 +664,7 @@ def main() -> None:
             parse_problem_ids(args.problem_ids),
             args.expected_candidates,
             args.strategy_portfolio,
+            args.contest_label,
         )
     else:
         result = finalize(args.run_dir, args.grading_dir)
