@@ -195,6 +195,39 @@ class ExportPipelineCandidatesTests(unittest.TestCase):
             {row["proof_version"] for row in records}, {"initial", "final"}
         )
 
+    def test_problem_filter_skips_incomplete_unrequested_problem(self) -> None:
+        write_json(
+            self.run_dir
+            / "problems"
+            / "0001_feedfacefeedface"
+            / "rank_0000.json",
+            {
+                "run_id": "test-run",
+                "rank": 0,
+                "world_size": 2,
+                "problem_ordinal": 1,
+                "problem_id": "5",
+                "question_hash": "feedfacefeedface",
+                "assigned_attempts": [0, 2],
+                "pipeline_result": {
+                    "candidates": [make_candidate(0)],
+                    "failed_attempts": [],
+                    "skipped_generations": [],
+                    "cancelled_count": 0,
+                },
+            },
+        )
+
+        summary = export_candidates(
+            self.run_dir,
+            self.rubrics,
+            self.output_dir,
+            ["4"],
+        )
+
+        self.assertEqual(summary["problem_ids"], ["4"])
+        self.assertEqual(summary["exported_candidates"], 3)
+
     def test_rejects_missing_rank_payload(self) -> None:
         (
             self.run_dir / "problems" / "0000_deadbeefdeadbeef" / "rank_0001.json"

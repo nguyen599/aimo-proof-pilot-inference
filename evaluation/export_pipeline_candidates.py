@@ -340,10 +340,13 @@ def export_candidates(
 
     for problem_dir in problem_dirs:
         paths = sorted(problem_dir.glob("rank_*.json"))
+        if requested and paths:
+            preview = read_json(paths[0])
+            preview_problem_id = str(preview.get("problem_id") or "").strip()
+            if preview_problem_id and preview_problem_id not in requested:
+                continue
         first, loaded = validate_problem_payloads(paths, manifest=manifest)
         problem_id = str(first["problem_id"])
-        if requested and problem_id not in requested:
-            continue
         if problem_id in seen_problem_ids:
             raise RuntimeError(
                 f"duplicate payload directory for problem {problem_id!r}"
