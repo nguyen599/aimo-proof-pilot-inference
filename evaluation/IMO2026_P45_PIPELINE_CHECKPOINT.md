@@ -164,6 +164,27 @@ independent-lineage pipeline remains available as the control. Before spending
 on a four-round run, replay both selector score sources on an identical stored
 candidate pool and run Gate A on clean 64-proof P4/P5 pools.
 
+## Current execution status
+
+The code and launchers are ready, but **Gate A has not been launched yet**.
+There is therefore no new P4/P5 pool-quality result in this checkpoint. Do not
+start the four-round treatment until Gate A has produced 64 round-zero proofs
+for each problem and external grading has confirmed whether either pool contains
+a correct proof.
+
+The shared NII source checkout was still at `f0b094f` during the last preflight,
+while the required clean-treatment code is on `main` at `54eaee6`. This matters
+before entering the common launcher: `launch_nii_imo2026_p45_gate_a.sh` invokes
+`prepare_imo2026_p45.py` directly from the shared checkout. Update that checkout
+to current `origin/main` and verify `HEAD=54eaee6` (or newer) before launch.
+
+After the Gate A wrapper enters `launch_nii_imo2025_all.sh`, source handling is
+run-local and reproducible: rank 0 fetches `AIMO_SOURCE_REF`, resolves
+`FETCH_HEAD`, and checks that exact commit out detached in the run-specific code
+directory. A stale shared checkout therefore cannot silently change the harness
+used by an already-started run, but it can prevent the P4/P5 wrapper and
+sanitizer from starting in the first place.
+
 ## Reproducibility map
 
 The checkpointed implementation is split into focused commits:
@@ -171,8 +192,11 @@ The checkpointed implementation is split into focused commits:
 - `bf5b70e`: add the opt-in raw-verifier-mean selector score source;
 - `7ab62a7`: preserve verifier score summaries for lossless offline replay;
 - `ed2c637`: forward the selector score source through the shared NII launcher;
-  and
-- `abf0cfc`: add the clean IMO 2026 P4/P5 Gate A launcher.
+- `abf0cfc`: add the clean IMO 2026 P4/P5 Gate A launcher;
+- `795bf88`: expand this experiment checkpoint with teammate findings and the
+  fair-comparison design; and
+- `54eaee6`: add answer-free P4/P5 input preparation, the pinned teammate
+  treatment launcher, its schema-tested config builder, and focused tests.
 
 The follow-up treatment work adds answer-free input preparation plus the
 pinned teammate-pipeline launcher and its schema-tested config builder.
@@ -201,6 +225,37 @@ filesystem included:
 - `/tmp/models/dflash-32b-draft-v2test-phaseL`.
 
 Node state is transient and must be rechecked immediately before launch.
-The last relay session may also have had a foreground `/tmp` scan still ahead
-of later commands in its queue. Check command history before submitting Gate A;
-do not assume a delayed command was lost and submit duplicate launches.
+The successful bounded preflight session was
+`p45-runtime-preflight-1784738273210130592`; it confirmed the vLLM environment,
+source checkout, target checkpoint, and DFlash checkpoint were visible. A broad
+foreground scan from session `find-imo2026-pools-1784737624276264853` remained
+acknowledged in history, but unique-session commands still completed. Do not
+repeat that scan or submit duplicate launches merely because an acknowledgement
+is delayed.
+
+The teammate treatment additionally requires
+`/tmp/chankhavu/venvs/infervenv/.runtime/activate-env.sh` and
+`/tmp/chankhavu/venvs/infervenv/bin/python`. Those exact paths were not yet
+verified in the last preflight, so check them before Gate B. The launcher pins
+the teammate implementation to
+`95a35c66eda41184b846a8489314b9e8f8f43b32` and validates the checked-out commit
+before starting.
+
+## Resume checklist
+
+1. Query the relay for the current Nguyen node mapping; do not assume
+   `node3-hnode755` is still assigned or online.
+2. Audit exact command lines and GPU ownership. Use only the assigned free GPUs;
+   do not stop entrypoint, relay, or unrelated vLLM processes.
+3. Update the shared source checkout to `origin/main` and verify commit
+   `54eaee6` or newer.
+4. Launch Gate A in the background with a unique `AIMO_RUN_ID`, PID file, log,
+   and status file. The clean default is GPUs 4-7, TP2/DP2, two concurrent
+   problems, and 64 proofs per problem.
+5. Wait for all 128 round-zero proof attempts, then externally grade every
+   structurally complete non-cutoff proof twice. Record eligibility, mean,
+   best-of-64, score distribution, and `7/7` count separately for P4 and P5.
+6. Proceed to the four-round teammate treatment only if Gate A demonstrates a
+   usable initial pool. Before that launch, verify the teammate runtime paths
+   above and keep the native SGLang/BF16 versus vLLM/online-FP8 serving-stack
+   confound explicit in the result.
