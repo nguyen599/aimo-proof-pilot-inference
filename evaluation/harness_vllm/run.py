@@ -100,7 +100,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PROMPT_FAMILY_OPD = "opd"
 PROMPT_FAMILY_DEEPSEEK_MATH_V2 = "deepseek_math_v2"
 REFINEMENT_STRATEGIES = ("repair", "reconstruct", "mixed")
-PROOF_GENERATION_STRATEGY_PORTFOLIOS = ("baseline", "diverse", "adaptive")
+PROOF_GENERATION_STRATEGY_PORTFOLIOS = (
+    "baseline",
+    "diverse",
+    "adaptive",
+    "p45_targeted",
+)
 PROOF_GENERATION_STRATEGY_CYCLE = (
     "baseline",
     "baseline",
@@ -166,6 +171,42 @@ ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE = (
     "p5_bazza_pairing",
     "game_regime_completeness",
     "independent_reformulation",
+)
+TARGETED_IMO2025_P4_STRATEGY_CYCLE = (
+    "p4_closed_descent_reduction",
+    "p4_closed_descent_reduction",
+    "p4_closed_descent_reduction",
+    "p4_closed_descent_reduction",
+    "p4_closed_descent_reduction",
+    "p4_closed_descent_reduction",
+    "p4_closed_descent_reduction",
+    "p4_closed_descent_reduction",
+    "p4_orbit_normal_form",
+    "p4_orbit_normal_form",
+    "p4_orbit_normal_form",
+    "p4_orbit_normal_form",
+    "p4_backward_divisibility",
+    "p4_backward_divisibility",
+    "p4_transition_classification",
+    "counterexample_audit",
+)
+TARGETED_IMO2025_P5_STRATEGY_CYCLE = (
+    "p5_complete_three_regime",
+    "p5_complete_three_regime",
+    "p5_complete_three_regime",
+    "p5_complete_three_regime",
+    "p5_complete_three_regime",
+    "p5_complete_three_regime",
+    "p5_complete_three_regime",
+    "p5_complete_three_regime",
+    "p5_alice_cauchy_spike",
+    "p5_alice_cauchy_spike",
+    "p5_alice_cauchy_spike",
+    "p5_alice_cauchy_spike",
+    "p5_threshold_pairing",
+    "p5_threshold_pairing",
+    "p5_bazza_pairing",
+    "game_regime_completeness",
 )
 PROOF_GENERATION_PLANNING_EMPHASES = {
     "adversarial_quantifiers": (
@@ -267,6 +308,32 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
         "explicit parameterization of every initial value, and then verify that "
         "each parameterized value really produces a legal infinite sequence."
     ),
+    "p4_closed_descent_reduction": (
+        "For this divisor iteration, use the following complete proof skeleton; "
+        "do not replace any case by an 'analogous' assertion. Write psi(x) for "
+        "the next term. First prove that odd x stays odd and has psi(x)<x. Next "
+        "let x=2^e m with m odd and 3 not dividing m. If e=1, let p be the "
+        "smallest prime divisor of m and let q be the smallest divisor of m "
+        "strictly greater than p, taking q=+infinity if none exists. The first "
+        "three complementary denominators are "
+        "2,p,min(2p,q): when q<2p the next term is odd, while when 2p<=q it is "
+        "m+3m/p, which is nonzero modulo 3. When m=1, interpret p as "
+        "+infinity. If e=2, the denominators are 2,4,p "
+        "and psi(x)=x/2+x/4+x/p is nonzero modulo 3. If e>=3, the denominators "
+        "are 2,4,min(8,p), and the same reciprocal calculation is nonzero "
+        "modulo 3. In every branch also prove psi(x)<x. This makes the complement "
+        "of 6Z closed under a strict descent and includes the mandatory x=70 "
+        "check, where the denominators are 2,5,7 and psi(70)=59. Conclude that "
+        "every infinite orbit lies in 6Z. Then prove the exact reduction: if "
+        "x=12k, psi(x)=13k and x has an infinite valid orbit if and only if k "
+        "does, because all valid iterates are multiples of 6 and multiplying "
+        "such an iterate by 13 does not change its three smallest nontrivial "
+        "divisors. Repeatedly remove factors of 12. For the remaining k, use "
+        "6|k and 12 not dividing k. If 5 does not divide k, its denominators "
+        "2,3,6 make it fixed; if 5 divides k, its denominators 2,3,5 give "
+        "psi(k)=31k/30, which is odd. State the resulting family and prove both "
+        "necessity and sufficiency."
+    ),
     "p5_alice_cauchy_spike": (
         "For this game, prove Alice's strict-regime strategy against an arbitrary "
         "Bazza history, not only a budget-saturating one. Have Alice play zero on "
@@ -305,6 +372,27 @@ PROOF_GENERATION_PLANNING_EMPHASES = {
         "Bazza play and Bazza's pair-filling strategy against arbitrary Alice play; "
         "one cooperative infinite play is not enough. Check every quantifier and "
         "endpoint."
+    ),
+    "p5_complete_three_regime": (
+        "For this game, assemble one rigorous proof of all three regimes from "
+        "the following exact simultaneous invariants. For lambda below or equal "
+        "to sqrt(2)/2, Bazza fills the remaining square budget after Alice's "
+        "odd move a_i by b_i=sqrt(2-a_i^2). Assuming Alice can move and the "
+        "previous even state has Q_{2i-2}=2i-2 and S_{2i-2}>=(i-1)sqrt(2), "
+        "derive a_i<=lambda(2i-1)-S_{2i-2}<=sqrt(2)/2 before taking the square "
+        "root. Then Q_{2i}=2i and a_i+b_i>=sqrt(2). Use this simultaneous "
+        "induction to prove finite failure for Alice in the strict low regime "
+        "and that Bazza never loses at equality. For lambda above or equal to "
+        "sqrt(2)/2, Alice can play zero on every earlier odd turn against an "
+        "arbitrary Bazza history because Cauchy--Schwarz gives "
+        "S_{2K-2}<=(K-1)sqrt(2)<lambda(2K-1). In the strict high regime choose "
+        "K with lambda^2(2K-1)^2>2K^2, set A=lambda(2K-1), and play "
+        "t=A-S_{2K-2}. Apply Cauchy--Schwarz to the K-1 Bazza moves together "
+        "with t to obtain Q_{2K-2}+t^2>=A^2/K>2K, so Bazza has no legal reply. "
+        "At equality, Alice's all-zero strategy prevents her loss against every "
+        "Bazza history and Bazza's fill-the-square-budget strategy prevents his "
+        "loss against every Alice history. Do not infer a draw from one "
+        "cooperative play, and do not assume the opponent moves greedily."
     ),
 }
 
@@ -1694,7 +1782,7 @@ def resolve_proof_generation_strategy(
     if portfolio == "baseline":
         return "baseline"
     strategy_cycle = PROOF_GENERATION_STRATEGY_CYCLE
-    if portfolio == "adaptive":
+    if portfolio in {"adaptive", "p45_targeted"}:
         normalized_question = " ".join(question.lower().split())
         imo2025_problem = identify_imo2025_problem(question)
         game_markers = (
@@ -1714,9 +1802,17 @@ def resolve_proof_generation_strategy(
             "next term",
         )
         if imo2025_problem == "p4":
-            strategy_cycle = ADAPTIVE_IMO2025_P4_STRATEGY_CYCLE
+            strategy_cycle = (
+                TARGETED_IMO2025_P4_STRATEGY_CYCLE
+                if portfolio == "p45_targeted"
+                else ADAPTIVE_IMO2025_P4_STRATEGY_CYCLE
+            )
         elif imo2025_problem == "p5":
-            strategy_cycle = ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE
+            strategy_cycle = (
+                TARGETED_IMO2025_P5_STRATEGY_CYCLE
+                if portfolio == "p45_targeted"
+                else ADAPTIVE_IMO2025_P5_STRATEGY_CYCLE
+            )
         elif any(marker in normalized_question for marker in game_markers):
             strategy_cycle = ADAPTIVE_GAME_STRATEGY_CYCLE
         elif any(marker in normalized_question for marker in iteration_markers):

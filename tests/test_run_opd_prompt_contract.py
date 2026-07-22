@@ -1665,6 +1665,41 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(strategies.count("p5_alice_cauchy_spike"), 2)
         self.assertEqual(strategies.count("p5_bazza_pairing"), 2)
 
+    def test_targeted_imo2025_p4_portfolio_concentrates_closed_descent(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="p45_targeted")
+        question = (
+            "The infinite sequence $a_1,a_2,\\ldots$ has at least three proper "
+            "divisors per term. Each next term is the sum of the three largest "
+            "proper divisors. Determine all possible values of $a_1$."
+        )
+
+        strategies = [
+            run.resolve_proof_generation_strategy(index, cfg, question)
+            for index in range(16)
+        ]
+
+        self.assertEqual(strategies, list(run.TARGETED_IMO2025_P4_STRATEGY_CYCLE))
+        self.assertEqual(strategies.count("p4_closed_descent_reduction"), 8)
+        self.assertEqual(strategies.count("p4_orbit_normal_form"), 4)
+        self.assertEqual(strategies.count("p4_backward_divisibility"), 2)
+
+    def test_targeted_imo2025_p5_portfolio_concentrates_complete_proofs(self):
+        cfg = SimpleNamespace(proof_generation_strategy_portfolio="p45_targeted")
+        question = (
+            "Alice and Bazza play the inekoalaty game depending on a positive "
+            "real number $\\lambda$. Determine both players' winning regimes."
+        )
+
+        strategies = [
+            run.resolve_proof_generation_strategy(index, cfg, question)
+            for index in range(16)
+        ]
+
+        self.assertEqual(strategies, list(run.TARGETED_IMO2025_P5_STRATEGY_CYCLE))
+        self.assertEqual(strategies.count("p5_complete_three_regime"), 8)
+        self.assertEqual(strategies.count("p5_alice_cauchy_spike"), 4)
+        self.assertEqual(strategies.count("p5_threshold_pairing"), 2)
+
     def test_adaptive_generic_portfolio_falls_back_to_diverse_cycle(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="adaptive")
 
@@ -1769,6 +1804,19 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("psi(x) is still outside 6Z", user_prompt)
         self.assertIn("not merely smaller", user_prompt)
 
+    def test_p4_closed_descent_strategy_supplies_every_missing_case(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Determine all possible initial terms.",
+            planning_strategy="p4_closed_descent_reduction",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("2,p,min(2p,q)", user_prompt)
+        self.assertIn("m+3m/p", user_prompt)
+        self.assertIn("psi(70)=59", user_prompt)
+        self.assertIn("if and only if k", user_prompt)
+        self.assertIn("psi(k)=31k/30", user_prompt)
+
     def test_p5_threshold_strategy_requires_arbitrary_play_and_boundary(self):
         messages = run.build_opd_proof_generation_prompt(
             "Classify the winner in the game.",
@@ -1804,6 +1852,18 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("Alice's all-zero", user_prompt)
         self.assertIn("Bazza's pair-filling", user_prompt)
         self.assertIn("one cooperative play", user_prompt)
+
+    def test_p5_complete_strategy_supplies_simultaneous_induction(self):
+        messages = run.build_opd_proof_generation_prompt(
+            "Classify the winner in the game.",
+            planning_strategy="p5_complete_three_regime",
+        )
+        user_prompt = messages[-1]["content"]
+
+        self.assertIn("Q_{2i-2}=2i-2", user_prompt)
+        self.assertIn("a_i<=lambda(2i-1)-S_{2i-2}", user_prompt)
+        self.assertIn("Q_{2K-2}+t^2>=A^2/K>2K", user_prompt)
+        self.assertIn("prevents her loss against every Bazza history", user_prompt)
 
     def test_invalid_proof_strategy_portfolio_is_rejected(self):
         cfg = SimpleNamespace(proof_generation_strategy_portfolio="unknown")
