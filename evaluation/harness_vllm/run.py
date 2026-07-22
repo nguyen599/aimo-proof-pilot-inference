@@ -2470,6 +2470,15 @@ def build_selection_prompt(
     max_candidate_chars: int,
 ) -> list[dict[str, str]]:
     candidate_blocks: list[str] = []
+    completion_gate = problem_specific_completion_gate(question)
+    if completion_gate:
+        candidate_blocks.extend(
+            [
+                "<problem_specific_completion_gate>",
+                completion_gate,
+                "</problem_specific_completion_gate>",
+            ]
+        )
     for idx, candidate in enumerate(candidates):
         proof = str(candidate.get("proof_solution") or "")
         if len(proof) > max_candidate_chars:

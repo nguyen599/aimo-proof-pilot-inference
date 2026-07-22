@@ -1643,6 +1643,45 @@ class RunOpdPromptContractTests(unittest.TestCase):
         )
         self.assertIsNone(run.parse_selected_index("SELECTED_INDEX: 1", 2))
 
+    def test_imo2025_selector_receives_problem_specific_completion_gate(self):
+        p4_messages = run.build_selection_prompt(
+            (
+                "A proper divisor of a positive integer N is a positive divisor "
+                "other than N. Each next term is the sum of the three largest "
+                "proper divisors. Determine all possible values of $a_1$."
+            ),
+            [{"proof_solution": "P4 proof."}],
+            10_000,
+        )
+        p5_messages = run.build_selection_prompt(
+            (
+                "Alice and Bazza are playing the inekoalaty game whose rules "
+                "depend on a positive real number $\\lambda$."
+            ),
+            [{"proof_solution": "P5 proof."}],
+            10_000,
+        )
+        generic_messages = run.build_selection_prompt(
+            "Prove a generic identity.",
+            [{"proof_solution": "Generic proof."}],
+            10_000,
+        )
+
+        self.assertIn(
+            "<problem_specific_completion_gate>",
+            p4_messages[1]["content"],
+        )
+        self.assertIn("x=70", p4_messages[1]["content"])
+        self.assertIn(
+            "<problem_specific_completion_gate>",
+            p5_messages[1]["content"],
+        )
+        self.assertIn("arbitrary legal Bazza history", p5_messages[1]["content"])
+        self.assertNotIn(
+            "<problem_specific_completion_gate>",
+            generic_messages[1]["content"],
+        )
+
     def test_only_requested_deepseek_prompt_branches_are_retained(self):
         self.assertTrue(hasattr(run, "build_deepseek_proof_generation_prompt"))
         self.assertTrue(hasattr(run, "build_deepseek_proof_verification_prompt"))

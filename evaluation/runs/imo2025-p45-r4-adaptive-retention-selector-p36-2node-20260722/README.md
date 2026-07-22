@@ -18,7 +18,11 @@ refinement rounds. It changes only the measured P4/P5 interventions:
   versions. The exact meta-aware baseline reconstruction assigned internal
   scores `0.400` and `0.312` to P5 proofs graded `6.0` and `5.5` by GPT-5.6,
   so the former `0.5` floor removed the strongest known proof before the
-  selector could compare it.
+  selector could compare it; and
+- the final selector receives the same P4/P5 completion audit used by the
+  verifier and refiner. It must therefore compare the actual closed-descent,
+  transition, arbitrary-history, and equality-regime obligations instead of
+  choosing from proof prose alone.
 
 Do not launch it while the baseline run
 `imo2025-p45-r4-mixed-challenge-p36-2node-20260721T212441Z` owns nodes 2 and 3.
