@@ -14,9 +14,11 @@ refinement rounds. It changes only the measured P4/P5 interventions:
 - conservative retention of the earlier proof when two verified versions have
   exactly equal internal evidence, except for strict-pass challenge survival;
 - an inclusive `0.5` selector boundary with at most eight candidates in the
-  final LLM comparison; two slots are reserved for strong earlier verified
-  proof versions, so an internally favored rewrite cannot erase its strongest
-  predecessor before final selection.
+  final LLM comparison; four slots are reserved for strong earlier verified
+  proof versions. On the baseline round-2 audit, the P5 proofs graded `6.0`
+  and `5.5` by GPT-5.6 ranked only third and fourth under internal verifier
+  evidence, so a two-slot history budget would remove useful proofs before
+  the final selector could compare them.
 
 Do not launch it while the baseline run
 `imo2025-p45-r4-mixed-challenge-p36-2node-20260721T212441Z` owns nodes 2 and 3.
