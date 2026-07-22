@@ -13,10 +13,12 @@ baseline releases them:
 
 Each node runs independently with `WORLD_SIZE=1` and generates 36 adaptive
 initial proofs for each problem. The launch settings are identical except for
-the target checkpoint. Both use TP2/DP4, the same DFlash draft, sampling,
-thinking-budget handoff, and input file. No verifier, refinement, or selector
-calls are made, so the result measures checkpoint generation quality rather
-than downstream ranking quality.
+the target checkpoint and isolated physical GPU IDs. Both use TP2/DP1, the
+same DFlash draft, sampling, thinking-budget handoff, and input file. Node 2
+uses GPUs 6-7 and node 3 uses GPUs 4-5 so the experiment does not disturb the
+older vLLM workers occupying the other GPUs. No verifier, refinement, or
+selector calls are made, so the result measures checkpoint generation quality
+rather than downstream ranking quality.
 
 Export every structurally complete, non-cutoff proof and grade it twice with
 the same GPT-5.6 grader. Compare eligible rate, mean score, best-of-36 score,

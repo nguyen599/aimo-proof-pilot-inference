@@ -17,6 +17,9 @@ MASTER_PORT="${MASTER_PORT:-29617}"
 MAX_CONCURRENT_PROBLEMS="${AIMO_MAX_CONCURRENT_PROBLEMS:-6}"
 TP_SIZE="${AIMO_TENSOR_PARALLEL_SIZE:-2}"
 DP_SIZE="${AIMO_DATA_PARALLEL_SIZE:-4}"
+GPUS="${AIMO_GPUS:-0,1,2,3,4,5,6,7}"
+IFS=',' read -r -a gpu_ids <<< "$GPUS"
+NUM_GPUS="${AIMO_NUM_GPUS:-${#gpu_ids[@]}}"
 # vLLM applies max_num_seqs independently to every DP engine replica.
 MAX_NUM_SEQS_PER_DP="${AIMO_MAX_NUM_SEQS_PER_DP:-32}"
 REQUESTS_PER_GPU="${AIMO_REQUESTS_PER_GPU:-32}"
@@ -154,8 +157,16 @@ if ! [[ "$SELECTION_TEMPERATURE" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     echo "SELECTION_TEMPERATURE must be nonnegative, got $SELECTION_TEMPERATURE" >&2
     exit 2
 fi
-if [ $((TP_SIZE * DP_SIZE)) -ne 8 ]; then
-    echo "TP_SIZE x DP_SIZE must use all 8 local GPUs" >&2
+if ! [[ "$NUM_GPUS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "NUM_GPUS must be a positive integer, got $NUM_GPUS" >&2
+    exit 2
+fi
+if [ "${#gpu_ids[@]}" -ne "$NUM_GPUS" ]; then
+    echo "AIMO_GPUS must contain NUM_GPUS entries: ${#gpu_ids[@]} != $NUM_GPUS" >&2
+    exit 2
+fi
+if [ $((TP_SIZE * DP_SIZE)) -ne "$NUM_GPUS" ]; then
+    echo "TP_SIZE x DP_SIZE must equal NUM_GPUS: $TP_SIZE x $DP_SIZE != $NUM_GPUS" >&2
     exit 2
 fi
 if [ "$REFINE_REVIEW_N" -gt "$VERIFY_N" ]; then
@@ -358,8 +369,8 @@ args=(
     --model-path "$MODEL_PATH"
     --dflash-model-path "$DFLASH_MODEL_PATH"
     --input-path "$AIMO_INPUT_PATH"
-    --num-gpus 8
-    --gpus 0,1,2,3,4,5,6,7
+    --num-gpus "$NUM_GPUS"
+    --gpus "$GPUS"
     --tensor-parallel-size "$TP_SIZE"
     --data-parallel-size "$DP_SIZE"
     --gpu-memory-utilization 0.92
@@ -429,7 +440,7 @@ chmod 0755 "$rank_command"
 echo "source_commit=$AIMO_SOURCE_COMMIT"
 echo "input=$AIMO_INPUT_PATH"
 echo "master=$MASTER_ADDR:$MASTER_PORT"
-echo "vllm_capacity=tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((8 * REQUESTS_PER_GPU))"
+echo "vllm_capacity=gpus:${GPUS} tp${TP_SIZE}/dp${DP_SIZE} max_num_seqs_per_dp=${MAX_NUM_SEQS_PER_DP} aggregate_max_num_seqs=$((DP_SIZE * MAX_NUM_SEQS_PER_DP)) request_admission=$((NUM_GPUS * REQUESTS_PER_GPU))"
 echo "pipeline=candidates:${PIPELINES_PER_PROBLEM} proof_generation_strategy_portfolio:${PROOF_GENERATION_STRATEGY_PORTFOLIO} refine_rounds:${REFINE_ROUNDS} refinement_strategy:${REFINEMENT_STRATEGY} strict_pass_challenges:${STRICT_PASS_CHALLENGE_ROUNDS} generation_only:${PROOF_GENERATION_ONLY} handoff:${THINKING_BUDGET_HANDOFF_ENABLED} selector:${SELECTOR_MODE} selector_max_new_tokens:${SELECTOR_MAX_NEW_TOKENS} selector_thinking_budget_tokens:${SELECTOR_THINKING_BUDGET_TOKENS} selector_candidate_limit:${SELECTOR_CANDIDATE_LIMIT} selector_historical_candidate_limit:${SELECTOR_HISTORICAL_CANDIDATE_LIMIT} selector_tournament_group_size:${SELECTOR_TOURNAMENT_GROUP_SIZE} selector_tournament_rounds:${SELECTOR_TOURNAMENT_ROUNDS} selector_tournament_max_candidates:${SELECTOR_TOURNAMENT_MAX_CANDIDATES} selector_tournament_threshold:${SELECTOR_TOURNAMENT_THRESHOLD} selector_tournament_force_wide_pool:${SELECTOR_TOURNAMENT_FORCE_WIDE_POOL} selector_score_window:${SELECTOR_SCORE_WINDOW} selector_vote_count:${SELECTOR_VOTE_COUNT} selector_temperature:${SELECTION_TEMPERATURE} selector_min_final_score:${SELECTOR_MIN_FINAL_SCORE}"
 echo "verification_while_generating=candidates:${VERIFY_CANDIDATE_LIMIT_WHILE_GENERATING} requests:${VERIFY_REQUEST_LIMIT_WHILE_GENERATING} per_problem_per_rank"
 echo "verification_per_candidate=verify_n:${VERIFY_N} generalists:${VERIFIER_GENERALIST_N} specialists:$((VERIFY_N - VERIFIER_GENERALIST_N)) refine_review_n:${REFINE_REVIEW_N} min_valid_low:${MIN_VALID_LOW}"

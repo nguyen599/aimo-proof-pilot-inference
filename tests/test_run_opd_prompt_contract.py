@@ -91,6 +91,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("opd-32b-bf16-step-225", launcher)
         self.assertIn("export AIMO_WORLD_SIZE=1", launcher)
         self.assertIn("export AIMO_NII_NODE_RANK=0", launcher)
+        self.assertIn("export AIMO_NUM_GPUS=\"${AIMO_NUM_GPUS:-2}\"", launcher)
+        self.assertIn("export AIMO_DATA_PARALLEL_SIZE=\"${AIMO_DATA_PARALLEL_SIZE:-1}\"", launcher)
+        self.assertIn("gpus=6,7", launcher)
+        self.assertIn("gpus=4,5", launcher)
         self.assertIn("export AIMO_PROOF_GENERATION_ONLY=true", launcher)
 
     def test_cli_overrides_cfg_and_distributed_environment(self):
