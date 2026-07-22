@@ -14,9 +14,13 @@ refinement rounds. It changes only the measured P4/P5 interventions:
 - conservative retention of the earlier proof when two verified versions have
   exactly equal internal evidence, except for strict-pass challenge survival;
 - a `0.0` selector floor and an LLM tournament over every current candidate
-  plus up to eight strong earlier verified proof versions. Each comparison is
+  plus up to 36 earlier verified proof versions, initially taking at most one
+  version per candidate. This prevents the noisy internal ranking from
+  excluding the known externally strongest P4 history. Each comparison is
   capped at eight proofs; verifier-ranked seeding spreads the strongest
-  internal candidates across groups before a final winner comparison. The
+  internal candidates across groups before a final winner comparison. With 72
+  entrants this requires at most 12 selector calls, compared with the thousands
+  of verifier/meta calls in the four-round search. The
   exact meta-aware baseline reconstruction assigned internal
   scores `0.400` and `0.312` to P5 proofs graded `6.0` and `5.5` by GPT-5.6,
   so the former `0.5` floor removed the strongest known proof before the
