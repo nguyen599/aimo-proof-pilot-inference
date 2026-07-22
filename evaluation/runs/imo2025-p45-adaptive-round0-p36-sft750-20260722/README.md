@@ -34,3 +34,15 @@ Promote the adaptive portfolio only if it improves best-of-36 score or produces
 a correct candidate without materially reducing structurally complete proof
 rate. Report mean score and per-strategy score distributions as diagnostics,
 not as the sole acceptance criterion.
+
+The promotion gate is fixed before launch from the two-call baseline:
+
+| Problem | Baseline eligible | Baseline eligible mean | Baseline best | Minimum acceptable eligible rate |
+| --- | ---: | ---: | ---: | ---: |
+| P4 | 26/36 (72.2%) | 2.327/7 | 5.0/7 | 62.2% |
+| P5 | 20/36 (55.6%) | 1.550/7 | 3.0/7 | 45.6% |
+
+For each problem, promotion requires a best score above the baseline best (or
+at least one `7/7` proof) while keeping the structurally complete, non-cutoff
+rate within 10 absolute percentage points of baseline. Mean score and strategy
+breakdowns diagnose regressions but do not override this best-proof gate.
