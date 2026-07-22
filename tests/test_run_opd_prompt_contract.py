@@ -937,6 +937,54 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertEqual(selected_idx, 16)
         self.assertEqual(output["selected_index"], 16)
 
+    def test_llm_tournament_bounds_full_current_and_history_pool(self):
+        class FirstCandidateScheduler:
+            def __init__(self):
+                self.candidate_counts = []
+
+            async def call(self, stage, prompt, **kwargs):
+                self.candidate_counts.append(
+                    prompt[-1]["content"].count('<candidate id="R')
+                )
+                return {
+                    "success": True,
+                    "error": None,
+                    "text": "<selected_id>R0</selected_id>",
+                    "finish_reason": "stop",
+                    "usage": {},
+                    "server_url": "mock",
+                    "latency_s": 0.0,
+                }
+
+        candidates = [
+            {
+                "attempt_idx": idx,
+                "final_score": idx / 100,
+                "proof_solution": f"proof {idx}",
+            }
+            for idx in range(72)
+        ]
+        cfg = SimpleNamespace(
+            selector_mode="llm_tournament",
+            selector_tournament_group_size=8,
+            selector_max_candidate_chars=10_000,
+            selection_temperature=0.2,
+        )
+        scheduler = FirstCandidateScheduler()
+
+        _, output = run.asyncio.run(
+            run.select_best_candidate(
+                "problem",
+                candidates,
+                scheduler,
+                cfg,
+            )
+        )
+
+        self.assertEqual(output["candidate_count"], 72)
+        self.assertEqual(len(scheduler.candidate_counts), 12)
+        self.assertTrue(all(count <= 8 for count in scheduler.candidate_counts))
+
     def test_selector_pool_reserves_slots_for_historical_versions(self):
         candidates = [
             {
