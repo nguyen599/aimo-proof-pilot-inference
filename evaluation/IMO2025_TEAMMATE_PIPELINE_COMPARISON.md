@@ -18,6 +18,11 @@ shuffled four-proof ballots. If more than four proofs score at least `0.95`, it
 runs 64 balanced brackets over at most ten proofs; otherwise it runs 16 votes
 over proofs within 20% of the best verifier score. Invalid ballots are ignored,
 and ties prefer the better verifier rank. Selector temperature is `0.3`.
+Their early selector also lost 5--9 of 16 ballots when reasoning consumed the
+entire completion budget. Force-closing reasoning after 56,000 tokens with
+`</think>\n\n<selected_id>` and reserving about 2,100 continuation tokens made
+all 16 ballots parse. Our selector now exposes the same intervention as an
+opt-in setting; legacy modes keep it disabled by default.
 
 Their refinement topology also differs from ours. It keeps a cumulative pool of
 the best verified proofs from previous rounds and creates each new proof by
@@ -120,7 +125,9 @@ python evaluation/replay_pipeline_selector.py \
   --selector-tournament-rounds 64 \
   --selector-tournament-max-candidates 10 \
   --selector-tournament-threshold 0.5 \
-  --selector-tournament-force-wide-pool
+  --selector-tournament-force-wide-pool \
+  --selector-max-new-tokens 58100 \
+  --selector-thinking-budget-tokens 56000
 ```
 
 The replay writes grader-ready `records.jsonl` and `rubrics.jsonl`, complete
@@ -128,3 +135,7 @@ ballot metadata in `selector_results.jsonl`, and raw selector calls under
 `llm_calls/`. Candidate export preserves both capped `final_score` and uncapped
 `pre_cap_score`; older exports without the latter remain compatible by falling
 back to `final_score`.
+Replay streams responses by default because the selector thinking cutoff is a
+client-side streaming intervention. Pass
+`--selector-thinking-budget-tokens 0` to disable it for a legacy-control
+replay.

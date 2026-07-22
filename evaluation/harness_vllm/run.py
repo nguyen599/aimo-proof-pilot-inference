@@ -515,7 +515,16 @@ class CFG:
     )
     verifier_max_new_tokens = 126_000
     meta_max_new_tokens = 126_000
-    selector_max_new_tokens = 50_000
+    selector_max_new_tokens = int(
+        os.environ.get("AIMO_SELECTOR_MAX_NEW_TOKENS", "50000")
+    )
+    selector_thinking_budget_tokens = int(
+        os.environ.get("AIMO_SELECTOR_THINKING_BUDGET_TOKENS", "0")
+    )
+    selector_thinking_budget_force_text = (
+        "\nWe should now choose the strongest candidate due time limit.\n"
+        "</think>\n\n<selected_id>"
+    )
     selector_max_candidate_chars = 32_000
 
     temperature = 1.0
@@ -851,6 +860,8 @@ class PipelineConfig:
     refinement_strategy: str
     strict_pass_challenge_rounds: int
     selector_max_candidate_chars: int
+    selector_thinking_budget_tokens: int
+    selector_thinking_budget_force_text: str
     selection_temperature: float
     selector_mode: str
     selector_min_final_score: float
@@ -7059,6 +7070,14 @@ async def select_best_candidate(
             temperature=cfg.selection_temperature,
             progress=progress,
             detail=detail,
+            thinking_budget_tokens=(
+                int(cfg.selector_thinking_budget_tokens)
+                if int(getattr(cfg, "selector_thinking_budget_tokens", 0)) > 0
+                else None
+            ),
+            thinking_budget_force_text=str(
+                getattr(cfg, "selector_thinking_budget_force_text", "")
+            ),
         )
         selected = parse_selected_index(response.get("text", ""), len(group))
         if selected is None and fallback:
@@ -8041,6 +8060,8 @@ class ProofRuntime:
         verifier_max_new_tokens: int,
         meta_max_new_tokens: int,
         selector_max_new_tokens: int,
+        selector_thinking_budget_tokens: int,
+        selector_thinking_budget_force_text: str,
         selector_max_candidate_chars: int,
         selection_temperature: float,
         selector_mode: str,
@@ -8320,6 +8341,13 @@ class ProofRuntime:
                 int(strict_pass_challenge_rounds),
             ),
             selector_max_candidate_chars=max(1000, selector_max_candidate_chars),
+            selector_thinking_budget_tokens=max(
+                0,
+                int(selector_thinking_budget_tokens),
+            ),
+            selector_thinking_budget_force_text=(
+                selector_thinking_budget_force_text
+            ),
             selection_temperature=selection_temperature,
             selector_mode=normalized_selector_mode,
             selector_min_final_score=float(selector_min_final_score),
@@ -8931,6 +8959,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--verifier-max-new-tokens", type=int)
     pipeline.add_argument("--meta-max-new-tokens", type=int)
     pipeline.add_argument("--selector-max-new-tokens", type=int)
+    pipeline.add_argument("--selector-thinking-budget-tokens", type=int)
     pipeline.add_argument("--pipelines-per-problem", type=int)
     pipeline.add_argument("--max-concurrent-problems", type=int)
     pipeline.add_argument("--deepseek-math-v2-candidate-count", type=int)
@@ -9106,6 +9135,7 @@ def apply_cli_overrides(cfg: Any, args: argparse.Namespace) -> None:
         "verifier_max_new_tokens": "verifier_max_new_tokens",
         "meta_max_new_tokens": "meta_max_new_tokens",
         "selector_max_new_tokens": "selector_max_new_tokens",
+        "selector_thinking_budget_tokens": "selector_thinking_budget_tokens",
         "pipelines_per_problem": "pipelines_per_problem",
         "max_concurrent_problems": "max_concurrent_problems",
         "deepseek_math_v2_candidate_count": "deepseek_math_v2_candidate_count",
@@ -9360,6 +9390,17 @@ def run(cfg: type[CFG] = CFG) -> None:
             "AIMO_THINKING_BUDGET_REFINE_VISIBLE_OUTPUT_LIMIT_TOKENS "
             "cannot be negative"
         )
+    if int(cfg.selector_thinking_budget_tokens) < 0:
+        raise ValueError("AIMO_SELECTOR_THINKING_BUDGET_TOKENS cannot be negative")
+    if (
+        int(cfg.selector_thinking_budget_tokens) > 0
+        and int(cfg.selector_thinking_budget_tokens)
+        >= int(cfg.selector_max_new_tokens)
+    ):
+        raise ValueError(
+            "AIMO_SELECTOR_THINKING_BUDGET_TOKENS must be below "
+            "AIMO_SELECTOR_MAX_NEW_TOKENS"
+        )
     selected_gpus, resolved_tp, resolved_dp = resolve_gpu_parallel_layout(cfg)
     resolved_max_concurrent_requests = resolve_max_concurrent_requests(
         cfg,
@@ -9379,6 +9420,9 @@ def run(cfg: type[CFG] = CFG) -> None:
             "verifier_max_new_tokens": int(cfg.verifier_max_new_tokens),
             "meta_max_new_tokens": int(cfg.meta_max_new_tokens),
             "selector_max_new_tokens": int(cfg.selector_max_new_tokens),
+            "selector_thinking_budget_tokens": int(
+                cfg.selector_thinking_budget_tokens
+            ),
             "pipelines_per_problem": int(cfg.pipelines_per_problem),
             "deepseek_math_v2_candidate_count": int(
                 cfg.deepseek_math_v2_candidate_count
@@ -9674,6 +9718,12 @@ def run(cfg: type[CFG] = CFG) -> None:
             verifier_max_new_tokens=cfg.verifier_max_new_tokens,
             meta_max_new_tokens=cfg.meta_max_new_tokens,
             selector_max_new_tokens=cfg.selector_max_new_tokens,
+            selector_thinking_budget_tokens=(
+                cfg.selector_thinking_budget_tokens
+            ),
+            selector_thinking_budget_force_text=(
+                cfg.selector_thinking_budget_force_text
+            ),
             selector_max_candidate_chars=cfg.selector_max_candidate_chars,
             selection_temperature=cfg.selection_temperature,
             selector_mode=cfg.selector_mode,

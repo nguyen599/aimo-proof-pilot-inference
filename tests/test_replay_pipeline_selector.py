@@ -71,8 +71,12 @@ def make_export(root: Path) -> Path:
 
 
 class TargetScheduler:
+    def __init__(self) -> None:
+        self.calls = []
+
     async def call(self, stage, prompt, **kwargs):
         assert stage == "selector"
+        self.calls.append(kwargs)
         content = prompt[-1]["content"]
         target_position = content.find("TARGET PROOF")
         candidate_position = content.rfind('<candidate id="R', 0, target_position)
@@ -92,6 +96,10 @@ def selector_config() -> SimpleNamespace:
     return SimpleNamespace(
         selector_mode="llm_stratified_tournament",
         selector_max_candidate_chars=10_000,
+        selector_thinking_budget_tokens=56_000,
+        selector_thinking_budget_force_text=(
+            "\n</think>\n\n<selected_id>"
+        ),
         selection_temperature=0.3,
         selector_tournament_group_size=4,
         selector_tournament_rounds=8,
@@ -120,8 +128,17 @@ def test_replays_tournament_and_writes_grader_records(tmp_path: Path) -> None:
     candidate_dir = make_export(tmp_path)
     problems = load_candidate_export(candidate_dir)
     config = selector_config()
-    results = asyncio.run(replay_selectors(problems, TargetScheduler(), config))
+    scheduler = TargetScheduler()
+    results = asyncio.run(replay_selectors(problems, scheduler, config))
     assert results[0]["selected_candidate_id"] == "p4-c03-final"
+    assert scheduler.calls
+    assert all(
+        call["thinking_budget_tokens"] == 56_000 for call in scheduler.calls
+    )
+    assert all(
+        call["thinking_budget_force_text"].endswith("<selected_id>")
+        for call in scheduler.calls
+    )
 
     output_dir = tmp_path / "replay"
     summary = write_replay_outputs(
@@ -141,6 +158,7 @@ def test_build_selector_config_clamps_count_fields() -> None:
     args = argparse.Namespace(
         selector_mode="llm_stratified_tournament",
         selector_max_candidate_chars=1,
+        selector_thinking_budget_tokens=56_000,
         selection_temperature=0.3,
         selector_tournament_group_size=1,
         selector_tournament_rounds=0,
@@ -152,6 +170,7 @@ def test_build_selector_config_clamps_count_fields() -> None:
     )
     config = build_selector_config(args)
     assert config.selector_max_candidate_chars == 1_000
+    assert config.selector_thinking_budget_tokens == 56_000
     assert config.selector_tournament_group_size == 2
     assert config.selector_tournament_rounds == 1
     assert config.selector_tournament_max_candidates == 2

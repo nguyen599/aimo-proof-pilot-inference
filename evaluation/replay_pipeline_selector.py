@@ -252,6 +252,7 @@ def write_replay_outputs(
             key: getattr(selector_config, key)
             for key in (
                 "selector_max_candidate_chars",
+                "selector_thinking_budget_tokens",
                 "selection_temperature",
                 "selector_tournament_group_size",
                 "selector_tournament_rounds",
@@ -274,6 +275,12 @@ def build_selector_config(args: argparse.Namespace) -> SimpleNamespace:
     return SimpleNamespace(
         selector_mode=args.selector_mode,
         selector_max_candidate_chars=max(1_000, args.selector_max_candidate_chars),
+        selector_thinking_budget_tokens=max(
+            0, args.selector_thinking_budget_tokens
+        ),
+        selector_thinking_budget_force_text=(
+            harness.CFG.selector_thinking_budget_force_text
+        ),
         selection_temperature=args.selection_temperature,
         selector_tournament_group_size=max(2, args.selector_tournament_group_size),
         selector_tournament_rounds=max(1, args.selector_tournament_rounds),
@@ -302,7 +309,12 @@ def parse_args() -> argparse.Namespace:
         default="llm_stratified_tournament",
     )
     parser.add_argument("--selector-max-candidate-chars", type=int, default=32_000)
-    parser.add_argument("--selector-max-new-tokens", type=int, default=8_192)
+    parser.add_argument("--selector-max-new-tokens", type=int, default=58_100)
+    parser.add_argument(
+        "--selector-thinking-budget-tokens",
+        type=int,
+        default=56_000,
+    )
     parser.add_argument("--selection-temperature", type=float, default=0.3)
     parser.add_argument("--selector-tournament-group-size", type=int, default=4)
     parser.add_argument("--selector-tournament-rounds", type=int, default=64)
@@ -318,6 +330,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-concurrent-requests", type=int, default=64)
     parser.add_argument("--request-worker-count", type=int, default=64)
     parser.add_argument("--request-timeout-seconds", type=float, default=900.0)
+    parser.add_argument(
+        "--stream-responses",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--context-length", type=int, default=131_072)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--top-p", type=float, default=1.0)
@@ -334,6 +351,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--selector-tournament-threshold must be in (0, 1]")
     if not 0.0 <= args.selector_score_window < 1.0:
         parser.error("--selector-score-window must be in [0, 1)")
+    if args.selector_max_new_tokens < 1:
+        parser.error("--selector-max-new-tokens must be positive")
+    if args.selector_thinking_budget_tokens < 0:
+        parser.error("--selector-thinking-budget-tokens cannot be negative")
+    if (
+        args.selector_thinking_budget_tokens > 0
+        and args.selector_thinking_budget_tokens >= args.selector_max_new_tokens
+    ):
+        parser.error(
+            "--selector-thinking-budget-tokens must be below "
+            "--selector-max-new-tokens"
+        )
     return args
 
 
@@ -360,7 +389,7 @@ async def async_main(args: argparse.Namespace) -> dict[str, Any]:
         stage_max_new_tokens={"selector": args.selector_max_new_tokens},
         request_timeout_seconds=args.request_timeout_seconds,
         request_worker_count=args.request_worker_count,
-        stream_responses=False,
+        stream_responses=args.stream_responses,
         context_length=args.context_length,
         tokenizer=tokenizer,
         llm_call_logdir=args.output_dir / "llm_calls",

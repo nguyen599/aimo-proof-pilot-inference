@@ -69,6 +69,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
         self.assertIn("--selector-tournament-max-candidates", launcher)
         self.assertIn("--selector-tournament-threshold", launcher)
         self.assertIn("--selector-tournament-force-wide-pool", launcher)
+        self.assertIn("--selector-max-new-tokens", launcher)
+        self.assertIn("--selector-thinking-budget-tokens", launcher)
         self.assertIn("--selector-score-window", launcher)
         self.assertIn("--selector-vote-count", launcher)
         self.assertIn("--selection-temperature", launcher)
@@ -109,6 +111,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
             selector_tournament_force_wide_pool=False,
             selector_score_window=0.2,
             selector_vote_count=16,
+            selector_max_new_tokens=50_000,
+            selector_thinking_budget_tokens=0,
             selection_temperature=1.0,
             proof_generation_strategy_portfolio="baseline",
         )
@@ -153,6 +157,10 @@ class RunOpdPromptContractTests(unittest.TestCase):
                 "0.3",
                 "--selector-min-final-score",
                 "0.25",
+                "--selector-max-new-tokens",
+                "58100",
+                "--selector-thinking-budget-tokens",
+                "56000",
                 "--proof-generation-strategy-portfolio",
                 "diverse",
                 "--thinking-budget-refine-final-temperature",
@@ -183,6 +191,8 @@ class RunOpdPromptContractTests(unittest.TestCase):
             )
             self.assertEqual(os.environ["AIMO_LOGDIR"], "/output/logs")
 
+        self.assertEqual(cfg.selector_max_new_tokens, 58_100)
+        self.assertEqual(cfg.selector_thinking_budget_tokens, 56_000)
         self.assertEqual(cfg.model_path, Path("/models/current"))
         self.assertEqual(cfg.input_csv, Path("/data/imo.parquet"))
         self.assertEqual(cfg.pipelines_per_problem, 16)
