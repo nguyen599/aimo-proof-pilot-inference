@@ -37,3 +37,26 @@ Every stage score is the arithmetic mean of two independent GPT-5.6 rubric grade
 | P5 | 35 | 3.0 | n/a | 5.5 | +2.5 | n/a |
 
 Full half-point score distributions are in `summary.json`.
+
+## Interpretation
+
+Round two demonstrates that refinement can create a strong proof pool. P4
+candidate 2 received `7,7`, and P5 candidate 21 received `6,6`. The main risk
+is therefore no longer only initial proof quality: retention and final
+selection must preserve these candidates through later rounds.
+
+The recurring P4 defect is the necessity argument for even terms not divisible
+by 3. Many proofs show one decreasing step but do not prove that the orbit
+cannot later enter a viable multiple-of-6 class. The complete route in
+candidate 2 closes this invariant before applying the `12 -> 13` descent.
+
+The recurring P5 defect is quantification over arbitrary opponent play. Many
+proofs establish Alice's upper-regime strategy only when Bazza exhausts his
+quadratic budget. Candidate 21 uses the cumulative Cauchy-Schwarz bound and is
+nearly complete; its remaining loss is the equality-case non-losing argument.
+
+The paired round-one comparison also justifies conservative retention. Four of
+ten paired candidates regressed in round two, including P4 candidate 31 by two
+points, even though the aggregate pool improved. Future runs should replace an
+earlier version only on strictly stronger verified evidence and should keep
+the best boundary-scoring proof available to the selector.
