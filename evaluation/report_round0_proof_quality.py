@@ -109,7 +109,13 @@ def discover_calls(
     expected_candidates: int,
 ) -> dict[tuple[str, int], Path]:
     calls: dict[tuple[str, int], Path] = {}
-    for path in sorted(run_dir.glob("logs/rank*/llm_calls/*/cand_*_proof_gen_r0.txt")):
+    patterns = (
+        "logs/rank*/llm_calls/*/cand_*_proof_gen_r0.txt",
+        "logs/llm_calls/*/cand_*_proof_gen_r0.txt",
+        "llm_calls/*/cand_*_proof_gen_r0.txt",
+    )
+    paths = sorted({path for pattern in patterns for path in run_dir.glob(pattern)})
+    for path in paths:
         match = PROOF_CALL_NAME.fullmatch(path.name)
         if match is None:
             continue

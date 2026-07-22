@@ -143,6 +143,30 @@ class RoundZeroProofQualityTests(unittest.TestCase):
                 expected_candidates=2,
             )
 
+    def test_prepare_accepts_standalone_llm_call_directory(self) -> None:
+        for candidate_index in range(2):
+            write_call(
+                self.run_dir
+                / "llm_calls"
+                / "4"
+                / f"cand_{candidate_index}_proof_gen_r0.txt",
+                budget_reached=candidate_index == 1,
+            )
+
+        prepared = prepare(
+            self.run_dir,
+            self.rubrics,
+            ["4"],
+            expected_candidates=2,
+        )
+
+        self.assertEqual(prepared["total_candidates"], 2)
+        self.assertEqual(prepared["grader_candidate_count"], 1)
+        self.assertEqual(
+            prepared["problems"][0]["thinking_budget_not_reached_count"],
+            1,
+        )
+
     def test_prepare_reports_adaptive_strategy_allocation(self) -> None:
         self.rubrics.write_text(
             json.dumps(
