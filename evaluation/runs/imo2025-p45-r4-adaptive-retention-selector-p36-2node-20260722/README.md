@@ -17,14 +17,20 @@ refinement rounds. It changes only the measured P4/P5 interventions:
   current candidate plus up to 36 earlier verified proof versions, initially
   taking at most one version per candidate. This prevents the noisy internal
   ranking from excluding the known externally strongest P4 history. If more
-  than four candidates have internal score at least `0.95`, the selector runs
-  64 balanced, independently shuffled four-proof ballots over the best ten in
-  that saturated band. Otherwise it runs 16 shuffled ballots over at most four
+  than four candidates have capped internal score at least `0.5`, the selector
+  runs 64 balanced, independently shuffled four-proof ballots over the best ten
+  in that saturated band. Otherwise it runs 16 shuffled ballots over at most four
   proofs within 20% of the best internal score. Failed or malformed ballots are
   null votes, and ties fall back toward the better internal rank. The selector
-  uses temperature `0.3`. These defaults match the tournament-selector branch
-  in the teammate pipeline while remaining an opt-in mode; the legacy one-shot
-  and elimination-tournament modes are unchanged. The
+  uses temperature `0.3`. The ballot schedule matches the tournament-selector
+  branch in the teammate pipeline, but the saturation threshold is calibrated
+  to this runtime's stricter meta-aware score. The teammate's `0.95` threshold
+  applies to mean verifier scores; here validated critiques cap broad groups at
+  `0.5`. In the measured round-three P4 pool four candidates were already tied
+  at that cap, while externally strong proofs scored as low as `0.375`
+  internally. Copying `0.95` would therefore disable the saturation path. This
+  remains an opt-in mode; the legacy one-shot and elimination-tournament modes
+  are unchanged. The
   exact meta-aware baseline reconstruction assigned internal
   scores `0.400` and `0.312` to P5 proofs graded `6.0` and `5.5` by GPT-5.6,
   so the former `0.5` floor removed the strongest known proof before the

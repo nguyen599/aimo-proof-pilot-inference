@@ -35,6 +35,16 @@ vote can permanently eliminate a strong proof. The teammate selector spends
 more calls only where the verifier is saturated and averages position and vote
 noise instead of propagating one comparison.
 
+The absolute threshold cannot be copied unchanged. Their `0.95` is applied to
+mean verifier score, while our production rank uses a stricter meta-aware
+`final_score` and caps candidates with validated critiques at `0.5`. In the
+measured IMO 2025 round-three pool, four P4 candidates were tied at that cap and
+externally strong proofs appeared below it. The treatment therefore uses a
+`0.5` saturation threshold on our capped score while preserving the teammate
+ballot schedule. This is a score-scale calibration, not a relaxation of proof
+eligibility: all histories are admitted separately by the treatment's `0.0`
+selector floor.
+
 The teammate result does **not** establish that its checkpoint is better for our
 IMO 2025 P4/P5 workload. Its checkpoint comparison used different problems, and
 the reported deploy/step-225 difference was within grader noise. Search width,
