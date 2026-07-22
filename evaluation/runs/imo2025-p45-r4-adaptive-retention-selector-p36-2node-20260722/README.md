@@ -33,3 +33,25 @@ After completion, export and grade every initial/final candidate with the same
 two-call GPT-5.6 grader used for the baseline. `grader.yaml` assigns 24 reusable
 slots round-robin across three keys, giving each key exactly eight concurrent
 calls.
+
+## Prompt audit
+
+The problem-specific hints were checked against externally graded round-three
+proofs before launch:
+
+- The P4 orbit hints reproduce every structural step of the proof that received
+  `7/7` in all 32 external grading calls in the completed July 18 run: closure
+  of the non-`6Z` descent (including the `x=70` divisor-order case), the exact
+  `13/12`, `31/30`, and fixed transitions, finite `13/12` iteration, and the
+  final valuation parameterization. The modulo-three statements are taken in
+  the field modulo 3, where the current state and its relevant divisors are
+  invertible.
+- The P5 hints reproduce the proof obligations in round-three candidate 35,
+  which received `7/7` from both external grading calls: Bazza's pair-filling
+  strategy below the threshold, Alice's Cauchy spike against an arbitrary
+  Bazza history above it, and separate non-losing strategies for both players
+  at equality.
+
+This audit establishes that the portfolio prompts point toward known strong
+proof structures. It does not replace the round-zero external quality gate or
+the final four-round comparison.
