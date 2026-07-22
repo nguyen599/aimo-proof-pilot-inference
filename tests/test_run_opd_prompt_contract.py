@@ -62,7 +62,7 @@ class RunOpdPromptContractTests(unittest.TestCase):
 
     def test_nii_launcher_accepts_adaptive_proof_portfolio(self):
         launcher = (REPO / "scripts" / "launch_nii_imo2025_all.sh").read_text()
-        self.assertIn("baseline|diverse|adaptive", launcher)
+        self.assertIn("baseline|diverse|adaptive|p45_targeted", launcher)
         self.assertIn("--selector-historical-candidate-limit", launcher)
         self.assertIn("--selector-tournament-group-size", launcher)
         self.assertIn("--selector-tournament-rounds", launcher)
