@@ -27,6 +27,14 @@ each refinement receives that candidate's own retained proof and critique
 history. Porting multi-parent refinement therefore requires a round-level global
 pool and synchronization barrier; it is not a prompt-only change.
 
+The prior 64-wide SFT750 round-zero benchmark does not measure the adaptive
+P4/P5 planning portfolio. All 84 externally graded P4/P5 candidates in that run
+used the baseline trained prover prompt. It established baseline pool quality
+(`2.489/7` mean and `5/7` best for P4; `1.385/7` mean and `3.5/7` best for P5),
+but it cannot support a claim that the newer problem-specific planning prompts
+help or hurt. The adaptive same-input checkpoint gate is also the first direct
+measurement of those prompts.
+
 ## Comparison
 
 Our existing `llm_tournament` is a single-elimination bracket over the whole
@@ -62,12 +70,18 @@ selector or checkpoint.
 ## Test plan
 
 1. Finish and externally grade the current 36-wide baseline finals.
-2. Run the existing adaptive round-zero checkpoint gate on the same P4/P5 input.
-3. Use the opt-in `llm_stratified_tournament` selector in the four-round
-   treatment, retaining current and historical proofs.
-4. Grade every treatment final twice with the same external grader.
-5. Only after that comparison, run a same-input checkpoint A/B and then a
-   36-versus-64 width A/B if the checkpoint or generation pool remains the
-   bottleneck.
+2. Run the adaptive round-zero SFT750 versus step-225 checkpoint gate on the
+   same P4/P5 input. This simultaneously establishes adaptive-prompt pool quality
+   for each checkpoint, but checkpoint is the only treatment difference.
+3. Use the winning checkpoint with the opt-in `llm_stratified_tournament`
+   selector in the four-round treatment, retaining current and historical
+   proofs.
+4. Grade every treatment final twice with the same external grader and compare
+   it with the baseline final and with the best proof known to exist in each
+   candidate pool.
+5. If the final remains below the pool maximum, fix selection. If no correct
+   proof exists in the pool, run a 36-versus-64 width A/B. If width improves the
+   maximum but four independent repair rounds do not, then port cumulative
+   four-parent refinement as a separate topology treatment.
 
 Legacy `llm`, `llm_tournament`, and `score` modes remain unchanged.

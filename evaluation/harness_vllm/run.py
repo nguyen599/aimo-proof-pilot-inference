@@ -5455,6 +5455,10 @@ def make_generation_only_candidate(
     return {
         "attempt_idx": initial_generation.get("attempt_idx"),
         "prompt_family": initial_generation.get("prompt_family"),
+        "planning_strategy": initial_generation.get(
+            "planning_strategy",
+            "baseline",
+        ),
         "generation_mode": initial_generation.get("generation_mode"),
         "proof_generation_output": initial_generation.get("generation_output"),
         "proof_generation_outputs": initial_generation.get(

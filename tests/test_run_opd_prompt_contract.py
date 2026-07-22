@@ -21,6 +21,24 @@ from evaluation.harness_vllm import run  # noqa: E402
 
 
 class RunOpdPromptContractTests(unittest.TestCase):
+    def test_generation_only_candidate_preserves_planning_strategy(self):
+        candidate = run.make_generation_only_candidate(
+            {
+                "attempt_idx": 7,
+                "prompt_family": run.PROMPT_FAMILY_OPD,
+                "planning_strategy": "p5_threshold_pairing",
+                "generation_mode": "opd_xml",
+                "generation_parsed": {
+                    "self_evaluation": "Checked.",
+                    "self_score": 0.5,
+                },
+                "proof": "A partial proof.",
+            },
+            "proof_generation_only",
+        )
+
+        self.assertEqual(candidate["planning_strategy"], "p5_threshold_pairing")
+
     def test_cfg_reads_proof_generation_only_environment(self):
         env = dict(os.environ)
         env["AIMO_PROOF_GENERATION_ONLY"] = "true"
