@@ -1567,6 +1567,24 @@ class VisibleOutputLimitSchedulerTests(unittest.TestCase):
 
 
 class PriorityRequestSchedulerTests(unittest.IsolatedAsyncioTestCase):
+    def test_request_workers_cover_all_data_parallel_replicas(self):
+        self.assertEqual(
+            run.resolve_request_worker_count(
+                max_num_seqs=32,
+                data_parallel_size=4,
+                max_concurrent_requests=256,
+            ),
+            128,
+        )
+        self.assertEqual(
+            run.resolve_request_worker_count(
+                max_num_seqs=32,
+                data_parallel_size=4,
+                max_concurrent_requests=64,
+            ),
+            64,
+        )
+
     async def test_followup_requests_do_not_wait_behind_initial_generations(self):
         generation_release = threading.Event()
         started: list[tuple[str, str]] = []
@@ -1641,6 +1659,61 @@ class PriorityRequestSchedulerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             generation_release.set()
             await asyncio.gather(*initial_tasks, return_exceptions=True)
+            scheduler.close()
+
+    async def test_followup_pool_can_use_full_worker_budget(self):
+        priority_release = threading.Event()
+        started: list[str] = []
+        started_lock = threading.Lock()
+
+        def fake_call(stage, prompt, *args):
+            del args
+            if stage != "proof_finalize":
+                raise AssertionError(stage)
+            with started_lock:
+                started.append(prompt)
+            priority_release.wait(timeout=5)
+            return {
+                "success": True,
+                "text": "ok",
+                "finish_reason": "stop",
+                "usage": {},
+            }
+
+        with patch.object(run, "OpenAI", return_value=SimpleNamespace()):
+            scheduler = run.ChatScheduler(
+                base_urls=["http://test/v1"],
+                api_key="test",
+                model="test",
+                sampling=run.SamplingConfig(
+                    max_new_tokens=128,
+                    temperature=1.0,
+                    top_p=0.95,
+                    top_k=-1,
+                    min_new_tokens=0,
+                    min_p=None,
+                ),
+                max_concurrent_requests=16,
+                request_worker_count=4,
+                tokenizer=FakeTokenizer(),
+                stream_responses=False,
+            )
+        scheduler._call_sync = fake_call
+        tasks = [
+            asyncio.create_task(scheduler.call("proof_finalize", f"finalize-{idx}"))
+            for idx in range(4)
+        ]
+        try:
+            for _ in range(100):
+                with started_lock:
+                    started_count = len(started)
+                if started_count == 4:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(started_count, 4)
+        finally:
+            priority_release.set()
+            await asyncio.gather(*tasks, return_exceptions=True)
             scheduler.close()
 
 

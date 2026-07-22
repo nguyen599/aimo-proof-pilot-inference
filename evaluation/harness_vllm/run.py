@@ -3830,10 +3830,14 @@ class ChatScheduler:
             self._generation_worker_count = 1
             self._priority_worker_count = 0
         else:
-            self._priority_worker_count = max(1, min(8, worker_count // 4))
+            priority_reserve = max(1, min(8, worker_count // 4))
             self._generation_worker_count = (
-                worker_count - self._priority_worker_count
+                worker_count - priority_reserve
             )
+            # Keep initial generations from occupying every blocking HTTP
+            # worker, while allowing follow-up stages to use the full vLLM DP
+            # request capacity once proof generation winds down.
+            self._priority_worker_count = worker_count
             self._generation_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=self._generation_worker_count,
                 thread_name_prefix="llm-generation",
@@ -7584,7 +7588,11 @@ class ProofRuntime:
         self.logdir = logdir
         self.gpu_group = gpu_group
         self.max_concurrent_requests = max(1, max_concurrent_requests)
-        self.request_worker_count = max(1, int(max_num_seqs))
+        self.request_worker_count = resolve_request_worker_count(
+            max_num_seqs=max_num_seqs,
+            data_parallel_size=data_parallel_size,
+            max_concurrent_requests=self.max_concurrent_requests,
+        )
         self.pipelines_per_problem = max(1, pipelines_per_problem)
         if not 0 <= int(deepseek_math_v2_candidate_count) <= self.pipelines_per_problem:
             raise ValueError(
@@ -8304,6 +8312,25 @@ def resolve_max_concurrent_requests(cfg: Any, selected_gpu_count: int) -> int:
     if configured > 0:
         return configured
     return requests_per_gpu * selected_gpu_count
+
+
+def resolve_request_worker_count(
+    *,
+    max_num_seqs: int,
+    data_parallel_size: int,
+    max_concurrent_requests: int,
+) -> int:
+    """Size blocking HTTP workers for all local vLLM DP replicas."""
+    if int(max_num_seqs) < 1:
+        raise ValueError("max_num_seqs must be at least 1")
+    if int(data_parallel_size) < 1:
+        raise ValueError("data_parallel_size must be at least 1")
+    if int(max_concurrent_requests) < 1:
+        raise ValueError("max_concurrent_requests must be at least 1")
+    return min(
+        int(max_concurrent_requests),
+        int(max_num_seqs) * int(data_parallel_size),
+    )
 
 
 def build_cli_parser() -> argparse.ArgumentParser:
