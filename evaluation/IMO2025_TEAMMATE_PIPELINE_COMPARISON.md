@@ -88,26 +88,37 @@ Multi-parent refinement is also deferred from the first treatment. Adding it at
 the same time would change candidate ancestry, verifier inputs, request volume,
 and completion timing, preventing attribution of any score change to the new
 selector or checkpoint. It remains an opt-in follow-up only if the checkpoint
-and tournament-controlled run fails to put a correct proof in the pool, or if a
+four-round treatment fails to put a correct proof in the pool, or if a
 36-versus-64 width comparison shows that independent lineages cannot convert
 additional initial diversity into stronger later proofs.
 
+The subsequent same-pool P4 replay rules out the wide tournament as the next
+production change. The existing selector chose attempt 11, whose two external
+grades averaged `6.5/7`. Sixty-four balanced four-proof ballots over the same
+35-candidate pool chose attempt 34, whose grades averaged `3.5/7`. This is a
+`-3.0/7` regression with generation, verification, and refinement held fixed.
+The tournament implementation remains available for controlled experiments,
+but it must not be enabled in the checkpoint treatment. The result also means
+that final selection is not the first bottleneck in this measured P4 pool.
+
 ## Test plan
 
-1. Finish and externally grade the current 36-wide baseline finals.
+1. Finish and externally grade the current 36-wide baseline finals. **Done:**
+   P4 averaged `6.5/7` and P5 averaged `4.0/7` across two calls each.
 2. Run the adaptive round-zero SFT750 versus step-225 checkpoint gate on the
    same P4/P5 input. This simultaneously establishes adaptive-prompt pool quality
    for each checkpoint, but checkpoint is the only treatment difference.
-3. Use the winning checkpoint with the opt-in `llm_stratified_tournament`
-   selector in the four-round treatment, retaining current and historical
-   proofs.
+3. Use the winning checkpoint with the existing conservative selector in the
+   four-round treatment, retaining current and historical proofs. Do not enable
+   `llm_stratified_tournament`; its same-pool P4 replay regressed by `3.0/7`.
 4. Grade every treatment final twice with the same external grader and compare
    it with the baseline final and with the best proof known to exist in each
    candidate pool.
-5. If the final remains below the pool maximum, fix selection. If no correct
-   proof exists in the pool, run a 36-versus-64 width A/B. If width improves the
-   maximum but four independent repair rounds do not, then port cumulative
-   four-parent refinement as a separate topology treatment.
+5. If the final remains below the pool maximum, diagnose the conservative
+   selector and verifier calibration without assuming that a wider tournament
+   helps. If no correct proof exists in the pool, run a 36-versus-64 width A/B.
+   If width improves the maximum but four independent repair rounds do not,
+   then port cumulative four-parent refinement as a separate topology treatment.
 
 Legacy `llm`, `llm_tournament`, and `score` modes remain unchanged.
 
