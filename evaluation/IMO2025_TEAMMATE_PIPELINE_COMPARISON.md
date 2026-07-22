@@ -19,6 +19,14 @@ runs 64 balanced brackets over at most ten proofs; otherwise it runs 16 votes
 over proofs within 20% of the best verifier score. Invalid ballots are ignored,
 and ties prefer the better verifier rank. Selector temperature is `0.3`.
 
+Their refinement topology also differs from ours. It keeps a cumulative pool of
+the best verified proofs from previous rounds and creates each new proof by
+combining four stratified parents with up to three randomly selected non-ideal
+reviews per parent. Our current runtime keeps 36 independent candidate lineages:
+each refinement receives that candidate's own retained proof and critique
+history. Porting multi-parent refinement therefore requires a round-level global
+pool and synchronization barrier; it is not a prompt-only change.
+
 ## Comparison
 
 Our existing `llm_tournament` is a single-elimination bracket over the whole
@@ -31,6 +39,11 @@ The teammate result does **not** establish that its checkpoint is better for our
 IMO 2025 P4/P5 workload. Its checkpoint comparison used different problems, and
 the reported deploy/step-225 difference was within grader noise. Search width,
 checkpoint, and selection must remain separate factors.
+
+Multi-parent refinement is also deferred from the first treatment. Adding it at
+the same time would change candidate ancestry, verifier inputs, request volume,
+and completion timing, preventing attribution of any score change to the new
+selector or checkpoint.
 
 ## Test plan
 
