@@ -6,12 +6,14 @@ verifications from proof scores, rankings, saved traces, or final tournament
 selection.
 
 The configured endpoint must expose OpenAI-compatible `POST /v1/embeddings`.
-The harness owns only the client; start and stop the Voyage server separately.
-A compatible vLLM command is:
+The harness owns only the client and never starts or stops vLLM. Start the
+Voyage server before `run_submission.py`; a run with deduplication enabled fails
+after three connection attempts when the endpoint is unavailable. A compatible
+vLLM command is:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 vllm serve \
-  /workspace/models/voyage-4-nano \
+  /tmp/models/voyage-4-nano \
   --runner pooling \
   --convert embed \
   --trust-remote-code \
