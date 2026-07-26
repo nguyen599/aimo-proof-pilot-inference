@@ -38,6 +38,11 @@ def attention_arguments(server: dict) -> list[str]:
     return arguments
 
 
+def reasoning_arguments(server: dict) -> list[str]:
+    parser = server.get("reasoning_parser", "deepseek-r1")
+    return ["--reasoning-parser", parser] if parser is not None else []
+
+
 def flashinfer_cuda_arch() -> str:
     """FLASHINFER_CUDA_ARCH_LIST for the installed GPU. Proven values: Hopper
     (sm90) -> 9.0a, Blackwell sm120 -> 12.0f. Falls back to 9.0a if detection
@@ -135,7 +140,7 @@ def main() -> None:
         "--cuda-graph-backend-prefill", str(server["prefill_cuda_graph_backend"]),
         "--cuda-graph-bs-prefill", "256", "1024", str(server["chunked_prefill_size"]),
         "--enable-cache-report", "--enable-metrics", "--random-seed", str(config["search"]["seed"]),
-        "--reasoning-parser", "deepseek-r1",
+        *reasoning_arguments(server),
     ]
     if model.dflash:
         env["SGLANG_DFLASH_DRAFT_RING"] = "1"

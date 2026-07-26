@@ -20,7 +20,11 @@ from eval_config import active_model, load_config  # noqa: E402
 from launch_review_dedup_server import (  # noqa: E402
     build_command as build_review_dedup_command,
 )
-from launch_server import attention_arguments, decode_graph_batches  # noqa: E402
+from launch_server import (  # noqa: E402
+    attention_arguments,
+    decode_graph_batches,
+    reasoning_arguments,
+)
 
 class RuntimeConfigTests(unittest.TestCase):
     @classmethod
@@ -530,6 +534,36 @@ class RuntimeConfigTests(unittest.TestCase):
         batches = decode_graph_batches(96)
         self.assertEqual(batches[:16], list(range(1, 17)))
         self.assertEqual(batches[-1], 96)
+
+    def test_reasoning_parser_defaults_to_deepseek_and_can_be_disabled(self):
+        self.assertEqual(
+            reasoning_arguments({}),
+            ["--reasoning-parser", "deepseek-r1"],
+        )
+        self.assertEqual(reasoning_arguments({"reasoning_parser": None}), [])
+        self.assertEqual(
+            reasoning_arguments({"reasoning_parser": "custom"}),
+            ["--reasoning-parser", "custom"],
+        )
+
+    def test_reasoning_parser_validation(self):
+        def configure(config):
+            config["server"]["reasoning_parser"] = None
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_config(directory, configure)
+            self.assertIsNone(load_config(path)["server"]["reasoning_parser"])
+
+        for value in ("", False, 0):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                path = self.write_config(
+                    directory,
+                    lambda config, value=value: config["server"].update(
+                        reasoning_parser=value
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "server.reasoning_parser"):
+                    load_config(path)
 
     def test_submission_wrapper_requires_explicit_config(self):
         launcher = (REPO / "run_submission.sh").read_text()
