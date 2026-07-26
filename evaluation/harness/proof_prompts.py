@@ -47,9 +47,20 @@ _MARKDOWN_SELF_EVALUATION = re.compile(
 _MARKDOWN_FINAL_SCORE = re.compile(
     r"(?is)Based on my evaluation, the final overall score should be[ \t]*:"
 )
+_MARKDOWN_VERIFICATION_OPEN = re.compile(
+    r"(?i)(?:\*{1,2})?Here is my evaluation of the solution:"
+    r"(?:\*{1,2})?"
+)
 _BOXED_SCORE = re.compile(
     r"\\boxed\s*\{\s*(0(?:\.0+)?|(?:0?\.)?5|1(?:\.0+)?)\s*\}",
     re.IGNORECASE,
+)
+_MARKDOWN_TERMINAL_SCORE = re.compile(
+    r"(?is)Based on my evaluation, the final overall score should be[ \t]*:"
+    r"\s*\\boxed\s*\{\s*(0(?:\.0+)?|(?:0?\.)?5|1(?:\.0+)?)\s*\}\s*\Z"
+)
+_EDGE_THINK_TAGS = re.compile(
+    r"(?is)^(?:\s*</?think>\s*)+|(?:\s*</?think>\s*)+$"
 )
 
 # Selector output: the model picks one candidate by ID. Same 3-tier tolerance as
@@ -245,6 +256,35 @@ def _parse_markdown_score(text: str) -> float | None:
     return _snap_score(matches[-1].group(1)) if matches else None
 
 
+def _parse_markdown_verification(text: str) -> tuple[str, float]:
+    """Extract only a terminal, formatted verifier answer.
+
+    With ``reasoning_parser: null``, OLMo's private reasoning and visible answer
+    share the response content stream. Requiring the final answer marker and a
+    terminal boxed score prevents an unfinished verifier from being admitted,
+    while returning only the visible evaluation keeps reasoning out of later
+    refinement prompts.
+    """
+    raw = text or ""
+    score_match = _MARKDOWN_TERMINAL_SCORE.search(raw)
+    if score_match is None:
+        raise ValueError(
+            "verification does not end with a valid Markdown boxed score"
+        )
+    openings = list(
+        _MARKDOWN_VERIFICATION_OPEN.finditer(raw, 0, score_match.start())
+    )
+    if not openings:
+        raise ValueError("verification has no final Markdown evaluation section")
+    analysis = raw[openings[-1].end() : score_match.start()].strip()
+    if not analysis:
+        raise ValueError("verification has an empty Markdown evaluation section")
+    score = _snap_score(score_match.group(1))
+    if score is None:
+        raise ValueError("verification has no valid score (0, 0.5, or 1)")
+    return analysis, score
+
+
 def parse_generation(
     text: str,
     lenient: bool = True,
@@ -265,6 +305,7 @@ def parse_generation(
             _MARKDOWN_SOLUTION,
             _MARKDOWN_SELF_EVALUATION,
         )
+        proof = _EDGE_THINK_TAGS.sub("", proof).strip()
         self_evaluation = _last_markdown_section(
             text,
             _MARKDOWN_SELF_EVALUATION,
@@ -272,7 +313,9 @@ def parse_generation(
         )
         score = _parse_markdown_score(text)
         if not proof:
-            raise ValueError("generation has no Markdown Solution section")
+            raise ValueError(
+                "generation has no substantive Markdown Solution content"
+            )
         if not lenient and not self_evaluation:
             raise ValueError("generation has no Markdown Self Evaluation section")
     elif profile != DEFAULT_PROMPT_PROFILE:
@@ -355,7 +398,7 @@ def parse_verification(
     The empty-suggestions acceptance is a bug fix and stays on only in lenient.
     """
     if profile == "proof_pilot_markdown":
-        score = _parse_markdown_score(text)
+        return _parse_markdown_verification(text)
     elif profile != DEFAULT_PROMPT_PROFILE:
         raise ValueError(f"unknown prompt profile: {profile!r}")
     elif lenient:

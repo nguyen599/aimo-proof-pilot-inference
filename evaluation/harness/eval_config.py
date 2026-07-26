@@ -92,6 +92,7 @@ SEARCH_KEYS = {
 #     equals best-0.2 only when best == 1.0), so a 1.0 is never pitted against a 0.3.
 OPTIONAL_SEARCH_KEYS = {
     "prompt_profile",
+    "min_proof_characters",
     "llm_selector",
     "selection_votes",
     "selection_candidates",
@@ -330,6 +331,11 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError(
             "search.prompt_profile must be 'ycchen_math_3r' or "
             "'proof_pilot_markdown'"
+        )
+    if "min_proof_characters" in search:
+        _positive_int(
+            search["min_proof_characters"],
+            "search.min_proof_characters",
         )
     if "llm_selector" in search and type(search["llm_selector"]) is not bool:
         raise ValueError("search.llm_selector must be a boolean")
