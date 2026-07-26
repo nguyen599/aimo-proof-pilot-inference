@@ -16,6 +16,12 @@ def get_json(url: str) -> dict:
         return json.load(response)
 
 
+def config_dtype(config: dict) -> str | None:
+    # Transformers 5 serializes this standardized field as ``dtype`` while
+    # older checkpoints use ``torch_dtype``.
+    return config.get("dtype", config.get("torch_dtype"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True)
@@ -37,7 +43,7 @@ def main() -> None:
     humming_layers = server_log.count("HUMMING_W4A8_LAYER_READY")
     draft_w4a16_layers = server_log.count("DFLASH_DRAFT_W4A16_LAYER_READY")
 
-    assert target_config["torch_dtype"] == "bfloat16"
+    assert config_dtype(target_config) == "bfloat16"
     assert server["tp_size"] == model.tensor_parallel_size
     assert server["dp_size"] == model.data_parallel_size
     assert server["kv_cache_dtype"] == model.kv_cache_dtype
@@ -69,7 +75,7 @@ def main() -> None:
 
     if model.dflash:
         assert draft_config is not None
-        assert draft_config["torch_dtype"] == "bfloat16"
+        assert config_dtype(draft_config) == "bfloat16"
         assert server["speculative_algorithm"] == "DFLASH"
         assert server["speculative_draft_model_path"] == str(model.draft)
         assert server["speculative_dflash_block_size"] == expected["dflash_block_size"]
