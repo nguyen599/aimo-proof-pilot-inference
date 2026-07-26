@@ -190,14 +190,34 @@ class CallStore:
         is_proof_generation = spec.stage.endswith("/generate")
         is_verification = "/verify/" in spec.stage
         is_selection = spec.stage.endswith("/select")
+        continuation_reserve = (
+            solution_continuation_tokens
+            if is_proof_generation
+            else verifier_continuation_tokens
+            if is_verification
+            else selection_continuation_tokens
+            if is_selection
+            else 0
+        )
         try:
             async with semaphore:
+                effective_max_completion_tokens = max_completion_tokens
+                budget_prompt_tokens = None
+                if hasattr(client, "fit_completion_budget"):
+                    (
+                        effective_max_completion_tokens,
+                        budget_prompt_tokens,
+                    ) = await client.fit_completion_budget(
+                        spec.messages,
+                        requested_tokens=max_completion_tokens,
+                        reserve_tokens=continuation_reserve,
+                    )
                 if stream_detect and (is_proof_generation or is_verification):
                     # Stream the completion and abort+salvage on a live degenerate
                     # loop (real-time detection). Same record shape as chat_raw.
                     response = await client.chat_stream(
                         spec.messages,
-                        max_completion_tokens=max_completion_tokens,
+                        max_completion_tokens=effective_max_completion_tokens,
                         temperature=temperature,
                         top_p=top_p,
                         seed=spec.seed,
@@ -212,7 +232,7 @@ class CallStore:
                 else:
                     response = await client.chat_raw(
                         spec.messages,
-                        max_completion_tokens=max_completion_tokens,
+                        max_completion_tokens=effective_max_completion_tokens,
                         temperature=temperature,
                         top_p=top_p,
                         seed=spec.seed,
@@ -320,6 +340,9 @@ class CallStore:
                     else:
                         disposition = "skipped_non_stop"
                     response["verification_disposition"] = disposition
+                response["configured_max_completion_tokens"] = max_completion_tokens
+                response["context_budget_prompt_tokens"] = budget_prompt_tokens
+                response["reserved_continuation_tokens"] = continuation_reserve
             message = response.pop("message")
             record = {
                 "sample_id": spec.sample_id,
