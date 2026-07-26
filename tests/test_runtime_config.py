@@ -195,6 +195,7 @@ class RuntimeConfigTests(unittest.TestCase):
                 reviews_per_refine_parent=3,
                 max_completion_tokens=32768,
                 solution_continuation_tokens=8192,
+                verifier_thinking_budget_tokens=30000,
                 verifier_continuation_tokens=4096,
                 min_valid_verifications=5,
             )
@@ -205,6 +206,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(config["server"]["context_length"], 1048576)
         self.assertEqual(config["search"]["max_completion_tokens"], 32768)
         self.assertEqual(config["search"]["solution_continuation_tokens"], 8192)
+        self.assertEqual(config["search"]["verifier_thinking_budget_tokens"], 30000)
         self.assertEqual(config["search"]["verifier_continuation_tokens"], 4096)
         self.assertEqual(config["search"]["min_valid_verifications"], 5)
 

@@ -475,6 +475,58 @@ class AsyncClientTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_markdown_verifier_force_close_uses_time_limit_steer(self):
+        async def run():
+            client = AsyncChatClient("http://127.0.0.1:30000/v1", "test-model")
+            tokenizer = FakeTokenizer()
+            client._tokenizer = tokenizer
+
+            async def post_native(path: str, payload: dict) -> tuple[dict, float]:
+                return (
+                    {
+                        "text": (
+                            "The proof has a fatal gap.\n"
+                            "Based on my evaluation, the final overall score "
+                            "should be:\n\\boxed{0}"
+                        ),
+                        "output_ids": [70, 71],
+                        "meta_info": {
+                            "finish_reason": "stop",
+                            "prompt_tokens": 60020,
+                            "completion_tokens": 2,
+                        },
+                    },
+                    1.0,
+                )
+
+            client._post_native = post_native
+            try:
+                await client.continue_verification_raw(
+                    initial_response(
+                        reasoning="unfinished verifier reasoning",
+                        content="",
+                    ),
+                    [{"role": "user", "content": "verify"}],
+                    max_new_tokens=4096,
+                    temperature=1.0,
+                    top_p=0.95,
+                    seed=13,
+                    request_id="markdown-verifier",
+                    profile="proof_pilot_markdown",
+                )
+            finally:
+                await client.aclose()
+
+            self.assertTrue(
+                tokenizer.encoded[0].endswith(
+                    "unfinished verifier reasoning"
+                    "\nWe should now write the final evaluation due time limit.\n"
+                    "</think>\n\nHere is my evaluation of the solution:\n"
+                )
+            )
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()
