@@ -56,8 +56,12 @@ _BOXED_SCORE = re.compile(
     re.IGNORECASE,
 )
 _MARKDOWN_TERMINAL_SCORE = re.compile(
-    r"(?is)Based on my evaluation, the final overall score should be[ \t]*:"
-    r"\s*\\boxed\s*\{\s*(0(?:\.0+)?|(?:0?\.)?5|1(?:\.0+)?)\s*\}\s*\Z"
+    r"(?is)(?:\*{1,2})?"
+    r"(?:Based on my evaluation, the final overall score should be|Score)"
+    r"[ \t]*:(?:\*{1,2})?\s*"
+    r"(?:\*{1,2})?(?:\\\[|\\\(|\$\$|\$)?\s*"
+    r"\\boxed\s*\{\s*(0(?:\.0+)?|(?:0?\.)?5|1(?:\.0+)?)\s*\}"
+    r"\s*(?:\\\]|\\\)|\$\$|\$)?(?:\*{1,2})?\s*\Z"
 )
 _EDGE_THINK_TAGS = re.compile(
     r"(?is)^(?:\s*</?think>\s*)+|(?:\s*</?think>\s*)+$"
