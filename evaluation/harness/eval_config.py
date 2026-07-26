@@ -55,6 +55,7 @@ SERVER_KEYS = {
     "prefill_cuda_graph_backend", "watchdog_timeout",
     "dflash_block_size", "dflash_num_draft_tokens", "dflash_window_size",
 }
+OPTIONAL_SERVER_KEYS = {"reasoning_parser"}
 SEARCH_KEYS = {
     "proofs_per_round", "verifications_per_proof", "top_proofs",
     "refine_parents", "reviews_per_refine_parent", "refine_review_strategy",
@@ -186,13 +187,21 @@ def load_config(path: Path) -> dict[str, Any]:
         )
     if config["schema_version"] != 12:
         raise ValueError("schema_version must be 12")
-    for section, keys in (
-        ("models", MODEL_PATH_KEYS), ("model", MODEL_KEYS), ("server", SERVER_KEYS),
-    ):
+    for section, keys in (("models", MODEL_PATH_KEYS), ("model", MODEL_KEYS)):
         value = config[section]
         if not isinstance(value, dict):
             raise ValueError(f"{section} must be a mapping")
         _exact_keys(value, keys, section)
+    server = config["server"]
+    if not isinstance(server, dict):
+        raise ValueError("server must be a mapping")
+    actual = set(server)
+    missing = SERVER_KEYS - actual
+    extra = actual - SERVER_KEYS - OPTIONAL_SERVER_KEYS
+    if missing or extra:
+        raise ValueError(
+            f"server keys differ: missing={sorted(missing)}, extra={sorted(extra)}"
+        )
     # search: SEARCH_KEYS required + OPTIONAL_SEARCH_KEYS allowed but not required.
     if not isinstance(config["search"], dict):
         raise ValueError("search must be a mapping")
@@ -216,9 +225,13 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(model["kv_cache_dtype"], str) or not model["kv_cache_dtype"]:
         raise ValueError("model.kv_cache_dtype must be a nonempty string")
 
-    server = config["server"]
     if not isinstance(server["host"], str) or not server["host"]:
         raise ValueError("server.host must be a nonempty string")
+    reasoning_parser = server.get("reasoning_parser", "deepseek-r1")
+    if reasoning_parser is not None and (
+        not isinstance(reasoning_parser, str) or not reasoning_parser
+    ):
+        raise ValueError("server.reasoning_parser must be null or a nonempty string")
     for key in (
         "page_size", "port", "context_length", "max_running_requests", "chunked_prefill_size",
         "stream_interval", "watchdog_timeout", "dflash_block_size",
