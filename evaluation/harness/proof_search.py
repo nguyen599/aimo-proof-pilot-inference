@@ -256,6 +256,7 @@ class CallStore:
                             top_p=top_p,
                             seed=spec.seed,
                             request_id=spec.sample_id,
+                            profile=prompt_profile,
                         )
                     elif is_verification:
                         response = await client.continue_verification_raw(
@@ -266,6 +267,7 @@ class CallStore:
                             top_p=top_p,
                             seed=spec.seed,
                             request_id=spec.sample_id,
+                            profile=prompt_profile,
                         )
                     elif is_selection:
                         response = await client.continue_selection_raw(
