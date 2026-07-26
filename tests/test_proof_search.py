@@ -586,6 +586,28 @@ class ProofSearchTests(unittest.TestCase):
         self.assertEqual(verifier, "every step is valid.")
         self.assertEqual(verifier_score, 0.5)
 
+        for terminal, expected in (
+            (
+                "Based on my evaluation, the final overall score should be:\n"
+                "\\[\\boxed{0}\\]",
+                0.0,
+            ),
+            (
+                "**Based on my evaluation, the final overall score should be:**\n"
+                "\\[\\boxed{0.5}\\]",
+                0.5,
+            ),
+            ("**Score:** \\(\\boxed{1}\\)", 1.0),
+        ):
+            with self.subTest(terminal=terminal):
+                parsed, parsed_score = parse_verification(
+                    "Here is my evaluation of the solution: rigorous review.\n"
+                    + terminal,
+                    profile=profile,
+                )
+                self.assertEqual(parsed, "rigorous review.")
+                self.assertEqual(parsed_score, expected)
+
         with self.assertRaisesRegex(ValueError, "Markdown Solution"):
             parse_generation("No formatted proof.", profile=profile)
         with self.assertRaisesRegex(ValueError, "substantive Markdown Solution"):
