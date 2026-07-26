@@ -15,6 +15,17 @@ MARKER = (
 )
 ASSIGNMENT = "        self.max_position_embeddings = max_position_embeddings\n"
 SUPER_CALL = "        super().__init__(\n"
+ROPE_PARAMETERS_CAPTURE = (
+    '        checkpoint_rope_parameters = kwargs.get("rope_parameters")\n'
+)
+ROPE_SCALING_ASSIGNMENT = "        self.rope_scaling = rope_scaling\n"
+ROPE_SCALING_PRESERVE = """        # OLMO3_ROPE_PARAMETERS_FIX: preserve Transformers-v5 checkpoint data.
+        self.rope_scaling = (
+            rope_scaling
+            if rope_scaling is not None
+            else checkpoint_rope_parameters
+        )
+"""
 
 
 def patch_source(source: str) -> str:
@@ -47,15 +58,43 @@ def patch_source(source: str) -> str:
             + source[super_index:]
         )
 
+    if ROPE_SCALING_PRESERVE not in source:
+        if source.count(ROPE_PARAMETERS_CAPTURE) == 0:
+            if source.count(ASSIGNMENT) != 1:
+                raise RuntimeError(
+                    "expected one OLMo3 context-length assignment before "
+                    "preserving RoPE parameters"
+                )
+            source = source.replace(
+                ASSIGNMENT,
+                ASSIGNMENT + ROPE_PARAMETERS_CAPTURE,
+                1,
+            )
+        elif source.count(ROPE_PARAMETERS_CAPTURE) != 1:
+            raise RuntimeError("OLMo3 RoPE parameter capture was duplicated")
+        if source.count(ROPE_SCALING_ASSIGNMENT) != 1:
+            raise RuntimeError("expected one OLMo3 rope_scaling assignment")
+        source = source.replace(
+            ROPE_SCALING_ASSIGNMENT,
+            ROPE_SCALING_PRESERVE,
+            1,
+        )
+
     marker_index = source.index(MARKER)
     assignment_index = source.index(ASSIGNMENT, marker_index)
+    rope_capture_index = source.index(ROPE_PARAMETERS_CAPTURE, assignment_index)
     super_index = source.index(SUPER_CALL)
-    if not marker_index < assignment_index < super_index:
+    if not marker_index < assignment_index < rope_capture_index < super_index:
         raise RuntimeError(
-            "OLMo3 context length must be initialized before PretrainedConfig"
+            "OLMo3 context length and RoPE parameters must be captured before "
+            "PretrainedConfig"
         )
     if source.count(ASSIGNMENT) != 1:
         raise RuntimeError("OLMo3 context-length assignment was duplicated")
+    if source.count(ROPE_PARAMETERS_CAPTURE) != 1:
+        raise RuntimeError("OLMo3 RoPE parameter capture was duplicated")
+    if source.count(ROPE_SCALING_PRESERVE) != 1:
+        raise RuntimeError("OLMo3 RoPE parameter preservation was not installed")
     return source
 
 
