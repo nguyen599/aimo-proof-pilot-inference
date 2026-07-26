@@ -21,6 +21,8 @@
 #       hook from converting the INT4 DFlash draft from W4A16 to W4A8
 #   patch_humming_sm90_config.py (script) pin the H200 Humming helper to the
 #       numerically verified M=256 kernel configuration for every row count
+#   patch_olmo3_rope_config_init.py (script) initialize max_position_embeddings
+#       before Transformers validates YaRN RoPE in plain OLMo3 checkpoints
 #
 # Usage: bash apply_patches.sh <venv_path> [w4a8_helper_path]
 #   w4a8_helper_path defaults to the in-image location and may also be supplied
@@ -58,4 +60,5 @@ find "$SROOT/models" "$SROOT/speculative" -name '*.pyc' -delete 2>/dev/null || t
 "$VENV/bin/python" "$SRC/patch_w4a8_runtime_marker.py" "$VENV"
 "$VENV/bin/python" "$SRC/patch_humming_target_scope.py" "$HELPER"
 "$VENV/bin/python" "$SRC/patch_humming_sm90_config.py" "$HELPER"
+"$VENV/bin/python" "$SRC/patch_olmo3_rope_config_init.py" "$VENV"
 echo "[patch] done"
