@@ -25,6 +25,7 @@ from launch_server import (  # noqa: E402
     decode_graph_batches,
     reasoning_arguments,
 )
+from validate_server import config_dtype  # noqa: E402
 
 class RuntimeConfigTests(unittest.TestCase):
     @classmethod
@@ -564,6 +565,15 @@ class RuntimeConfigTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "server.reasoning_parser"):
                     load_config(path)
+
+    def test_server_validator_accepts_transformers_dtype_aliases(self):
+        self.assertEqual(config_dtype({"torch_dtype": "bfloat16"}), "bfloat16")
+        self.assertEqual(config_dtype({"dtype": "bfloat16"}), "bfloat16")
+        self.assertEqual(
+            config_dtype({"dtype": "bfloat16", "torch_dtype": "float32"}),
+            "bfloat16",
+        )
+        self.assertIsNone(config_dtype({}))
 
     def test_submission_wrapper_requires_explicit_config(self):
         launcher = (REPO / "run_submission.sh").read_text()
