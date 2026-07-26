@@ -854,6 +854,8 @@ class ProblemSearch:
             )
         except ValueError:
             return None
+        if len(proof_text) <= int(self.config.get("min_proof_characters", 0)):
+            return None
         proof = Proof(
             proof_id=candidate.proof_id,
             round_index=candidate.round_index,

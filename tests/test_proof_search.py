@@ -561,19 +561,68 @@ class ProofSearchTests(unittest.TestCase):
         self.assertEqual(score, 1.0)
 
         verifier, verifier_score = parse_verification(
-            "An abandoned score was \\boxed{0}.\n"
+            "Long private reasoning and an abandoned score was \\boxed{0}.\n"
             "Here is my evaluation of the solution: every step is valid.\n"
             "Based on my evaluation, the final overall score should be:\n"
             "\\boxed{0.5}",
             profile=profile,
         )
-        self.assertIn("every step is valid", verifier)
+        self.assertEqual(verifier, "every step is valid.")
         self.assertEqual(verifier_score, 0.5)
 
         with self.assertRaisesRegex(ValueError, "Markdown Solution"):
             parse_generation("No formatted proof.", profile=profile)
+        with self.assertRaisesRegex(ValueError, "substantive Markdown Solution"):
+            parse_generation(
+                "## Solution\n</think>\n\n"
+                "## Self Evaluation\n"
+                "Here is my evaluation of the solution: complete.\n"
+                "Based on my evaluation, the final overall score should be:\n"
+                "\\boxed{1}",
+                profile=profile,
+            )
         with self.assertRaises(ValueError):
             parse_verification("No boxed score.", profile=profile)
+        with self.assertRaisesRegex(ValueError, "does not end"):
+            parse_verification(
+                "Here is my evaluation of the solution: valid.\n"
+                "Based on my evaluation, the final overall score should be:\n"
+                "\\boxed{1}\nTrailing text.",
+                profile=profile,
+            )
+
+    def test_minimum_proof_characters_skips_verification(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                config = small_config()
+                config.update(
+                    max_rounds=1,
+                    proofs_per_round=1,
+                    top_proofs=1,
+                    min_proof_characters=1000,
+                )
+                client = ScriptedClient()
+                search = ProblemSearch(
+                    problem_id="minimum-proof-length",
+                    problem="Prove the claim.",
+                    output_dir=Path(directory),
+                    client=client,
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "round 1 produced no valid proof",
+                ):
+                    await search.solve()
+
+                self.assertFalse(
+                    any("/verify/" in request_id for request_id in client.calls)
+                )
+                self.assertEqual(list(search.proofs), [])
+
+        asyncio.run(run())
 
     def test_proof_pilot_profile_reaches_call_store_length_validation(self):
         async def run():
