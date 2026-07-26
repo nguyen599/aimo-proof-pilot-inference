@@ -233,6 +233,34 @@ class RuntimeConfigTests(unittest.TestCase):
                 config = load_config(path)
                 self.assertEqual(config["search"]["temperature"], temperature)
 
+    def test_search_prompt_profile_is_optional_and_strict(self):
+        for profile in ("ycchen_math_3r", "proof_pilot_markdown"):
+            with (
+                self.subTest(profile=profile),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = self.write_config(
+                    directory,
+                    lambda config, profile=profile: config["search"].__setitem__(
+                        "prompt_profile", profile
+                    ),
+                )
+                self.assertEqual(
+                    load_config(path)["search"]["prompt_profile"],
+                    profile,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_config(
+                directory,
+                lambda config: config["search"].__setitem__(
+                    "prompt_profile", "unknown"
+                ),
+                name="invalid.yaml",
+            )
+            with self.assertRaisesRegex(ValueError, "search.prompt_profile"):
+                load_config(path)
+
     def test_search_temperature_rejects_invalid_values(self):
         invalid_values = (-0.1, float("nan"), "invalid")
         for temperature in invalid_values:

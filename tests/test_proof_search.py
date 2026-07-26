@@ -19,6 +19,7 @@ from proof_prompts import (  # noqa: E402
     parse_verification,
     prompt_hashes,
     refinement_messages,
+    verification_messages,
 )
 from proof_search import (  # noqa: E402
     Candidate,
@@ -456,6 +457,89 @@ class ProofSearchTests(unittest.TestCase):
         self.assertIn('<candidate id="r01-p0000">', user)
         self.assertIn('<verifier_review score="0">\nFatal review.', user)
         self.assertEqual(user.count("<verifier_review "), 1)
+
+    def test_proof_pilot_markdown_prompt_profile(self):
+        profile = "proof_pilot_markdown"
+        generated = generation_messages("Prove it.", profile=profile)
+        self.assertEqual([message["role"] for message in generated], ["user"])
+        self.assertIn("## Problem\nProve it.", generated[0]["content"])
+        self.assertIn("## Solution", generated[0]["content"])
+
+        verified = verification_messages(
+            "Prove it.",
+            "Candidate proof.",
+            "Candidate self-audit.",
+            profile=profile,
+        )
+        self.assertEqual([message["role"] for message in verified], ["user"])
+        self.assertIn("## Solution\nCandidate proof.", verified[0]["content"])
+        self.assertNotIn("Candidate self-audit.", verified[0]["content"])
+
+        refined = refinement_messages(
+            "Prove it.",
+            [
+                (
+                    "r01-p0000",
+                    "First proof.",
+                    "",
+                    [(0.0, "Fatal review.")],
+                ),
+                (
+                    "r01-p0001",
+                    "Second proof.",
+                    "",
+                    [(0.5, "Minor-gap review.")],
+                ),
+            ],
+            profile=profile,
+        )
+        self.assertEqual([message["role"] for message in refined], ["user"])
+        user = refined[0]["content"]
+        self.assertIn("### Candidate r01-p0000", user)
+        self.assertIn("### Candidate r01-p0001", user)
+        self.assertIn("### Evaluation 1 (score=0)", user)
+        self.assertIn("### Evaluation 1 (score=0.5)", user)
+        self.assertNotIn("<candidate", user)
+
+    def test_proof_pilot_markdown_parsers_use_last_solution_and_score(self):
+        profile = "proof_pilot_markdown"
+        proof, self_evaluation, score = parse_generation(
+            "The requested format is:\n"
+            "## Solution // placeholder\n"
+            "Placeholder text.\n"
+            "## Self Evaluation // placeholder\n"
+            "Placeholder audit.\n"
+            "Based on my evaluation, the final overall score should be:\n"
+            "\\boxed{0}\n\n"
+            "## Solution\n"
+            "The actual rigorous proof.\n"
+            "## Self Evaluation\n"
+            "Here is my evaluation of the solution: the proof is complete.\n"
+            "Based on my evaluation, the final overall score should be:\n"
+            "\\boxed{1}",
+            profile=profile,
+        )
+        self.assertEqual(proof, "The actual rigorous proof.")
+        self.assertEqual(
+            self_evaluation,
+            "Here is my evaluation of the solution: the proof is complete.",
+        )
+        self.assertEqual(score, 1.0)
+
+        verifier, verifier_score = parse_verification(
+            "An abandoned score was \\boxed{0}.\n"
+            "Here is my evaluation of the solution: every step is valid.\n"
+            "Based on my evaluation, the final overall score should be:\n"
+            "\\boxed{0.5}",
+            profile=profile,
+        )
+        self.assertIn("every step is valid", verifier)
+        self.assertEqual(verifier_score, 0.5)
+
+        with self.assertRaisesRegex(ValueError, "Markdown Solution"):
+            parse_generation("No formatted proof.", profile=profile)
+        with self.assertRaises(ValueError):
+            parse_verification("No boxed score.", profile=profile)
 
     def test_nonideal_reviews_are_sampled_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:
