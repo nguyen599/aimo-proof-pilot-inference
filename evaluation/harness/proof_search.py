@@ -178,6 +178,7 @@ class CallStore:
         stream_detect: bool = False,
         filter_degenerate: bool = True,
         selection_continuation_tokens: int = 2048,
+        verifier_thinking_budget_tokens: int | None = None,
     ) -> dict:
         existing = self.records.get(spec.sample_id)
         if existing is not None:
@@ -201,7 +202,13 @@ class CallStore:
         )
         try:
             async with semaphore:
-                effective_max_completion_tokens = max_completion_tokens
+                requested_initial_tokens = (
+                    min(max_completion_tokens, verifier_thinking_budget_tokens)
+                    if is_verification
+                    and verifier_thinking_budget_tokens is not None
+                    else max_completion_tokens
+                )
+                effective_max_completion_tokens = requested_initial_tokens
                 budget_prompt_tokens = None
                 if hasattr(client, "fit_completion_budget"):
                     (
@@ -209,7 +216,7 @@ class CallStore:
                         budget_prompt_tokens,
                     ) = await client.fit_completion_budget(
                         spec.messages,
-                        requested_tokens=max_completion_tokens,
+                        requested_tokens=requested_initial_tokens,
                         reserve_tokens=continuation_reserve,
                     )
                 if stream_detect and (is_proof_generation or is_verification):
@@ -266,7 +273,16 @@ class CallStore:
                 # Generate/verify re-validate via `parser`; the selector re-checks for a
                 # <selected_id>. A parserless, non-selector stage has nothing to recover,
                 # so it is skipped (keeps a normal unparseable record, never parser(None)).
-                if was_length and not xml_valid and (parser is not None or is_selection):
+                force_invalid_verifier = (
+                    is_verification
+                    and verifier_thinking_budget_tokens is not None
+                    and not xml_valid
+                )
+                if (
+                    (was_length or force_invalid_verifier)
+                    and not xml_valid
+                    and (parser is not None or is_selection)
+                ):
                     if is_proof_generation:
                         response = await client.continue_solution_raw(
                             response,
@@ -319,6 +335,8 @@ class CallStore:
                 if was_length and xml_valid:
                     response["finish_reason"] = "stop"
                     response["xml_complete_after_length"] = True
+                if force_invalid_verifier:
+                    response["forced_verifier_finalization"] = True
                 response["xml_valid"] = xml_valid
                 response["xml_error"] = xml_error
                 if is_verification:
@@ -341,6 +359,10 @@ class CallStore:
                         disposition = "skipped_non_stop"
                     response["verification_disposition"] = disposition
                 response["configured_max_completion_tokens"] = max_completion_tokens
+                if is_verification:
+                    response["configured_verifier_thinking_budget_tokens"] = (
+                        verifier_thinking_budget_tokens
+                    )
                 response["context_budget_prompt_tokens"] = budget_prompt_tokens
                 response["reserved_continuation_tokens"] = continuation_reserve
             message = response.pop("message")
@@ -444,6 +466,9 @@ class ProblemSearch:
             filter_degenerate=self.config.get("filter_degenerate", True),
             selection_continuation_tokens=int(
                 self.config.get("selection_continuation_tokens", 2048)
+            ),
+            verifier_thinking_budget_tokens=self.config.get(
+                "verifier_thinking_budget_tokens"
             ),
         )
 

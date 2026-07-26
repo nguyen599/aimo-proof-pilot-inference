@@ -265,6 +265,22 @@ class LengthVerifierContinuationClient(ScriptedClient):
         }
 
 
+class StopVerifierContinuationClient(LengthVerifierContinuationClient):
+    def __init__(self):
+        super().__init__()
+        self.initial_verifier_max_tokens: int | None = None
+
+    async def chat_raw(self, messages, *, request_id, **kwargs):
+        response = await super().chat_raw(
+            messages, request_id=request_id, **kwargs
+        )
+        if request_id.endswith("/r01-p0000/v000"):
+            self.initial_verifier_max_tokens = kwargs["max_completion_tokens"]
+            response["finish_reason"] = "stop"
+            response["segments"][0]["finish_reason"] = "stop"
+        return response
+
+
 class CompleteVerifierXMLAtLengthClient(ScriptedClient):
     def __init__(self):
         super().__init__()
@@ -1451,6 +1467,41 @@ class ProofSearchTests(unittest.TestCase):
                     for verification in proof.verifications
                 ]
                 self.assertNotIn("private verifier reasoning", "\n".join(analyses))
+
+        asyncio.run(run())
+
+    def test_verifier_budget_force_finalizes_invalid_early_stop(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                config = small_config()
+                config.update(
+                    max_rounds=1,
+                    verifier_thinking_budget_tokens=96,
+                )
+                client = StopVerifierContinuationClient()
+                search = ProblemSearch(
+                    problem_id="verifier-budget-stop",
+                    problem="Prove the claim.",
+                    output_dir=Path(directory),
+                    client=client,
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                )
+
+                final = await search.solve()
+                forced = search.calls.records[
+                    "round-01/verify/r01-p0000/v000"
+                ]
+
+                self.assertEqual(client.initial_verifier_max_tokens, 96)
+                self.assertEqual(len(client.verifier_continuation_calls), 1)
+                self.assertTrue(forced["forced_verifier_finalization"])
+                self.assertEqual(
+                    forced["configured_verifier_thinking_budget_tokens"],
+                    96,
+                )
+                self.assertEqual(forced["verification_disposition"], "accepted")
+                self.assertEqual(final["valid_verifications_completed"], 4)
 
         asyncio.run(run())
 

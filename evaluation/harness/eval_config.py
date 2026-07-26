@@ -93,6 +93,7 @@ SEARCH_KEYS = {
 OPTIONAL_SEARCH_KEYS = {
     "prompt_profile",
     "min_proof_characters",
+    "verifier_thinking_budget_tokens",
     "llm_selector",
     "selection_votes",
     "selection_candidates",
@@ -278,6 +279,11 @@ def load_config(path: Path) -> dict[str, Any]:
         "concurrency", "request_timeout_seconds",
     ):
         _positive_int(search[key], f"search.{key}")
+    if "verifier_thinking_budget_tokens" in search:
+        _positive_int(
+            search["verifier_thinking_budget_tokens"],
+            "search.verifier_thinking_budget_tokens",
+        )
     if search["top_proofs"] > search["proofs_per_round"]:
         raise ValueError("search.top_proofs cannot exceed search.proofs_per_round")
     # Each refine call merges refine_parents distinct parents drawn from the
