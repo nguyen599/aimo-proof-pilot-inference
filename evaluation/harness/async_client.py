@@ -26,6 +26,16 @@ _FORCE_VERIFICATION_STEER = (
     "\n</think>\n\n<evaluation>\n"
 )
 
+_FORCE_MARKDOWN_SOLUTION_STEER = (
+    "\nWe should now write the final solution due time limit.\n"
+    "</think>\n\n## Solution\n"
+)
+
+_FORCE_MARKDOWN_VERIFICATION_STEER = (
+    "\nWe should now write the final evaluation due time limit.\n"
+    "</think>\n\nHere is my evaluation of the solution:\n"
+)
+
 _FORCE_SELECTION_STEER = (
     "\n\nI must finalize now. I will output ONLY the chosen candidate's ID in the "
     "required tag, with no further reasoning or commentary."
@@ -429,6 +439,7 @@ class AsyncChatClient:
         opening_tag: str,
         force_steer: str,
         preserve_untagged_content: bool,
+        unparsed_content_before_force: bool = False,
     ) -> tuple[list[int], str, bool]:
         tokenizer = self._get_tokenizer()
         prefix = _token_ids(
@@ -444,6 +455,9 @@ class AsyncChatClient:
         if has_opening_tag:
             suffix = reasoning + "</think>" + content
             visible_prefix = content
+        elif unparsed_content_before_force:
+            suffix = reasoning + content + force_steer
+            visible_prefix = opening_tag + "\n"
         else:
             untagged_content = content if preserve_untagged_content else ""
             suffix = reasoning + force_steer + untagged_content
@@ -468,6 +482,7 @@ class AsyncChatClient:
         opening_tag: str,
         force_steer: str,
         preserve_untagged_content: bool,
+        unparsed_content_before_force: bool = False,
     ) -> dict:
         message = initial["message"]
         reasoning = message.get("reasoning_content") or ""
@@ -479,6 +494,7 @@ class AsyncChatClient:
             opening_tag=opening_tag,
             force_steer=force_steer,
             preserve_untagged_content=preserve_untagged_content,
+            unparsed_content_before_force=unparsed_content_before_force,
         )
         continuation_id = f"{request_id}/{role}-continuation"
         payload = {
@@ -535,12 +551,15 @@ class AsyncChatClient:
         }
         initial_prompt_tokens = initial.get("prompt_tokens")
         requested_continuation_field = f"requested_{role}_continuation_tokens"
+        combined_reasoning = reasoning
+        if injected_opening_tag and unparsed_content_before_force:
+            combined_reasoning += content
         return {
             **initial,
             "message": {
                 **message,
                 "content": combined_content,
-                "reasoning_content": reasoning,
+                "reasoning_content": combined_reasoning,
             },
             "finish_reason": native_finish,
             "completion_tokens": _optional_sum(
@@ -568,7 +587,9 @@ class AsyncChatClient:
         top_p: float,
         seed: int,
         request_id: str,
+        profile: str = "ycchen_math_3r",
     ) -> dict:
+        markdown = profile == "proof_pilot_markdown"
         return await self._continue_xml_raw(
             initial,
             messages,
@@ -578,9 +599,14 @@ class AsyncChatClient:
             seed=seed,
             request_id=request_id,
             role="solution",
-            opening_tag="<solution>",
-            force_steer=_FORCE_SOLUTION_STEER,
+            opening_tag="## Solution" if markdown else "<solution>",
+            force_steer=(
+                _FORCE_MARKDOWN_SOLUTION_STEER
+                if markdown
+                else _FORCE_SOLUTION_STEER
+            ),
             preserve_untagged_content=False,
+            unparsed_content_before_force=markdown,
         )
 
     async def continue_verification_raw(
@@ -593,7 +619,9 @@ class AsyncChatClient:
         top_p: float,
         seed: int,
         request_id: str,
+        profile: str = "ycchen_math_3r",
     ) -> dict:
+        markdown = profile == "proof_pilot_markdown"
         return await self._continue_xml_raw(
             initial,
             messages,
@@ -603,9 +631,18 @@ class AsyncChatClient:
             seed=seed,
             request_id=request_id,
             role="verifier",
-            opening_tag="<evaluation>",
-            force_steer=_FORCE_VERIFICATION_STEER,
-            preserve_untagged_content=True,
+            opening_tag=(
+                "Here is my evaluation of the solution:"
+                if markdown
+                else "<evaluation>"
+            ),
+            force_steer=(
+                _FORCE_MARKDOWN_VERIFICATION_STEER
+                if markdown
+                else _FORCE_VERIFICATION_STEER
+            ),
+            preserve_untagged_content=not markdown,
+            unparsed_content_before_force=markdown,
         )
 
     async def continue_selection_raw(

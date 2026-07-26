@@ -201,6 +201,68 @@ class AsyncClientTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_markdown_continuation_preserves_unparsed_output_as_reasoning(self):
+        async def run():
+            client = AsyncChatClient("http://127.0.0.1:30000/v1", "test-model")
+            tokenizer = FakeTokenizer()
+            client._tokenizer = tokenizer
+
+            async def post_native(path: str, payload: dict) -> tuple[dict, float]:
+                return (
+                    {
+                        "text": (
+                            "A rigorous final proof.\n\n"
+                            "## Self Evaluation\n"
+                            "Here is my evaluation of the solution: it is complete.\n"
+                            "Based on my evaluation, the final overall score should be:\n"
+                            "\\boxed{1}"
+                        ),
+                        "output_ids": [60, 61],
+                        "meta_info": {
+                            "finish_reason": "stop",
+                            "prompt_tokens": 50020,
+                            "completion_tokens": 2,
+                        },
+                    },
+                    1.5,
+                )
+
+            client._post_native = post_native
+            try:
+                result = await client.continue_solution_raw(
+                    initial_response(
+                        reasoning="",
+                        content="Useful unfinished OLMo reasoning.",
+                    ),
+                    [{"role": "user", "content": "problem"}],
+                    max_new_tokens=8192,
+                    temperature=1.0,
+                    top_p=0.95,
+                    seed=11,
+                    request_id="markdown",
+                    profile="proof_pilot_markdown",
+                )
+            finally:
+                await client.aclose()
+
+            self.assertTrue(
+                tokenizer.encoded[0].endswith(
+                    "Useful unfinished OLMo reasoning."
+                    "\nWe should now write the final solution due time limit.\n"
+                    "</think>\n\n## Solution\n"
+                )
+            )
+            self.assertTrue(
+                result["message"]["content"].startswith("## Solution\n")
+            )
+            self.assertEqual(
+                result["message"]["reasoning_content"],
+                "Useful unfinished OLMo reasoning.",
+            )
+            self.assertTrue(result["segments"][1]["injected_solution_tag"])
+
+        asyncio.run(run())
+
     def test_thinking_only_verifier_uses_configured_native_continuation(self):
         async def run():
             client = AsyncChatClient("http://127.0.0.1:30000/v1", "test-model")
