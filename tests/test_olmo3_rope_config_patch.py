@@ -19,6 +19,7 @@ UNPATCHED = """class Olmo3Config:
         )
         self.vocab_size = 50304
         self.max_position_embeddings = max_position_embeddings
+        self.rope_scaling = rope_scaling
 """
 
 
@@ -29,7 +30,13 @@ class Olmo3RopeConfigPatchTests(unittest.TestCase):
             patched.index(PATCH.ASSIGNMENT),
             patched.index(PATCH.SUPER_CALL),
         )
+        self.assertLess(
+            patched.index(PATCH.ROPE_PARAMETERS_CAPTURE),
+            patched.index(PATCH.SUPER_CALL),
+        )
         self.assertEqual(patched.count(PATCH.ASSIGNMENT), 1)
+        self.assertEqual(patched.count(PATCH.ROPE_PARAMETERS_CAPTURE), 1)
+        self.assertEqual(patched.count(PATCH.ROPE_SCALING_PRESERVE), 1)
         self.assertEqual(PATCH.patch_source(patched), patched)
 
     def test_patch_rejects_unknown_source_shape(self):
@@ -37,6 +44,16 @@ class Olmo3RopeConfigPatchTests(unittest.TestCase):
             PATCH.patch_source(
                 UNPATCHED.replace(PATCH.ASSIGNMENT, "")
             )
+
+    def test_patch_upgrades_context_only_patch(self):
+        context_only = UNPATCHED.replace(PATCH.ASSIGNMENT, "", 1).replace(
+            PATCH.SUPER_CALL,
+            PATCH.MARKER + "\n" + PATCH.ASSIGNMENT + PATCH.SUPER_CALL,
+            1,
+        )
+        patched = PATCH.patch_source(context_only)
+        self.assertEqual(patched.count(PATCH.ROPE_PARAMETERS_CAPTURE), 1)
+        self.assertEqual(patched.count(PATCH.ROPE_SCALING_PRESERVE), 1)
 
     def test_patch_venv_creates_backup_and_clears_bytecode(self):
         with tempfile.TemporaryDirectory() as tmp:
