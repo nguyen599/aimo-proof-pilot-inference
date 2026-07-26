@@ -168,6 +168,40 @@ class CompleteXMLAtLengthClient(ScriptedClient):
         raise AssertionError("complete XML must not receive a continuation")
 
 
+class CompleteMarkdownAtLengthClient(ScriptedClient):
+    def __init__(self):
+        super().__init__()
+        self.continuation_calls = 0
+
+    async def chat_raw(self, messages, *, request_id, **kwargs):
+        response = await super().chat_raw(
+            messages, request_id=request_id, **kwargs
+        )
+        if "/verify/" in request_id:
+            response["message"]["content"] = (
+                "Here is my evaluation of the solution: the proof is valid.\n\n"
+                "Based on my evaluation, the final overall score should be:\n"
+                "\\boxed{1}"
+            )
+        elif "/generate/" in request_id:
+            response.update(
+                finish_reason="length",
+                physical_request_count=1,
+                segments=[{"kind": "chat", "finish_reason": "length"}],
+            )
+            response["message"]["content"] = (
+                "## Solution\nA complete rigorous proof.\n\n"
+                "## Self Evaluation\nEvery step was checked.\n\n"
+                "Based on my evaluation, the final overall score should be:\n"
+                "\\boxed{1}"
+            )
+        return response
+
+    async def continue_solution_raw(self, initial, messages, **kwargs):
+        self.continuation_calls += 1
+        raise AssertionError("complete Markdown must not receive an XML continuation")
+
+
 class LengthVerifierContinuationClient(ScriptedClient):
     def __init__(self, *, invalid_continuation: bool = False):
         super().__init__()
@@ -540,6 +574,44 @@ class ProofSearchTests(unittest.TestCase):
             parse_generation("No formatted proof.", profile=profile)
         with self.assertRaises(ValueError):
             parse_verification("No boxed score.", profile=profile)
+
+    def test_proof_pilot_profile_reaches_call_store_length_validation(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as directory:
+                config = small_config()
+                config.update(
+                    max_rounds=1,
+                    prompt_profile="proof_pilot_markdown",
+                )
+                client = CompleteMarkdownAtLengthClient()
+                search = ProblemSearch(
+                    problem_id="markdown-length",
+                    problem="Prove the claim.",
+                    output_dir=Path(directory),
+                    client=client,
+                    semaphore=asyncio.Semaphore(4),
+                    config=config,
+                )
+
+                final = await search.solve()
+                records = [
+                    record
+                    for record in search.calls.records.values()
+                    if record["stage"].endswith("/generate")
+                ]
+
+                self.assertEqual(client.continuation_calls, 0)
+                self.assertTrue(records)
+                self.assertTrue(all(record["xml_valid"] for record in records))
+                self.assertTrue(
+                    all(record["xml_complete_after_length"] for record in records)
+                )
+                self.assertIn(
+                    final["selected_proof_id"],
+                    {"r01-p0000", "r01-p0001"},
+                )
+
+        asyncio.run(run())
 
     def test_nonideal_reviews_are_sampled_deterministically(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -174,6 +174,7 @@ class CallStore:
         top_p: float,
         spec: CallSpec,
         lenient: bool = True,
+        prompt_profile: str = "ycchen_math_3r",
         stream_detect: bool = False,
         filter_degenerate: bool = True,
         selection_continuation_tokens: int = 2048,
@@ -228,7 +229,11 @@ class CallStore:
                 xml_error = None
                 if parser is not None:
                     try:
-                        parser(content, lenient=lenient)
+                        parser(
+                            content,
+                            lenient=lenient,
+                            profile=prompt_profile,
+                        )
                     except ValueError as error:
                         xml_error = str(error)
                     else:
@@ -275,7 +280,11 @@ class CallStore:
                     content = response["message"].get("content") or ""
                     if parser is not None:
                         try:
-                            parser(content, lenient=lenient)
+                            parser(
+                                content,
+                                lenient=lenient,
+                                profile=prompt_profile,
+                            )
                         except ValueError as error:
                             xml_valid = False
                             xml_error = str(error)
@@ -405,6 +414,7 @@ class ProblemSearch:
             self.config["top_p"],
             spec,
             lenient=self.config.get("lenient_parsing", True),
+            prompt_profile=self.config.get("prompt_profile", "ycchen_math_3r"),
             stream_detect=self.config.get("stream_detect", False),
             filter_degenerate=self.config.get("filter_degenerate", True),
             selection_continuation_tokens=int(
