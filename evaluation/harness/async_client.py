@@ -108,12 +108,20 @@ class AsyncChatClient:
         *,
         max_connections: int = 1000,
         timeout: float = 3600.0,
+        context_length: int | None = None,
+        context_margin_tokens: int = 128,
     ):
+        if context_length is not None and context_length <= 0:
+            raise ValueError("context_length must be positive when provided")
+        if context_margin_tokens < 0:
+            raise ValueError("context_margin_tokens must be nonnegative")
         self.base_url = base_url.rstrip("/")
         self.native_base_url = (
             self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
         )
         self.model = model
+        self.context_length = context_length
+        self.context_margin_tokens = context_margin_tokens
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -161,6 +169,31 @@ class AsyncChatClient:
                 raise RuntimeError(f"invalid tokenize count: {count!r}")
             self._token_counts[key] = count
         return self._token_counts[key]
+
+    async def fit_completion_budget(
+        self,
+        messages: list[dict],
+        *,
+        requested_tokens: int,
+        reserve_tokens: int = 0,
+    ) -> tuple[int, int | None]:
+        """Fit a first completion while preserving room for forced finalization."""
+        if self.context_length is None:
+            return requested_tokens, None
+        prompt_tokens = await self.token_count(messages)
+        available = (
+            self.context_length
+            - prompt_tokens
+            - reserve_tokens
+            - self.context_margin_tokens
+        )
+        if available <= 0:
+            raise RuntimeError(
+                "prompt leaves no completion budget: "
+                f"context={self.context_length} prompt={prompt_tokens} "
+                f"reserve={reserve_tokens} margin={self.context_margin_tokens}"
+            )
+        return min(requested_tokens, available), prompt_tokens
 
     async def chat_raw(
         self,
@@ -496,13 +529,27 @@ class AsyncChatClient:
             preserve_untagged_content=preserve_untagged_content,
             unparsed_content_before_force=unparsed_content_before_force,
         )
+        effective_max_new_tokens = max_new_tokens
+        if self.context_length is not None:
+            effective_max_new_tokens = min(
+                max_new_tokens,
+                self.context_length
+                - len(input_ids)
+                - self.context_margin_tokens,
+            )
+            if effective_max_new_tokens <= 0:
+                raise RuntimeError(
+                    "continuation prefix leaves no generation budget: "
+                    f"context={self.context_length} input={len(input_ids)} "
+                    f"margin={self.context_margin_tokens}"
+                )
         continuation_id = f"{request_id}/{role}-continuation"
         payload = {
             "input_ids": input_ids,
             "sampling_params": {
                 "temperature": temperature,
                 "top_p": top_p,
-                "max_new_tokens": max_new_tokens,
+                "max_new_tokens": effective_max_new_tokens,
                 "sampling_seed": seed,
             },
             "rid": continuation_id,
@@ -542,7 +589,8 @@ class AsyncChatClient:
             "prompt_tokens": native_prompt_tokens,
             "cached_prompt_tokens": meta.get("cached_tokens"),
             "completion_tokens": native_completion_tokens,
-            "requested_max_completion_tokens": max_new_tokens,
+            "requested_max_completion_tokens": effective_max_new_tokens,
+            "configured_max_completion_tokens": max_new_tokens,
             "input_tokens": len(input_ids),
             "input_ids_sha256": _ids_sha256(input_ids),
             "output_ids_sha256": _ids_sha256(output_ids),
@@ -565,9 +613,11 @@ class AsyncChatClient:
             "completion_tokens": _optional_sum(
                 initial.get("completion_tokens"), native_completion_tokens
             ),
-            requested_continuation_field: max_new_tokens,
+            requested_continuation_field: effective_max_new_tokens,
+            f"configured_{role}_continuation_tokens": max_new_tokens,
             "logical_max_completion_tokens": (
-                initial["requested_max_completion_tokens"] + max_new_tokens
+                initial["requested_max_completion_tokens"]
+                + effective_max_new_tokens
             ),
             "physical_request_count": 2,
             "physical_prompt_tokens": _optional_sum(

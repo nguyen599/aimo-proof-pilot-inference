@@ -42,6 +42,58 @@ def initial_response(*, reasoning: str, content: str) -> dict:
 
 
 class AsyncClientTests(unittest.TestCase):
+    def test_context_budget_preserves_60k_for_short_prompt(self):
+        async def run():
+            client = AsyncChatClient(
+                "http://127.0.0.1:30000/v1",
+                "test-model",
+                context_length=65536,
+                context_margin_tokens=128,
+            )
+
+            async def token_count(messages):
+                return 1000
+
+            client.token_count = token_count
+            try:
+                return await client.fit_completion_budget(
+                    [{"role": "user", "content": "short"}],
+                    requested_tokens=60000,
+                    reserve_tokens=4096,
+                )
+            finally:
+                await client.aclose()
+
+        budget, prompt_tokens = asyncio.run(run())
+        self.assertEqual(budget, 60000)
+        self.assertEqual(prompt_tokens, 1000)
+
+    def test_context_budget_reduces_reasoning_for_large_prompt(self):
+        async def run():
+            client = AsyncChatClient(
+                "http://127.0.0.1:30000/v1",
+                "test-model",
+                context_length=65536,
+                context_margin_tokens=128,
+            )
+
+            async def token_count(messages):
+                return 12000
+
+            client.token_count = token_count
+            try:
+                return await client.fit_completion_budget(
+                    [{"role": "user", "content": "large"}],
+                    requested_tokens=60000,
+                    reserve_tokens=4096,
+                )
+            finally:
+                await client.aclose()
+
+        budget, prompt_tokens = asyncio.run(run())
+        self.assertEqual(budget, 49312)
+        self.assertEqual(prompt_tokens, 12000)
+
     def test_completion_budget_is_forwarded_unchanged(self):
         async def run():
             client = AsyncChatClient("http://127.0.0.1:30000/v1", "test-model")
@@ -148,6 +200,56 @@ class AsyncClientTests(unittest.TestCase):
             self.assertTrue(result["segments"][1]["injected_solution_tag"])
 
         asyncio.run(run())
+
+    def test_native_continuation_is_clamped_to_exact_remaining_context(self):
+        async def run():
+            client = AsyncChatClient(
+                "http://127.0.0.1:30000/v1",
+                "test-model",
+                context_length=8,
+                context_margin_tokens=1,
+            )
+            tokenizer = FakeTokenizer()
+            client._tokenizer = tokenizer
+            native_calls: list[tuple[str, dict]] = []
+
+            async def post_native(path: str, payload: dict) -> tuple[dict, float]:
+                native_calls.append((path, payload))
+                return (
+                    {
+                        "text": "proof",
+                        "output_ids": [30],
+                        "meta_info": {
+                            "finish_reason": "stop",
+                            "prompt_tokens": 5,
+                            "completion_tokens": 1,
+                        },
+                    },
+                    0.1,
+                )
+
+            client._post_native = post_native
+            try:
+                result = await client.continue_solution_raw(
+                    initial_response(reasoning="reasoning", content=""),
+                    [{"role": "user", "content": "problem"}],
+                    max_new_tokens=4,
+                    temperature=1.0,
+                    top_p=0.95,
+                    seed=7,
+                    request_id="clamped",
+                )
+            finally:
+                await client.aclose()
+            return native_calls, result
+
+        native_calls, result = asyncio.run(run())
+        self.assertEqual(
+            native_calls[0][1]["sampling_params"]["max_new_tokens"],
+            2,
+        )
+        self.assertEqual(result["requested_solution_continuation_tokens"], 2)
+        self.assertEqual(result["configured_solution_continuation_tokens"], 4)
 
     def test_partial_solution_continues_without_duplicate_solution_tag(self):
         async def run():
