@@ -685,9 +685,13 @@ class ProblemSearch:
         refinement_pool: list[Proof] | None = None,
     ) -> list[Candidate]:
         stage = f"round-{round_index:02d}/generate"
+        prompt_profile = self.config.get("prompt_profile", "ycchen_math_3r")
         candidates: list[Candidate] = []
         if round_index == 1:
-            messages = generation_messages(self.problem)
+            messages = generation_messages(
+                self.problem,
+                profile=prompt_profile,
+            )
             for index in range(self.config["proofs_per_round"]):
                 proof_id = f"r{round_index:02d}-p{index:04d}"
                 candidates.append(
@@ -746,7 +750,11 @@ class ProblemSearch:
                     )
                     for parent in groups[call_index]
                 ]
-                messages = refinement_messages(self.problem, bundle)
+                messages = refinement_messages(
+                    self.problem,
+                    bundle,
+                    profile=prompt_profile,
+                )
                 candidates.append(
                     Candidate(
                         proof_id=proof_id,
@@ -807,6 +815,7 @@ class ProblemSearch:
             proof_text, self_evaluation, self_score = parse_generation(
                 record["content"],
                 lenient=self.config.get("lenient_parsing", True),
+                profile=self.config.get("prompt_profile", "ycchen_math_3r"),
             )
         except ValueError:
             return None
@@ -838,6 +847,7 @@ class ProblemSearch:
             self.problem,
             proof.proof,
             self_evaluation,
+            profile=self.config.get("prompt_profile", "ycchen_math_3r"),
         )
         specs = [
             self._spec(f"{stage}/v{index:03d}", stage, messages)
@@ -860,6 +870,7 @@ class ProblemSearch:
             analysis, score = parse_verification(
                 record["content"],
                 lenient=self.config.get("lenient_parsing", True),
+                profile=self.config.get("prompt_profile", "ycchen_math_3r"),
             )
             verifications.append(
                 Verification(

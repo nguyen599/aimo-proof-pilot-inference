@@ -90,6 +90,7 @@ SEARCH_KEYS = {
 #     best * (1 - selection_score_window) -- a FRACTION of the best (multiplicative, so it
 #     equals best-0.2 only when best == 1.0), so a 1.0 is never pitted against a 0.3.
 OPTIONAL_SEARCH_KEYS = {
+    "prompt_profile",
     "llm_selector",
     "selection_votes",
     "selection_candidates",
@@ -309,6 +310,14 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("search.filter_degenerate must be a boolean")
     if type(search["stream_detect"]) is not bool:
         raise ValueError("search.stream_detect must be a boolean")
+    if search.get("prompt_profile", "ycchen_math_3r") not in {
+        "ycchen_math_3r",
+        "proof_pilot_markdown",
+    }:
+        raise ValueError(
+            "search.prompt_profile must be 'ycchen_math_3r' or "
+            "'proof_pilot_markdown'"
+        )
     if "llm_selector" in search and type(search["llm_selector"]) is not bool:
         raise ValueError("search.llm_selector must be a boolean")
     if "selection_votes" in search:
