@@ -1,0 +1,107 @@
+# IMO-2026 full benchmark for the plain OLMo3 SFT-v2 step-1000 checkpoint.
+# This variant uses the Markdown prompts/parser from aimo-proof-pilot/src/run.py.
+# medium: proofs_per_round=32, verifications_per_proof=16,
+#     top_proofs=8, refine_parents=4, reviews_per_refine_parent=3, max_rounds=4.
+schema_version: 12
+
+models:
+  bf16_target: /tmp/models/allenai-Olmo-3.1-32B-Think-aimo-proof-pilot-sft-v2-ckpt-1000
+  # quantized_* are inactive (quantized: false); paths must be absolute per schema.
+  quantized_target: /workspace/models/opd-32b-v33-s200-gptq-w4a16
+  bf16_draft: /tmp/models/unused-draft
+  quantized_draft: /workspace/models/dflash-32b-draft-v2test-phaseL-int4mlp
+
+model:
+  tensor_parallel_size: 2
+  data_parallel_size: 4
+  quantized: false
+  dflash: false
+  kv_cache_dtype: auto
+
+server:
+  attention_backend: fa3
+  page_size: 1
+  deterministic_inference: false
+  host: 127.0.0.1
+  port: 30000
+  context_length: 65536
+  mem_fraction_static: 0.82
+  max_running_requests: 64
+  swa_full_tokens_ratio: 0.2
+  chunked_prefill_size: 2048
+  stream_interval: 16
+  # This OLMo tokenizer does not encode </think> as one token, which SGLang's
+  # deepseek-r1 reasoning parser requires. The harness consumes raw text.
+  reasoning_parser: null
+  # SGLang's default 300-second watchdog crashed a long P6 generation.
+  watchdog_timeout: 1200
+  prefill_cuda_graph_backend: tc_piecewise
+  dflash_block_size: 8
+  dflash_num_draft_tokens: 8
+  dflash_window_size: 512
+
+search:
+  prompt_profile: proof_pilot_markdown
+  # Reject failed force-finalization artifacts such as a lone </think>.
+  min_proof_characters: 1000
+  proofs_per_round: 32
+  verifications_per_proof: 16
+  top_proofs: 8
+  # Each refine call merges four stratified-random parents from the top pool,
+  # with up to three random non-ideal reviews per parent.
+  refine_parents: 4
+  reviews_per_refine_parent: 3
+  refine_review_strategy: random_nonideal
+  # Four total rounds: one initial generation plus up to three refinements.
+  max_rounds: 4
+  early_stop_threshold: 0.99999
+  temperature: 1.0
+  top_p: 0.95
+  # Preserve 4k context for forced finalization within the 65,536-token model.
+  max_completion_tokens: 60000
+  solution_continuation_tokens: 4096
+  # Force an unparseable verifier to stop deliberating and write its evaluation.
+  verifier_thinking_budget_tokens: 60000
+  verifier_continuation_tokens: 4096
+  min_valid_verifications: 4
+  verifier_sees_self_evaluation: true
+  refiner_sees_self_evaluation: false
+  lenient_parsing: true
+  filter_degenerate: true
+  stream_detect: true
+  request_timeout_seconds: 86400
+  concurrency: 96
+  seed: 0
+  # LLM final-solution selector.
+  llm_selector: true
+  selection_votes: 16
+  selection_candidates: 4
+  selection_max_tokens: 50000
+  selection_continuation_tokens: 2048
+  # Medium-budget tournament selection.
+  selection_tournament: true
+  selection_tournament_threshold: 0.95
+  selection_tournament_rounds: 32
+  selection_tournament_max_candidates: 10
+  selection_score_window: 0.2
+
+# Periodically upload the complete artifact tree and once again at shutdown.
+traces:
+  enabled: true
+  dataset_repo: imo2026-challenge/chankhavu-imo-reasoning-traces
+  # Use ambient HF_TOKEN or `hf auth login`.
+  secrets_file: ""
+  interval_seconds: 600
+  private: true
+  run_name: imo2026-olmo31-sft-v2-ckpt1000-medium-proof-pilot-full
+
+# Deduplicate only the review pool used for refinement. All verifier outputs
+# still contribute to scoring and final selection.
+review_dedup:
+  enabled: true
+  backend: minhash_lsh
+  # ceil(16 * 0.59) = 10 retained reviews.
+  keep_ratio: 0.59
+  shingle_size: 1
+  num_perm: 128
+  lsh_threshold: 0.3
