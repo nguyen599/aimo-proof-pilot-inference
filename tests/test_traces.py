@@ -219,5 +219,25 @@ class UploadOnceTests(unittest.TestCase):
             self.assertFalse(up.upload_once("periodic"))
 
 
+class TracesConfigTests(unittest.TestCase):
+    def test_runtime_override_disables_uploads(self):
+        from unittest.mock import patch
+
+        from trace_uploader import traces_config
+
+        config = {"traces": {"enabled": True}}
+        with patch.dict("os.environ", {"IMO_DISABLE_TRACE_UPLOADS": "true"}):
+            self.assertIsNone(traces_config(config))
+
+    def test_enabled_config_is_returned_without_override(self):
+        from unittest.mock import patch
+
+        from trace_uploader import traces_config
+
+        traces = {"enabled": True}
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIs(traces_config({"traces": traces}), traces)
+
+
 if __name__ == "__main__":
     unittest.main()

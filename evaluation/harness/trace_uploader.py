@@ -23,6 +23,7 @@ and swallowed: a flaky network must never kill a multi-hour proof run.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -218,6 +219,9 @@ class TraceUploader:
 
 def traces_config(config: dict[str, Any]) -> dict[str, Any] | None:
     """The traces section iff uploads are enabled, else None."""
+    disable = os.environ.get("IMO_DISABLE_TRACE_UPLOADS", "").strip().lower()
+    if disable in {"1", "true", "yes", "on"}:
+        return None
     traces = config.get("traces")
     if isinstance(traces, dict) and traces.get("enabled"):
         return traces
