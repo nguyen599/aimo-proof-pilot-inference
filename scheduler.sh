@@ -7,7 +7,7 @@
 # only the servers launched for this run.
 #
 # Usage:
-#   ./scheduler.sh <config> <output-dir> [input.csv]     # start a run
+#   ./scheduler.sh [--shard-count N --shard-index I] <config> <output-dir> [input.csv]
 #   ./scheduler.sh --resume <output-dir>                 # continue a crashed/stopped run
 #
 #   <config>      a config NAME from this repo (e.g. config-model-step225-budget-xhigh.yaml) or a path
@@ -17,6 +17,8 @@
 #
 #   -r, --resume  continue the run in <output-dir>, reusing its pinned config + input
 #                 (no need to re-specify them); finished problems are skipped
+#   --shard-count split selected rows into N round-robin shards (default 1)
+#   --shard-index run zero-based shard I (default 0); persisted for --resume
 #   -n, --plan    resolve + validate everything and print the plan, but do NOT launch
 #   -h, --help    show this help
 #
@@ -58,15 +60,33 @@ usage() {
 # --- argument parsing -------------------------------------------------------
 PLAN=0
 RESUME=0
+SHARD_COUNT=1
+SHARD_INDEX=0
 while [[ "${1:-}" == -* ]]; do
     case "$1" in
         -h|--help)   usage 0 ;;
         -n|--plan)   PLAN=1;   shift ;;
         -r|--resume) RESUME=1; shift ;;
+        --shard-count)
+            [[ -n "${2:-}" ]] || die "--shard-count needs an integer"
+            SHARD_COUNT="$2"
+            shift 2
+            ;;
+        --shard-index)
+            [[ -n "${2:-}" ]] || die "--shard-index needs an integer"
+            SHARD_INDEX="$2"
+            shift 2
+            ;;
         --)          shift; break ;;
         *)           die "unknown option: $1 (see --help)" ;;
     esac
 done
+[[ "$SHARD_COUNT" =~ ^[1-9][0-9]*$ ]] \
+    || die "--shard-count must be an integer >= 1"
+[[ "$SHARD_INDEX" =~ ^[0-9]+$ ]] \
+    || die "--shard-index must be an integer >= 0"
+(( SHARD_INDEX < SHARD_COUNT )) \
+    || die "--shard-index must be less than --shard-count"
 
 if [[ "$RESUME" == "1" ]]; then
     # ./scheduler.sh --resume <output-dir> : reuse the run's pinned config + input.
@@ -104,6 +124,14 @@ fi
 _py="$(command -v "$PYTHON" 2>/dev/null || true)"
 [[ -n "$_py" ]] || die "python not found: $PYTHON -- set VENV to the runtime venv (VENV=/path/to/venv) or 'source .../activate-env.sh' and set PYTHON"
 PYTHON="$_py"; unset _py
+
+if [[ "$RESUME" == "1" && -f "$OUTPUT_DIR/artifacts/selection.json" ]]; then
+    read -r SHARD_COUNT SHARD_INDEX < <(
+        "$PYTHON" -c \
+            'import json,sys; x=json.load(open(sys.argv[1])); print(x["shard_count"], x["shard_index"])' \
+            "$OUTPUT_DIR/artifacts/selection.json"
+    )
+fi
 
 # --- output layout ----------------------------------------------------------
 SERVER_LOG="$OUTPUT_DIR/server.log"
@@ -147,6 +175,7 @@ REVIEW_DEDUP_HEALTH_URL="$(read_optional_field review_dedup_health_url)"
 log "config       : $CONFIG"
 log "input        : $INPUT"
 log "output dir   : $OUTPUT_DIR"
+log "shard        : $SHARD_INDEX/$SHARD_COUNT"
 log "server       : $SERVER_URL (port $SERVER_PORT, expects $GPU_COUNT GPUs)"
 log "target model : $TARGET_MODEL"
 if [[ "$REVIEW_DEDUP_ENABLED" == "1" ]]; then
@@ -371,7 +400,9 @@ log "running inference over all problems in $(basename "$INPUT")"
     --config "$CONFIG" \
     --input "$INPUT" \
     --output "$SUBMISSION_CSV" \
-    --artifacts-dir "$ARTIFACTS_DIR"
+    --artifacts-dir "$ARTIFACTS_DIR" \
+    --shard-count "$SHARD_COUNT" \
+    --shard-index "$SHARD_INDEX"
 
 log "inference complete -> $SUBMISSION_CSV"
 # teardown() runs on EXIT and stops the server.

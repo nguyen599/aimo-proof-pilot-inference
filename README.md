@@ -67,6 +67,23 @@ Finished problems are skipped and a partially-done problem resumes from its last
 completed round. (Running outside the container? Point `VENV` at the runtime venv,
 or `source` its `activate-env.sh` and set `PYTHON`; everything else is identical.)
 
+**Two nodes with a shared filesystem:** run one command per node with a distinct
+zero-based `SHARD_INDEX`. Each node starts its own local server and processes a
+round-robin subset. The last successful node validates and writes the merged
+`submission.csv` in original input order:
+
+```bash
+# node A
+SHARD_COUNT=2 SHARD_INDEX=0 ./run_multinode_shard.sh CONFIG SHARED_OUTPUT
+
+# node B
+SHARD_COUNT=2 SHARD_INDEX=1 ./run_multinode_shard.sh CONFIG SHARED_OUTPUT
+```
+
+Per-node outputs live under `SHARED_OUTPUT/shards/shard-{0,1}`. Resume a stopped
+rank with the same `SHARD_INDEX` and `RESUME=1`; shard selection is pinned in
+`artifacts/selection.json`.
+
 ### Models
 
 `download_models.sh` fetches these into `/workspace/models/` from public,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import json
 import os
 import shutil
 from dataclasses import dataclass
@@ -70,6 +71,24 @@ def select_problems(
     return selected
 
 
+def select_shard(
+    rows: list["InputRow"], shard_count: int = 1, shard_index: int = 0
+) -> list["InputRow"]:
+    """Select one deterministic round-robin shard from already-filtered rows."""
+    if shard_count < 1:
+        raise ValueError("shard_count must be >= 1")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError(
+            f"shard_index must be in [0, {shard_count}); got {shard_index}"
+        )
+    selected = rows[shard_index::shard_count]
+    if not selected:
+        raise ValueError(
+            f"shard {shard_index}/{shard_count} is empty for {len(rows)} row(s)"
+        )
+    return selected
+
+
 def load_test_csv(path: Path) -> list[InputRow]:
     with path.open(newline="", encoding="utf-8-sig") as source:
         reader = csv.DictReader(source)
@@ -115,6 +134,32 @@ def pin_file(source: Path, destination: Path) -> None:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
+
+
+def pin_selection(
+    path: Path,
+    *,
+    problems: str,
+    limit: int,
+    shard_count: int,
+    shard_index: int,
+    rows: list[InputRow],
+) -> None:
+    selection = {
+        "problems": problems,
+        "limit": limit,
+        "shard_count": shard_count,
+        "shard_index": shard_index,
+        "selected_ids": [row.id for row in rows],
+    }
+    encoded = json.dumps(selection, indent=2, sort_keys=True) + "\n"
+    if path.exists():
+        if path.read_text(encoding="utf-8") != encoded:
+            raise RuntimeError(
+                f"submission resume selection differs from pinned file: {path}"
+            )
+        return
+    path.write_text(encoded, encoding="utf-8")
 
 
 def load_existing_submission(path: Path, rows: list[InputRow]) -> list[str]:
@@ -171,17 +216,27 @@ async def run_submission(
     artifacts_dir: Path,
     problems: str = "all",
     limit: int = 0,
+    shard_count: int = 1,
+    shard_index: int = 0,
 ) -> None:
     config_path = config_path.resolve()
     input_path = input_path.resolve()
     output_path = output_path.resolve()
     artifacts_dir = artifacts_dir.resolve()
-    rows = load_test_csv(input_path)
-    rows = select_problems(rows, problems=problems, limit=limit)
-    if problems != "all" or limit > 0:
+    all_rows = load_test_csv(input_path)
+    rows = select_problems(all_rows, problems=problems, limit=limit)
+    rows = select_shard(rows, shard_count=shard_count, shard_index=shard_index)
+    if problems != "all" or limit > 0 or shard_count > 1:
         print(
-            "[submission] problem selection: problems={} limit={} -> {} problem(s) "
-            "ids={}".format(problems, limit, len(rows), [row.id for row in rows]),
+            "[submission] problem selection: problems={} limit={} shard={}/{} "
+            "-> {} problem(s) ids={}".format(
+                problems,
+                limit,
+                shard_index,
+                shard_count,
+                len(rows),
+                [row.id for row in rows],
+            ),
             flush=True,
         )
     config = load_config(config_path)
@@ -190,9 +245,18 @@ async def run_submission(
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     pinned_input = artifacts_dir / "test.csv"
     pinned_config = artifacts_dir / "config.yaml"
+    pinned_selection = artifacts_dir / "selection.json"
     is_resume = pinned_input.exists() and pinned_config.exists()
     pin_file(input_path, pinned_input)
     pin_file(config_path, pinned_config)
+    pin_selection(
+        pinned_selection,
+        problems=problems,
+        limit=limit,
+        shard_count=shard_count,
+        shard_index=shard_index,
+        rows=rows,
+    )
 
     server = config["server"]
     client = AsyncChatClient(
@@ -265,6 +329,10 @@ async def run_submission(
             traces = None
     if traces is not None:
         run_name = resolve_run_name(traces["run_name"], model.target)
+        if shard_count > 1:
+            run_name = (
+                f"{run_name}/shard-{shard_index:02d}-of-{shard_count:02d}"
+            )
         uploader = TraceUploader(
             artifacts_dir=artifacts_dir,
             dataset_repo=traces["dataset_repo"],
@@ -370,9 +438,25 @@ def main() -> None:
             "Composes with --problems; this is the 'number of problems' knob."
         ),
     )
+    parser.add_argument(
+        "--shard-count",
+        default=1,
+        type=int,
+        help="Split selected rows into this many round-robin shards (default: 1).",
+    )
+    parser.add_argument(
+        "--shard-index",
+        default=0,
+        type=int,
+        help="Zero-based shard to execute (default: 0).",
+    )
     args = parser.parse_args()
     if args.limit < 0:
         parser.error("--limit must be >= 0")
+    if args.shard_count < 1:
+        parser.error("--shard-count must be >= 1")
+    if args.shard_index < 0 or args.shard_index >= args.shard_count:
+        parser.error("--shard-index must be in [0, --shard-count)")
     asyncio.run(
         run_submission(
             args.config,
@@ -381,6 +465,8 @@ def main() -> None:
             args.artifacts_dir,
             problems=args.problems,
             limit=args.limit,
+            shard_count=args.shard_count,
+            shard_index=args.shard_index,
         )
     )
 

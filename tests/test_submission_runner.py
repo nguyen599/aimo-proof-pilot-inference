@@ -11,7 +11,7 @@ HARNESS = REPO / "evaluation" / "harness"
 sys.path.insert(0, str(HARNESS))
 
 import run_submission as submission_runner
-from run_submission import InputRow, load_test_csv, write_submission
+from run_submission import InputRow, load_test_csv, select_shard, write_submission
 
 
 class SubmissionCsvTests(unittest.TestCase):
@@ -89,6 +89,26 @@ class SubmissionCsvTests(unittest.TestCase):
                     list(csv.DictReader(source)),
                     [{"id": "0", "proof": "proof A"}],
                 )
+
+    def test_round_robin_shards_are_disjoint_and_cover_input(self):
+        rows = [InputRow(str(index), f"Problem {index}") for index in range(6)]
+        self.assertEqual(
+            [row.id for row in select_shard(rows, shard_count=2, shard_index=0)],
+            ["0", "2", "4"],
+        )
+        self.assertEqual(
+            [row.id for row in select_shard(rows, shard_count=2, shard_index=1)],
+            ["1", "3", "5"],
+        )
+
+    def test_rejects_invalid_or_empty_shards(self):
+        rows = [InputRow("0", "Problem 0")]
+        with self.assertRaisesRegex(ValueError, "shard_count"):
+            select_shard(rows, shard_count=0, shard_index=0)
+        with self.assertRaisesRegex(ValueError, "shard_index"):
+            select_shard(rows, shard_count=2, shard_index=2)
+        with self.assertRaisesRegex(ValueError, "empty"):
+            select_shard(rows, shard_count=2, shard_index=1)
 
 
 class SubmissionRunnerTests(unittest.IsolatedAsyncioTestCase):
